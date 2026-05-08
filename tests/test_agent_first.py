@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -246,3 +247,28 @@ def test_summarize_and_evidence_use_current_session(tmp_path: Path) -> None:
     assert payload["event_counts"]["tool.call"] == 1
     assert payload["event_counts"]["tool.result"] == 1
     assert "tool.result python exit=0" in evidence.stdout
+
+
+def test_review_and_memory_commands_can_rebuild_concurrently(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("session", "ensure", "--id", "concurrent-review", "--title", "Concurrent Review", cwd=repo)
+    for index in range(6):
+        body = tmp_path / f"body-{index}.txt"
+        body.write_text(f"concurrent rebuild marker {index}", encoding="utf-8")
+        run_cli("emit", "--type", "agent.message", "--body", str(body), cwd=repo)
+
+    db_path = repo / ".agentdir" / "indexes" / "agentdir.sqlite3"
+    if db_path.exists():
+        db_path.unlink()
+
+    commands = [
+        ("summarize", "--json"),
+        ("evidence",),
+        ("memory", "search", "concurrent rebuild marker", "--json"),
+    ]
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        results = list(executor.map(lambda args: run_cli(*args, cwd=repo), commands))
+
+    assert all(result.returncode == 0 for result in results)
+    assert db_path.is_file()

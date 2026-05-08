@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer machines.
+    fcntl = None
 
 from .envelope import parse_envelope, validate_required
 from .mailbox import iter_records
@@ -100,23 +107,43 @@ def connect_index(root: str | Path) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def index_rebuild_lock(indexes: Path):
+    indexes.mkdir(parents=True, exist_ok=True)
+    lock_path = indexes / ".agentdir-index.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def rebuild_index(root: str | Path) -> IndexResult:
     paths = require_root(root)
-    paths.indexes.mkdir(parents=True, exist_ok=True)
-    temp_path = paths.index_path.with_suffix(".sqlite3.tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-    conn = sqlite3.connect(temp_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("pragma foreign_keys = on")
-        initialize_schema(conn)
-        result = _index_into(conn, root)
-        conn.commit()
-    finally:
-        conn.close()
-    os.replace(temp_path, paths.index_path)
-    return result
+    with index_rebuild_lock(paths.indexes):
+        temp_path = paths.index_path.with_name(
+            f"{paths.index_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        conn = sqlite3.connect(temp_path)
+        conn.row_factory = sqlite3.Row
+        replaced = False
+        try:
+            conn.execute("pragma foreign_keys = on")
+            initialize_schema(conn)
+            result = _index_into(conn, root)
+            conn.commit()
+            conn.close()
+            os.replace(temp_path, paths.index_path)
+            replaced = True
+            return result
+        finally:
+            if not replaced:
+                conn.close()
+            if not replaced and temp_path.exists():
+                temp_path.unlink()
 
 
 def update_index(root: str | Path) -> IndexResult:
