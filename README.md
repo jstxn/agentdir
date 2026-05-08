@@ -22,14 +22,38 @@ AgentDir stores those records as immutable message envelopes in a Maildir-like d
 
 ## Project Status
 
-This directory currently contains the product and technical planning package for the first build.
+This directory contains the first installable V1 build plus the product and technical planning package.
 
 - [PRD](docs/PRD.md)
 - [Technical Brief](docs/TECH_BRIEF.md)
+- [Install Guide](docs/INSTALL.md)
+- [Agentic Coding Guide](docs/AGENTIC_CODING.md)
+- [Release Guide](docs/RELEASING.md)
 - [Commit Plan](tasks/COMMIT_PLAN.md)
 - [Task Backlog](tasks/BACKLOG.md)
 - [Open Questions](tasks/OPEN_QUESTIONS.md)
 - [Architecture Decision Records](decisions/0001-agentdir-mailstore.md)
+
+## Install From GitHub Release
+
+AgentDir is distributed through GitHub Releases. For the private `jstxn/agentdir` repo, authenticate GitHub CLI first:
+
+```bash
+gh auth login
+```
+
+Install the latest V1 release:
+
+```bash
+tmpdir="$(mktemp -d)"
+gh release download v0.1.0 \
+  --repo jstxn/agentdir \
+  --pattern install-agentdir.sh \
+  --dir "$tmpdir"
+bash "$tmpdir/install-agentdir.sh"
+```
+
+The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
 
 ## Initial V1 Shape
 
@@ -80,6 +104,8 @@ Run the dogfood demo:
 ```bash
 bash examples/dogfood-session.sh
 ```
+
+Agentic coding recipes are in [docs/AGENTIC_CODING.md](docs/AGENTIC_CODING.md).
 
 ## Verification
 
