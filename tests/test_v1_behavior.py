@@ -130,6 +130,9 @@ def test_init_creates_v1_root_layout(tmp_path: Path) -> None:
     assert (root / "actors").is_dir()
     assert (root / "artifacts" / "blobs" / "sha256").is_dir()
     assert (root / "indexes").is_dir()
+    assert (root / "state").is_dir()
+    assert (root / "hooks").is_dir()
+    assert (root / "integrations").is_dir()
 
 
 def test_project_scope_defaults_to_repo_hidden_agentdir(tmp_path: Path) -> None:

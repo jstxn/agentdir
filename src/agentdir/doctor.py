@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +8,7 @@ from pathlib import Path
 from .artifacts import artifact_path
 from .envelope import parse_envelope, validate_required
 from .mailbox import iter_records
+from .redaction import looks_secret_bearing
 from .store import discover_mailboxes, require_root
 
 
@@ -52,7 +52,7 @@ def run_doctor(root: str | Path) -> DoctorReport:
                 relative_path = str(record.path.relative_to(paths.root))
                 if parsed.message_id:
                     seen[parsed.message_id].append((relative_path, parsed.body_sha256))
-                if _looks_secret_bearing(parsed.body_text):
+                if looks_secret_bearing(parsed.body_text):
                     report.add_warning(f"{record.path}: body contains secret-like text")
                 for sha in parsed.message.get_all("X-AgentDir-Blob-SHA256", []):
                     if not artifact_path(root, sha).exists():
@@ -73,14 +73,4 @@ def run_doctor(root: str | Path) -> DoctorReport:
         if tmp.is_file():
             report.add_warning(f"incomplete tmp record ignored: {tmp.relative_to(paths.root)}")
     return report
-
-
-def _looks_secret_bearing(text: str) -> bool:
-    return any(pattern.search(text) for pattern in SECRET_PATTERNS)
-SECRET_PATTERNS = [
-    re.compile(r"gh[opsu]_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-]
 

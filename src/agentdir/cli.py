@@ -3,17 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .actors import create_actor, send_message
-from .artifacts import add_artifact, artifact_headers
+from .artifacts import add_artifact
+from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
 from .doctor import run_doctor
-from .envelope import build_envelope, envelope_bytes
+from .events import emit_event
+from .hooks import hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
-from .mailbox import atomic_deliver
 from .query import query_messages
 from .replay import replay_session
-from .store import AgentDirError, init_root, resolve_root, session_mailbox
+from .review import evidence_rows, format_evidence, format_summary, summarize_session
+from .sessions import end_session, read_current_session, start_session
+from .skills import install_codex_skill
+from .store import AgentDirError, init_root, resolve_root
 
 
 def read_body(path: str | None) -> str:
@@ -51,25 +56,28 @@ def command_root(args: argparse.Namespace, *, create: bool = False) -> Path:
 
 def cmd_emit(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
-    artifact = add_artifact(root, args.artifact) if args.artifact else None
-    message = build_envelope(
+    session = read_current_session(root) if not args.session else None
+    session_id = args.session or (session.session_id if session else None)
+    if not session_id:
+        session_id = start_session(root, title="AgentDir manual event").session_id
+    delivered = emit_event(
+        root,
+        session_id=session_id,
         event_type=args.type,
         body=read_body(args.body),
         subject=args.subject,
         from_actor=args.from_actor,
         to_actor=args.to_actor,
-        session_id=args.session,
         task_id=args.task,
         workspace=args.workspace,
         git_head=args.git_head,
         tool=args.tool,
         tool_exit_code=args.tool_exit_code,
         parent_message_id=args.parent,
-        artifact_headers=artifact_headers(artifact) if artifact else {},
+        artifact=args.artifact,
         message_id=args.message_id,
     )
-    delivered = atomic_deliver(session_mailbox(root, args.session), envelope_bytes(message))
-    print(delivered)
+    print(delivered.path)
     return 0
 
 
@@ -82,6 +90,7 @@ def cmd_actor_create(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
+    current = read_current_session(root) if not args.session else None
     inbox, outbox = send_message(
         root=root,
         from_actor=args.from_actor,
@@ -89,7 +98,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         event_type=args.type,
         body=read_body(args.body),
         subject=args.subject,
-        session_id=args.session,
+        session_id=args.session or (current.session_id if current else None),
         task_id=args.task,
         message_id=args.message_id,
     )
@@ -173,6 +182,165 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_session_start(args: argparse.Namespace) -> int:
+    state = start_session(
+        command_root(args, create=True),
+        session_id=args.session_id,
+        title=args.title,
+        actor=args.actor,
+        note=read_body(args.note) if args.note else None,
+    )
+    if args.json:
+        print_json(asdict(state))
+    else:
+        print(state.session_id)
+    return 0
+
+
+def cmd_session_current(args: argparse.Namespace) -> int:
+    state = read_current_session(command_root(args))
+    if state is None:
+        raise AgentDirError("No active AgentDir session")
+    if args.json:
+        print_json(asdict(state))
+    else:
+        print(state.session_id)
+    return 0
+
+
+def cmd_session_end(args: argparse.Namespace) -> int:
+    state = end_session(
+        command_root(args),
+        status=args.status,
+        summary=read_body(args.summary) if args.summary else None,
+        actor=args.actor,
+    )
+    if args.json:
+        print_json(asdict(state))
+    else:
+        print(state.session_id)
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise AgentDirError("Usage: agentdir run -- <command> [args...]")
+    return run_tool(
+        command_root(args, create=True),
+        argv=command,
+        session_id=args.session,
+        tool_name=args.name,
+        cwd=args.cwd,
+        max_capture_bytes=args.max_capture_bytes,
+        redact=not args.no_redact,
+    )
+
+
+def cmd_hooks_install(args: argparse.Namespace) -> int:
+    infos = install_hooks(
+        command_root(args, create=True),
+        hooks=args.hooks,
+        force=args.force,
+    )
+    if args.json:
+        print_json([asdict(info) for info in infos])
+    else:
+        for info in infos:
+            print(f"{info.hook}: installed {info.path}")
+    return 0
+
+
+def cmd_hooks_status(args: argparse.Namespace) -> int:
+    infos = hook_status(hooks=args.hooks)
+    if args.json:
+        print_json([asdict(info) for info in infos])
+    else:
+        for info in infos:
+            state = "managed" if info.managed else "unmanaged" if info.installed else "missing"
+            print(f"{info.hook}: {state} {info.path}")
+    return 0
+
+
+def cmd_hooks_uninstall(args: argparse.Namespace) -> int:
+    infos = uninstall_hooks(hooks=args.hooks)
+    if args.json:
+        print_json([asdict(info) for info in infos])
+    else:
+        for info in infos:
+            print(f"{info.hook}: {'installed' if info.installed else 'removed'} {info.path}")
+    return 0
+
+
+def cmd_hooks_record(args: argparse.Namespace) -> int:
+    hook_args = list(args.hook_args or [])
+    if hook_args and hook_args[0] == "--":
+        hook_args = hook_args[1:]
+    record_hook_event(
+        command_root(args, create=True),
+        hook=args.hook,
+        original_exit_code=args.original_exit_code,
+        stdin_file=args.stdin_file,
+        hook_args=hook_args,
+    )
+    return 0
+
+
+def cmd_skills_install_codex(args: argparse.Namespace) -> int:
+    installed = install_codex_skill(
+        command_root(args, create=True),
+        target=args.target,
+        force=args.force,
+    )
+    if args.json:
+        print_json({"target": installed.target, "path": str(installed.path)})
+    else:
+        print(installed.path)
+    return 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
+    skill = None
+    if args.codex_skill != "none":
+        skill = install_codex_skill(root, target=args.codex_skill, force=args.force)
+    result = {
+        "root": str(root),
+        "hooks": [asdict(info) for info in hooks],
+        "codex_skill": str(skill.path) if skill else None,
+    }
+    if args.json:
+        print_json(result)
+    else:
+        print(f"root={root}")
+        if hooks:
+            print(f"hooks={len(hooks)}")
+        if skill:
+            print(f"codex_skill={skill.path}")
+    return 0
+
+
+def cmd_summarize(args: argparse.Namespace) -> int:
+    summary = summarize_session(command_root(args), args.session)
+    if args.json:
+        print_json(summary)
+    else:
+        print(format_summary(summary))
+    return 0
+
+
+def cmd_evidence(args: argparse.Namespace) -> int:
+    rows = evidence_rows(command_root(args), args.session)
+    if args.json:
+        print_json(rows)
+    else:
+        print(format_evidence(rows))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -189,7 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     emit = sub.add_parser("emit")
     add_scope_args(emit)
-    emit.add_argument("--session", required=True)
+    emit.add_argument("--session")
     emit.add_argument("--type", required=True)
     emit.add_argument("--body")
     emit.add_argument("--subject")
@@ -204,6 +372,28 @@ def build_parser() -> argparse.ArgumentParser:
     emit.add_argument("--artifact")
     emit.add_argument("--message-id")
     emit.set_defaults(func=cmd_emit)
+
+    session = sub.add_parser("session")
+    session_sub = session.add_subparsers(dest="session_command", required=True)
+    session_start = session_sub.add_parser("start")
+    add_scope_args(session_start)
+    session_start.add_argument("--id", dest="session_id")
+    session_start.add_argument("--title")
+    session_start.add_argument("--actor", default="agent")
+    session_start.add_argument("--note")
+    session_start.add_argument("--json", action="store_true")
+    session_start.set_defaults(func=cmd_session_start)
+    session_current = session_sub.add_parser("current")
+    add_scope_args(session_current)
+    session_current.add_argument("--json", action="store_true")
+    session_current.set_defaults(func=cmd_session_current)
+    session_end = session_sub.add_parser("end")
+    add_scope_args(session_end)
+    session_end.add_argument("--status", default="completed")
+    session_end.add_argument("--summary")
+    session_end.add_argument("--actor", default="agent")
+    session_end.add_argument("--json", action="store_true")
+    session_end.set_defaults(func=cmd_session_end)
 
     actor = sub.add_parser("actor")
     actor_sub = actor.add_subparsers(dest="actor_command", required=True)
@@ -265,6 +455,71 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(doctor)
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=cmd_doctor)
+
+    run = sub.add_parser("run")
+    add_scope_args(run)
+    run.add_argument("--session")
+    run.add_argument("--name")
+    run.add_argument("--cwd")
+    run.add_argument("--max-capture-bytes", type=int, default=DEFAULT_MAX_CAPTURE_BYTES)
+    run.add_argument("--no-redact", action="store_true")
+    run.add_argument("command", nargs=argparse.REMAINDER)
+    run.set_defaults(func=cmd_run)
+
+    hooks = sub.add_parser("hooks")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
+    hooks_install = hooks_sub.add_parser("install")
+    add_scope_args(hooks_install)
+    hooks_install.add_argument("--hook", action="append", dest="hooks")
+    hooks_install.add_argument("--force", action="store_true")
+    hooks_install.add_argument("--json", action="store_true")
+    hooks_install.set_defaults(func=cmd_hooks_install)
+    hooks_status = hooks_sub.add_parser("status")
+    hooks_status.add_argument("--hook", action="append", dest="hooks")
+    hooks_status.add_argument("--json", action="store_true")
+    hooks_status.set_defaults(func=cmd_hooks_status)
+    hooks_uninstall = hooks_sub.add_parser("uninstall")
+    hooks_uninstall.add_argument("--hook", action="append", dest="hooks")
+    hooks_uninstall.add_argument("--json", action="store_true")
+    hooks_uninstall.set_defaults(func=cmd_hooks_uninstall)
+    hooks_record = hooks_sub.add_parser("record")
+    add_scope_args(hooks_record)
+    hooks_record.add_argument("--hook", required=True)
+    hooks_record.add_argument("--original-exit-code", type=int, required=True)
+    hooks_record.add_argument("--stdin-file")
+    hooks_record.add_argument("hook_args", nargs=argparse.REMAINDER)
+    hooks_record.set_defaults(func=cmd_hooks_record)
+
+    skills = sub.add_parser("skills")
+    skills_sub = skills.add_subparsers(dest="skills_command", required=True)
+    skills_install = skills_sub.add_parser("install")
+    skills_install_sub = skills_install.add_subparsers(dest="skill_name", required=True)
+    codex_skill = skills_install_sub.add_parser("codex")
+    add_scope_args(codex_skill)
+    codex_skill.add_argument("--target", choices=("user", "project", "store"), default="user")
+    codex_skill.add_argument("--force", action="store_true")
+    codex_skill.add_argument("--json", action="store_true")
+    codex_skill.set_defaults(func=cmd_skills_install_codex)
+
+    setup = sub.add_parser("setup")
+    add_scope_args(setup)
+    setup.add_argument("--no-hooks", action="store_true")
+    setup.add_argument("--codex-skill", choices=("user", "project", "store", "none"), default="user")
+    setup.add_argument("--force", action="store_true")
+    setup.add_argument("--json", action="store_true")
+    setup.set_defaults(func=cmd_setup)
+
+    summarize = sub.add_parser("summarize")
+    add_scope_args(summarize)
+    summarize.add_argument("--session")
+    summarize.add_argument("--json", action="store_true")
+    summarize.set_defaults(func=cmd_summarize)
+
+    evidence = sub.add_parser("evidence")
+    add_scope_args(evidence)
+    evidence.add_argument("--session")
+    evidence.add_argument("--json", action="store_true")
+    evidence.set_defaults(func=cmd_evidence)
 
     return parser
 

@@ -241,6 +241,10 @@ def _insert_record(
 def _int_or_none(value: str | None) -> int | None:
     if value is None:
         return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _date_to_utc_iso(value: str | None) -> str | None:
@@ -253,7 +257,3 @@ def _date_to_utc_iso(value: str | None) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC).isoformat()
-    try:
-        return int(value)
-    except ValueError:
-        return None

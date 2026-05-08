@@ -29,6 +29,9 @@ class RootPaths:
     queues: Path
     artifacts: Path
     indexes: Path
+    state: Path
+    hooks: Path
+    integrations: Path
 
     @property
     def index_path(self) -> Path:
@@ -53,6 +56,9 @@ def paths_for(root: str | Path) -> RootPaths:
         queues=root_path / "queues",
         artifacts=root_path / "artifacts",
         indexes=root_path / "indexes",
+        state=root_path / "state",
+        hooks=root_path / "hooks",
+        integrations=root_path / "integrations",
     )
 
 
@@ -135,6 +141,9 @@ def init_root(root: str | Path) -> RootPaths:
         paths.queues,
         paths.artifacts / "blobs" / "sha256",
         paths.indexes,
+        paths.state,
+        paths.hooks,
+        paths.integrations,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
