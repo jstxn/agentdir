@@ -4,9 +4,30 @@
   <img src="docs/assets/agentdir-overview.png" alt="AgentDir turns agent work into a saved trail, searchable memory, and proof for engineers." />
 </p>
 
-AgentDir is a local-first work mailstore for software agents.
+## What is AgentDir
 
-It adapts the strongest parts of Maildir for agentic coding sessions: atomic file delivery, immutable event envelopes, human-inspectable state, offline portability, and rebuildable indexes. The goal is not to replace databases or queues. The goal is to give every important unit of agent work a durable physical form that engineers can inspect, grep, sync, replay, and repair.
+AgentDir is a local-first flight recorder and memory layer for coding agents.
+
+It gives agents a durable place to record what happened during a coding session: the task, tool calls, command results, decisions, blockers, diffs, tests, summaries, and handoffs. Instead of leaving agent work scattered across chat logs and terminal history, AgentDir turns it into a structured, inspectable project record.
+
+### What It Provides
+
+- **Automatic session memory**
+  Agents can create or reuse a session in the background and keep a timeline of the work.
+- **Evidence-backed coding sessions**
+  Test runs, build checks, release steps, and command outputs can be captured as proof, not just claimed in a final message.
+- **Replayable agent work**
+  Engineers can inspect what the agent did, when it did it, and what evidence it used.
+- **Local-first storage**
+  Records live in a repo-local `.agentdir` folder by default. No server, daemon, Redis, vector database, or external service is required.
+- **Maildir-inspired durability**
+  Each event is written as an immutable file, so raw records remain recoverable even if indexes are deleted or rebuilt.
+- **Searchable agent memory**
+  AgentDir builds a local SQLite sidecar index with exact search and built-in vector-like memory documents, so agents can find similar prior work.
+- **Better handoffs**
+  Agents can leave reviewable summaries, evidence, blockers, and task context for engineers or other agents.
+- **Agent-owned workflow**
+  The user should not have to manually start sessions or run evidence commands. Once installed, the coding agent handles AgentDir in the background.
 
 ## Core Idea
 
