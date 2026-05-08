@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.3' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.4' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -60,13 +60,13 @@ agentdir doctor
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.3.3-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.3.4-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.3.3-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.3.4-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Store Location Scopes
@@ -153,6 +153,6 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.3.3-py3-none-any.whl`
-- `agentdir-0.3.3.tar.gz`
+- `agentdir-0.3.4-py3-none-any.whl`
+- `agentdir-0.3.4.tar.gz`
 - `install-agentdir.sh`
