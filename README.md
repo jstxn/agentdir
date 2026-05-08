@@ -1,5 +1,9 @@
 # AgentDir
 
+<p align="center">
+  <img src="docs/assets/agentdir-overview.png" alt="AgentDir turns agent work into a saved trail, searchable memory, and proof for engineers." />
+</p>
+
 AgentDir is a local-first work mailstore for software agents.
 
 It adapts the strongest parts of Maildir for agentic coding sessions: atomic file delivery, immutable event envelopes, human-inspectable state, offline portability, and rebuildable indexes. The goal is not to replace databases or queues. The goal is to give every important unit of agent work a durable physical form that engineers can inspect, grep, sync, replay, and repair.
