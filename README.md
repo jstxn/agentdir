@@ -18,7 +18,7 @@ Agents produce discrete records:
 - verification evidence
 - summaries and handoffs
 
-AgentDir stores those records as immutable message envelopes in a Maildir-like directory structure. A sidecar index makes them searchable and queryable, but the raw envelopes remain the recoverable source of truth.
+AgentDir stores those records as immutable message envelopes in a Maildir-like directory structure. A sidecar SQLite index makes them exactly queryable and vector searchable, but the raw envelopes remain the recoverable source of truth.
 
 ## Project Status
 
@@ -65,6 +65,7 @@ Normal agent workflow:
 
 ```bash
 agentdir session start --title "Fix failing checkout flow"
+agentdir memory search "checkout failure tests"
 agentdir run -- pytest -q
 agentdir summarize
 agentdir evidence
@@ -93,7 +94,9 @@ AgentDir is designed around five production behaviors:
 2. Agent work is replayable: deleting the index does not destroy the session.
 3. Events are inspectable: a human can read records without a service.
 4. Handoffs are concrete: humans and agents can exchange work through inboxes.
-5. The system composes: hooks, skills, shell tools, SQLite, notmuch, or other indexers can sit beside the envelope store.
+5. Memory is built in: the SQLite sidecar contains exact indexes plus vector memory documents.
+
+Vector memory is not a separate service. `agentdir index rebuild` derives it from the same immutable envelopes, and `agentdir memory search` rebuilds by default before searching so agents can ask for similar prior work without a separate setup step.
 
 ## Quick Start
 
@@ -109,6 +112,7 @@ Create the repo-local `.agentdir` store and capture a command:
 PYTHONPATH=src python3 -m agentdir setup --codex-skill store
 PYTHONPATH=src python3 -m agentdir session start --title "demo session"
 PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
+PYTHONPATH=src python3 -m agentdir memory search "python agent session"
 PYTHONPATH=src python3 -m agentdir summarize
 PYTHONPATH=src python3 -m agentdir evidence
 ```
@@ -141,6 +145,7 @@ KEEP_WORKDIR=1 bash examples/dogfood-session.sh
 ## Non-Goals
 
 - Replacing SQLite as the source of indexed query state.
+- Replacing raw envelopes with vector state as the source of truth.
 - Replacing Redis, SQS, Kafka, or RabbitMQ for high-throughput distributed queueing.
 - Building a full email client.
 - Depending on Dovecot internals.

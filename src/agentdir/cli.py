@@ -13,6 +13,7 @@ from .doctor import run_doctor
 from .events import emit_event
 from .hooks import hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
+from .memory import DEFAULT_MIN_SCORE, format_memory_hits, memory_stats, search_memory
 from .query import query_messages
 from .replay import replay_session
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
@@ -134,22 +135,44 @@ def cmd_index_update(args: argparse.Namespace) -> int:
 
 def cmd_query(args: argparse.Namespace) -> int:
     root = command_root(args)
-    rows = query_messages(
-        root,
-        session_id=args.session,
-        event_type=args.type,
-        actor=args.actor,
-        task_id=args.task,
-        tool=args.tool,
-        git_head=args.git_head,
-        workspace=args.workspace,
-        text=args.text,
-        since=args.since,
-        until=args.until,
-        limit=args.limit,
-    )
+    if args.semantic and args.text:
+        raise AgentDirError("Use either --text for literal search or --semantic for vector memory search")
+    if args.semantic:
+        rebuild_index(root)
+        rows = search_memory(
+            root,
+            args.semantic,
+            session_id=args.session,
+            event_type=args.type,
+            actor=args.actor,
+            task_id=args.task,
+            tool=args.tool,
+            git_head=args.git_head,
+            workspace=args.workspace,
+            since=args.since,
+            until=args.until,
+            limit=args.limit,
+            min_score=args.min_score,
+        )
+    else:
+        rows = query_messages(
+            root,
+            session_id=args.session,
+            event_type=args.type,
+            actor=args.actor,
+            task_id=args.task,
+            tool=args.tool,
+            git_head=args.git_head,
+            workspace=args.workspace,
+            text=args.text,
+            since=args.since,
+            until=args.until,
+            limit=args.limit,
+        )
     if args.json:
         print_json(rows)
+    elif args.semantic:
+        print(format_memory_hits(rows))
     else:
         for row in rows:
             body = (row.get("body_text") or "").strip().replace("\n", "\\n")
@@ -341,6 +364,47 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_search(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if not args.no_rebuild:
+        rebuild_index(root)
+    rows = search_memory(
+        root,
+        args.query,
+        session_id=args.session,
+        event_type=args.type,
+        actor=args.actor,
+        task_id=args.task,
+        tool=args.tool,
+        git_head=args.git_head,
+        workspace=args.workspace,
+        since=args.since,
+        until=args.until,
+        limit=args.limit,
+        min_score=args.min_score,
+    )
+    if args.json:
+        print_json(rows)
+    else:
+        print(format_memory_hits(rows))
+    return 0
+
+
+def cmd_memory_stats(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if not args.no_rebuild:
+        rebuild_index(root)
+    stats = memory_stats(root)
+    if args.json:
+        print_json(stats)
+    else:
+        print(f"messages={stats['messages']}")
+        print(f"memory_documents={stats['memory_documents']}")
+        print(f"coverage={stats['coverage']:.3f}")
+        print(f"vector_dim={stats['vector_dim']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -440,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--git-head")
     query.add_argument("--workspace")
     query.add_argument("--text")
+    query.add_argument("--semantic")
+    query.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     query.add_argument("--since")
     query.add_argument("--until")
     query.add_argument("--limit", type=int, default=100)
@@ -520,6 +586,31 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--session")
     evidence.add_argument("--json", action="store_true")
     evidence.set_defaults(func=cmd_evidence)
+
+    memory = sub.add_parser("memory")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    memory_search = memory_sub.add_parser("search")
+    add_scope_args(memory_search)
+    memory_search.add_argument("query")
+    memory_search.add_argument("--session")
+    memory_search.add_argument("--type")
+    memory_search.add_argument("--actor")
+    memory_search.add_argument("--task")
+    memory_search.add_argument("--tool")
+    memory_search.add_argument("--git-head")
+    memory_search.add_argument("--workspace")
+    memory_search.add_argument("--since")
+    memory_search.add_argument("--until")
+    memory_search.add_argument("--limit", type=int, default=10)
+    memory_search.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    memory_search.add_argument("--no-rebuild", action="store_true")
+    memory_search.add_argument("--json", action="store_true")
+    memory_search.set_defaults(func=cmd_memory_search)
+    memory_stats_parser = memory_sub.add_parser("stats")
+    add_scope_args(memory_stats_parser)
+    memory_stats_parser.add_argument("--no-rebuild", action="store_true")
+    memory_stats_parser.add_argument("--json", action="store_true")
+    memory_stats_parser.set_defaults(func=cmd_memory_stats)
 
     return parser
 

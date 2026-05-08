@@ -36,6 +36,20 @@ agentdir session start --title "Fix failing checkout flow"
 agentdir session current
 ```
 
+## Built-In Agent Memory
+
+AgentDir builds vector memory inside the normal SQLite sidecar whenever the index is rebuilt. Agents do not need a vector database daemon, embedding service, or separate install step.
+
+Search similar prior work before and during a task:
+
+```bash
+agentdir memory search "checkout failure tests"
+agentdir query --semantic "sqlite index failure" --type tool.result
+agentdir memory stats
+```
+
+`agentdir memory search` rebuilds the index by default, then ranks matching envelopes by vector similarity. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
+
 ## Capturing Tool Calls And Results
 
 ```bash
@@ -79,6 +93,7 @@ agentdir send \
 ```bash
 agentdir summarize
 agentdir evidence
+agentdir memory search "similar failing verification"
 agentdir replay --session "$(agentdir session current)"
 agentdir doctor
 ```

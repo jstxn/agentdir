@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .envelope import parse_envelope, validate_required
 from .mailbox import iter_records
+from .memory import index_memory_document, memory_schema_sql
 from .store import AgentDirError, discover_mailboxes, paths_for, require_root
 
 SCHEMA = """
@@ -79,7 +80,9 @@ def now_iso() -> str:
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
-    conn.execute("insert or replace into metadata(key, value) values('schema_version', '1')")
+    conn.executescript(memory_schema_sql())
+    conn.execute("insert or replace into metadata(key, value) values('schema_version', '2')")
+    conn.execute("insert or replace into metadata(key, value) values('vector_memory', 'yes')")
     try:
         conn.execute(
             "create virtual table if not exists message_fts using fts5(message_id, subject, body_text)"
@@ -121,6 +124,7 @@ def update_index(root: str | Path) -> IndexResult:
 
 
 def _index_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
+    conn.execute("delete from memory_documents")
     conn.execute("delete from message_artifacts")
     conn.execute("delete from headers")
     conn.execute("delete from messages")
@@ -179,6 +183,13 @@ def _insert_record(
     get = msg.get if msg is not None else lambda _name, _default=None: None
     malformed = bool(errors)
     message_id = get("Message-ID")
+    event_type = get("X-AgentDir-Event-Type")
+    subject = get("Subject")
+    session_id = get("X-AgentDir-Session")
+    git_head = get("X-AgentDir-Git-Head")
+    workspace = get("X-AgentDir-Workspace")
+    tool = get("X-AgentDir-Tool")
+    indexed_at = now_iso()
     cursor = conn.execute(
         """
         insert into messages(
@@ -195,23 +206,23 @@ def _insert_record(
             relative_mailbox,
             relative_file,
             state,
-            get("X-AgentDir-Event-Type"),
-            get("Subject"),
+            event_type,
+            subject,
             get("From"),
             get("To"),
-            get("X-AgentDir-Session"),
+            session_id,
             get("X-AgentDir-Task"),
             get("In-Reply-To"),
             get("Date"),
             _date_to_utc_iso(get("Date")),
             _int_or_none(get("X-AgentDir-Created-Ns")),
-            get("X-AgentDir-Git-Head"),
-            get("X-AgentDir-Workspace"),
-            get("X-AgentDir-Tool"),
+            git_head,
+            workspace,
+            tool,
             _int_or_none(get("X-AgentDir-Tool-Exit-Code")),
             body_sha,
             body_text,
-            now_iso(),
+            indexed_at,
             1 if malformed else 0,
             json.dumps(errors),
         ),
@@ -231,10 +242,23 @@ def _insert_record(
     try:
         conn.execute(
             "insert into message_fts(rowid, message_id, subject, body_text) values (?, ?, ?, ?)",
-            (rowid, message_id, get("Subject"), body_text),
+            (rowid, message_id, subject, body_text),
         )
     except sqlite3.DatabaseError:
         pass
+    index_memory_document(
+        conn,
+        message_rowid=rowid,
+        message_id=message_id,
+        session_id=session_id,
+        event_type=event_type,
+        subject=subject,
+        tool=tool,
+        workspace=workspace,
+        git_head=git_head,
+        body_text=body_text,
+        indexed_at=indexed_at,
+    )
     return rowid, message_id, malformed
 
 

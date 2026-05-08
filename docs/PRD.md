@@ -127,7 +127,11 @@ A large or reusable blob stored by content hash and referenced from envelopes.
 
 ### Index
 
-A rebuildable SQLite database that materializes messages, headers, sessions, actors, artifacts, task state, and full-text search.
+A rebuildable SQLite database that materializes messages, headers, sessions, actors, artifacts, task state, full-text search, and vector memory.
+
+### Vector Memory
+
+A derived similarity layer built from indexed envelope metadata and body text. It is bundled with AgentDir, stored in SQLite, and rebuilt from raw envelopes.
 
 ## 9. User Stories
 
@@ -264,7 +268,7 @@ agentdir send --from <actor> --to <actor> --type <type> --body <file>
 
 ### FR5: Index Envelopes
 
-The CLI must scan visible records and write a rebuildable index.
+The CLI must scan visible records and write a rebuildable index. The index must include built-in vector memory documents for searchable agent memory.
 
 Current commands:
 
@@ -273,15 +277,24 @@ agentdir index rebuild
 agentdir index update
 ```
 
-### FR6: Query Records
+### FR6: Query Records And Memory
 
-The CLI must query indexed records by session, type, actor, tool, task ID, git HEAD, text, and time range.
+The CLI must query indexed records by session, type, actor, tool, task ID, git HEAD, text, time range, and semantic similarity.
 
 Current command:
 
 ```text
 agentdir query [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
+agentdir query --semantic <text>
+agentdir memory search <text>
+agentdir memory stats
 ```
+
+Acceptance criteria:
+
+- `agentdir index rebuild` creates memory documents in the SQLite sidecar.
+- `agentdir memory search <text>` works without installing a separate vector database.
+- `agentdir query --semantic <text>` returns vector-ranked records and honors existing filters.
 
 ### FR7: Replay Session
 
@@ -441,7 +454,7 @@ Initial event taxonomy:
 - Project package scaffold.
 - `init`, `emit`, `index rebuild`, `query`, and `replay`.
 - Session mailbox layout.
-- SQLite sidecar index.
+- SQLite sidecar index with built-in vector memory.
 - Plain-text RFC 5322 envelopes.
 - Collision-resistant filename generation.
 - Basic tests for atomic write, indexing, duplicate detection, and replay.

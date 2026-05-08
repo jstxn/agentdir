@@ -15,12 +15,13 @@ It should add the pieces Maildir does not provide:
 
 - structured agent event schema
 - rebuildable index
+- built-in vector memory
 - task and actor model
 - artifact references
 - duplicate detection
 - replay and query commands
 
-The canonical event store is the envelope directory. The canonical mutable operational state is the SQLite sidecar.
+The canonical event store is the envelope directory. The canonical mutable operational state is the SQLite sidecar. Vector memory is part of that sidecar by default, and is derived from envelopes rather than treated as separate truth.
 
 ## 2. Source-Informed Constraints
 
@@ -71,6 +72,7 @@ agentdir-root/      +--------+---------+
                    +---------+---------+
                    | SQLite sidecar    |
                    | messages, FTS,    |
+                   | vector memory,    |
                    | artifacts, tasks  |
                    +---------+---------+
                              |
@@ -221,6 +223,19 @@ create table message_artifacts (
   message_rowid integer not null references messages(id) on delete cascade,
   sha256 text not null references artifacts(sha256)
 );
+
+create table memory_documents (
+  message_rowid integer primary key references messages(id) on delete cascade,
+  message_id text,
+  session_id text,
+  event_type text,
+  subject text,
+  vector_dim integer not null,
+  vector_json text not null,
+  text_sha256 text not null,
+  token_count integer not null,
+  indexed_at text not null
+);
 ```
 
 FTS can be a second step:
@@ -235,6 +250,8 @@ create virtual table message_fts using fts5(
 ```
 
 If FTS5 is unavailable in a given Python SQLite build, AgentDir should degrade to LIKE search and report the limitation.
+
+Vector memory is not optional. The first implementation uses deterministic feature-hashed vectors stored in SQLite so the package keeps its zero-runtime-dependency install shape. Future embedding backends can improve ranking, but they must remain rebuildable from envelopes and must not replace the raw record.
 
 ## 8. Indexing Model
 
@@ -251,6 +268,7 @@ Rebuild strategy:
 - scan `new` and `cur` under known mailboxes
 - parse headers with a standard email parser
 - hash body or full message bytes
+- derive vector memory documents from message metadata and body text
 - detect duplicate `Message-ID`s
 - replace old index by atomic rename after successful build
 - treat rebuild as a point-in-time best effort under concurrent writers, then allow a follow-up `index update` pass

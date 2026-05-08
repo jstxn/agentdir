@@ -225,7 +225,24 @@ Acceptance criteria:
 
 - Incremental update picks up new emitted events.
 
-### AD-043: Add FTS fallback strategy
+### AD-043: Add built-in vector memory
+
+Priority: `P0`
+
+Tasks:
+
+- Store derived vector memory documents in the SQLite sidecar during normal index rebuilds.
+- Add a first-class `agentdir memory search` command for agents.
+- Add semantic search through `agentdir query --semantic`.
+- Keep vector memory rebuildable from raw envelopes without extra services or dependencies.
+
+Acceptance criteria:
+
+- `agentdir index rebuild` creates memory rows for indexed records.
+- `agentdir memory search <text>` returns ranked prior records out of the box.
+- Existing query filters still apply during semantic search.
+
+### AD-044: Add FTS fallback strategy
 
 Priority: `P1`
 
