@@ -50,6 +50,46 @@ V1 should prove five things:
 4. Handoffs are concrete: humans and agents can exchange work through inboxes.
 5. The system composes: SQLite, notmuch, or other indexers can sit beside the envelope store.
 
+## Quick Start
+
+Run from a checkout without installing:
+
+```bash
+PYTHONPATH=src python3 -m agentdir --help
+```
+
+Create a local AgentDir root and emit a session event:
+
+```bash
+ROOT="$(mktemp -d)/agentdir-root"
+printf 'hello from an agent session\n' > /tmp/agentdir-body.txt
+
+PYTHONPATH=src python3 -m agentdir init "$ROOT"
+PYTHONPATH=src python3 -m agentdir emit \
+  --root "$ROOT" \
+  --session demo-session \
+  --type agent.message \
+  --body /tmp/agentdir-body.txt
+PYTHONPATH=src python3 -m agentdir index rebuild --root "$ROOT"
+PYTHONPATH=src python3 -m agentdir replay --root "$ROOT" --session demo-session
+PYTHONPATH=src python3 -m agentdir doctor --root "$ROOT"
+```
+
+Run the dogfood demo:
+
+```bash
+bash examples/dogfood-session.sh
+```
+
+## Verification
+
+```bash
+python3 -m compileall src tests
+uv run --with pytest pytest -q
+bash -n examples/dogfood-session.sh
+KEEP_WORKDIR=1 bash examples/dogfood-session.sh
+```
+
 ## Non-Goals
 
 - Replacing SQLite as the source of indexed query state.

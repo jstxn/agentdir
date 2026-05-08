@@ -118,7 +118,7 @@ Tasks:
 - Include pid.
 - Include hostname-safe component.
 - Include random bytes.
-- Include per-process sequence.
+- Include a per-process counter as a collision backstop.
 - Reject names with slash, colon, or leading dot.
 
 Acceptance criteria:
@@ -266,7 +266,7 @@ Priority: `P0`
 Tasks:
 
 - Load session events.
-- Sort by sequence, date, then fallback.
+- Sort by date, `X-AgentDir-Created-Ns`, then deterministic file path fallback.
 - Render concise timeline.
 - Include file path references for raw envelopes.
 

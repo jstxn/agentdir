@@ -10,7 +10,7 @@
 ## Protocol
 
 1. Should bodies default to `text/plain`, `application/json`, or MIME multipart?
-2. Should `X-AgentDir-Sequence` be required per session?
+2. What stronger ordering primitive should a future multi-writer runtime use beyond `Date`, `X-AgentDir-Created-Ns`, and explicit parent links?
 3. Should actor IDs use email-like addresses or simple filesystem-safe names?
 4. Should task state be fully append-only, or can local claim state use `cur` moves?
 5. Should session summaries use `X-Supersedes`, a custom header, or a distinct `summary.compacted` event with references?
@@ -26,13 +26,13 @@
 ## Security
 
 1. What should be the default redaction policy for tool outputs?
-2. Should secret-looking values cause warnings or hard failures?
+2. Should secret-looking values remain warnings, or should future release commands hard fail?
 3. What provenance should be signed first: headers, body, artifacts, or all of them?
 4. Should actors have trust levels in V1?
 
 ## Operations
 
 1. Should the index live inside the AgentDir root or in an external cache path?
-2. Should `agentdir doctor` automatically repair anything or remain read-only?
+2. Should a future `agentdir repair` command exist, separate from read-only `doctor`?
 3. Should old `tmp` files be cleaned automatically?
 4. Should `cur` records ever be pruned, or is retention explicit only?

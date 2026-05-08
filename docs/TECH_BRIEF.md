@@ -136,6 +136,7 @@ Subject: tool.result pytest
 X-AgentDir-Version: 0.1
 X-AgentDir-Event-Type: tool.result
 X-AgentDir-Session: session-123
+X-AgentDir-Created-Ns: 1778256000000000000
 Content-Type: text/plain; charset=utf-8
 
 <body>
@@ -181,10 +182,14 @@ create table messages (
   task_id text,
   parent_message_id text,
   date_header text,
+  created_ns integer,
   received_at text,
   git_head text,
   workspace text,
+  tool text,
+  tool_exit_code integer,
   body_sha256 text,
+  body_text text,
   indexed_at text not null,
   unique(message_id, file_path)
 );
@@ -244,6 +249,7 @@ Rebuild strategy:
 - hash body or full message bytes
 - detect duplicate `Message-ID`s
 - replace old index by atomic rename after successful build
+- treat rebuild as a point-in-time best effort under concurrent writers, then allow a follow-up `index update` pass
 
 Incremental strategy:
 
@@ -259,10 +265,10 @@ Replay is a materialized timeline.
 Ordering preference:
 
 1. `Date` header when parseable.
-2. `X-AgentDir-Sequence` if available.
-3. filesystem discovery order as a fallback, labeled unstable.
+2. `X-AgentDir-Created-Ns` when present.
+3. file path as a deterministic fallback, labeled non-causal.
 
-V1 should add `X-AgentDir-Sequence` per writer when possible, but the protocol must remain correct without global ordering.
+V1 does not promise global causal ordering. Agent runtimes that need stronger ordering should emit explicit parent links with `In-Reply-To` and `References`.
 
 ## 10. Actor Handoff Model
 
@@ -274,6 +280,14 @@ actors/<actor-id>/outbox/Maildir
 ```
 
 Sending to an actor writes a new envelope into the recipient inbox. Optionally, the sender outbox gets a copy or hardlink, but hardlinks must be an optimization only.
+
+Duplicate `Message-ID` classes:
+
+- benign replica: the same `Message-ID` and same body hash appear in multiple mailboxes, such as inbox and outbox copies
+- duplicate emit: the same `Message-ID` and same body hash appear more than once in the same logical mailbox
+- conflicting reuse: the same `Message-ID` appears with different body hashes
+
+`doctor` warns on benign replicas and reports conflicting reuse as an error. Query and replay show stored files as records and do not silently dedupe V1 output.
 
 ## 11. Task Spool Model
 
@@ -318,7 +332,7 @@ agentdir actor create --root <root> <actor-id>
 agentdir send --root <root> --from <actor> --to <actor> --type <type> --body <file>
 agentdir artifact add --root <root> <path>
 agentdir index rebuild --root <root>
-agentdir query --root <root> [--session <id>] [--type <type>] [--text <query>]
+agentdir query --root <root> [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>]
 agentdir replay --root <root> --session <id>
 agentdir doctor --root <root>
 ```
@@ -393,6 +407,7 @@ V1 security is intentionally simple and honest:
 
 - local filesystem permissions protect records
 - AgentDir does not hide secrets automatically
+- `doctor` warns on common token, key, password, and private-key patterns
 - adapters must avoid capturing environment variables by default
 - redaction policy is future work
 - signing and encryption are future work

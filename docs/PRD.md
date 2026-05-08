@@ -157,7 +157,7 @@ As an engineer, I can place a task or approval into an agent inbox and see the a
 
 Acceptance criteria:
 
-- `agentdir actor create <id>` creates inbox and outbox mailboxes.
+- `agentdir actor create --root <root> <id>` creates inbox and outbox mailboxes.
 - `agentdir send --to <actor> ...` emits a message into the recipient inbox.
 - Message headers include sender, recipient, task ID, and event type.
 
@@ -220,7 +220,7 @@ The CLI must create actor inboxes and outboxes.
 V1 command:
 
 ```text
-agentdir actor create <actor-id>
+agentdir actor create --root <root> <actor-id>
 ```
 
 ### FR4: Send Handoff Message
@@ -251,7 +251,7 @@ The CLI must query indexed records by session, type, actor, tool, task ID, git H
 V1 command:
 
 ```text
-agentdir query --root <root> --session <id>
+agentdir query --root <root> [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
 ```
 
 ### FR7: Replay Session
@@ -305,6 +305,7 @@ agentdir artifact add --root <root> <path>
 
 - V1 relies on filesystem permissions.
 - Secrets must not be emitted by default from adapters.
+- `doctor` warns when envelope bodies contain common secret-like patterns.
 - Redaction hooks are a future extension.
 - Signatures and encryption are planned after the envelope protocol stabilizes.
 
@@ -320,6 +321,7 @@ To: <actor-id@agentdir.local>
 Subject: <short event summary>
 X-AgentDir-Version: 0.1
 X-AgentDir-Event-Type: <event-type>
+X-AgentDir-Created-Ns: <integer nanosecond timestamp>
 ```
 
 Session headers:
@@ -470,7 +472,7 @@ Too many custom headers can become hard to reason about. V1 mitigates with a min
 
 ### Secret Leakage
 
-Agent tool outputs may include secrets. V1 must document this clearly and avoid automatic capture adapters until redaction policy exists.
+Agent tool outputs may include secrets. V1 must document this clearly, avoid automatic capture adapters, and warn on common secret-like patterns in `doctor` until redaction policy exists.
 
 ### Overbuilding Queue Semantics
 
