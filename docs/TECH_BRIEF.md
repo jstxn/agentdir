@@ -116,9 +116,14 @@ agentdir-root/      +--------+---------+
             <full-sha256>
   indexes/
     agentdir.sqlite3
+  state/
+    current-session.json
+    last-session.json
+  hooks/
+  integrations/
 ```
 
-V1 creates `sessions`, `actors`, `artifacts`, and `indexes`. The root itself may be a project hidden directory such as `<repo>/.agentdir`, a user store such as `~/.agentdir`, or an explicit custom path.
+AgentDir creates `sessions`, `actors`, `artifacts`, `indexes`, `state`, `hooks`, and `integrations`. The root itself may be a project hidden directory such as `<repo>/.agentdir`, a user store such as `~/.agentdir`, or an explicit custom path.
 
 ## 5. Envelope Format
 
@@ -145,7 +150,7 @@ Structured JSON bodies are allowed but not required. The system should parse hea
 
 ## 6. Atomic Write Algorithm
 
-V1 writer flow:
+Writer flow:
 
 1. Ensure target mailbox has `tmp`, `new`, and `cur`.
 2. Generate a unique basename from UTC timestamp, pid, hostname, sequence, and random bytes.
@@ -229,7 +234,7 @@ create virtual table message_fts using fts5(
 );
 ```
 
-If FTS5 is unavailable in a given Python SQLite build, V1 should degrade to LIKE search and report the limitation.
+If FTS5 is unavailable in a given Python SQLite build, AgentDir should degrade to LIKE search and report the limitation.
 
 ## 8. Indexing Model
 
@@ -267,7 +272,7 @@ Ordering preference:
 2. `X-AgentDir-Created-Ns` when present.
 3. file path as a deterministic fallback, labeled non-causal.
 
-V1 does not promise global causal ordering. Agent runtimes that need stronger ordering should emit explicit parent links with `In-Reply-To` and `References`.
+AgentDir does not promise global causal ordering. Agent runtimes that need stronger ordering should emit explicit parent links with `In-Reply-To` and `References`.
 
 ## 10. Actor Handoff Model
 
@@ -286,11 +291,11 @@ Duplicate `Message-ID` classes:
 - duplicate emit: the same `Message-ID` and same body hash appear more than once in the same logical mailbox
 - conflicting reuse: the same `Message-ID` appears with different body hashes
 
-`doctor` warns on benign replicas and reports conflicting reuse as an error. Query and replay show stored files as records and do not silently dedupe V1 output.
+`doctor` warns on benign replicas and reports conflicting reuse as an error. Query and replay show stored files as records and do not silently dedupe output.
 
 ## 11. Task Spool Model
 
-Task spool semantics are intentionally conservative in V1.
+Task spool semantics are intentionally conservative.
 
 Task state should be append-only:
 
@@ -318,28 +323,37 @@ X-AgentDir-Blob-Bytes: <bytes>
 X-AgentDir-Blob-Mime: text/x-diff
 ```
 
-V1 should support add and reference. Garbage collection should be postponed until reachability is explicit.
+AgentDir supports add and reference. Garbage collection should be postponed until reachability is explicit.
 
 ## 13. CLI Surface
 
-Proposed V1 CLI:
+Current CLI:
 
 ```text
+agentdir setup [--codex-skill user|project|store|none]
 agentdir init [<root>] [--scope <scope>]
 agentdir root [--scope <scope>]
-agentdir emit [--root <root>] [--scope <scope>] --session <id> --type <type> --body <file>
+agentdir session start [--id <id>] [--title <title>]
+agentdir session current
+agentdir session end [--summary <file>]
+agentdir run [--session <id>] [--name <tool>] -- <command> [args...]
+agentdir emit [--root <root>] [--scope <scope>] [--session <id>] --type <type> --body <file>
 agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
 agentdir send [--root <root>] [--scope <scope>] --from <actor> --to <actor> --type <type> --body <file>
 agentdir artifact add [--root <root>] [--scope <scope>] <path>
+agentdir hooks install|status|uninstall
+agentdir skills install codex [--target user|project|store]
 agentdir index rebuild [--root <root>] [--scope <scope>]
 agentdir query [--root <root>] [--scope <scope>] [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>]
 agentdir replay [--root <root>] [--scope <scope>] --session <id>
+agentdir summarize [--session <id>]
+agentdir evidence [--session <id>]
 agentdir doctor [--root <root>] [--scope <scope>]
 ```
 
 ## 14. Implementation Recommendation
 
-Start with Python for V1.
+The current implementation uses Python.
 
 Reasons:
 
@@ -403,13 +417,14 @@ No new dependency should be added without an explicit decision record.
 
 ## 17. Security Model
 
-V1 security is intentionally simple and honest:
+AgentDir security is intentionally simple and honest:
 
 - local filesystem permissions protect records
-- AgentDir does not hide secrets automatically
+- AgentDir does not promise complete secret detection
+- `agentdir run` avoids environment capture by default
+- `agentdir run` redacts common secret-like patterns in stored command output
 - `doctor` warns on common token, key, password, and private-key patterns
-- adapters must avoid capturing environment variables by default
-- redaction policy is future work
+- configurable redaction policy is future work
 - signing and encryption are future work
 
 Future security features:
@@ -426,7 +441,7 @@ Future security features:
 | --- | --- |
 | Directory scan race | Idempotent indexing, duplicate detection, periodic rebuild. |
 | Index drift | Raw envelopes canonical, rebuild command required. |
-| Secret leakage | No automatic broad capture in V1, document risk. |
+| Secret leakage | No environment capture by default, bounded command output, stored-output redaction, and `doctor` warnings. |
 | Overbuilt queue semantics | Task state is append-only, no distributed lease promise. |
 | Large directory performance | Shard by session and actor. |
 | Metadata inconsistency | Required header schema plus doctor command. |

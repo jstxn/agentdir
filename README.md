@@ -22,7 +22,7 @@ AgentDir stores those records as immutable message envelopes in a Maildir-like d
 
 ## Project Status
 
-This directory contains the first installable V1 build plus the product and technical planning package.
+AgentDir is now an agent-first utility for recording, replaying, and reviewing coding-agent work with minimal human ceremony.
 
 - [PRD](docs/PRD.md)
 - [Technical Brief](docs/TECH_BRIEF.md)
@@ -42,33 +42,58 @@ AgentDir is distributed through GitHub Releases. For the private `jstxn/agentdir
 gh auth login
 ```
 
-Install the latest V1 release with one command:
+Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.2.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
 
-## Initial V1 Shape
+## Agent-First Setup
+
+Run this once from a git repository:
+
+```bash
+agentdir setup
+```
+
+That creates the repo-local `.agentdir` store, installs AgentDir-managed Git hook shims, and installs the Codex skill into the user skill directory. The default is intentionally hands-off for coding agents. Use `agentdir setup --codex-skill store` if you want the generated skill artifact to stay inside `.agentdir` instead of the user profile.
+
+Normal agent workflow:
+
+```bash
+agentdir session start --title "Fix failing checkout flow"
+agentdir run -- pytest -q
+agentdir summarize
+agentdir evidence
+agentdir doctor
+agentdir session end --summary /tmp/final-summary.txt
+```
+
+Agents can still emit custom records, but normal tool evidence should go through `agentdir run` so calls and results are captured together.
+
+## Store Shape
 
 ```text
-agentdir-root/
+.agentdir/
   sessions/<session-id>/Maildir/{tmp,new,cur}
   actors/<actor-id>/inbox/Maildir/{tmp,new,cur}
   actors/<actor-id>/outbox/Maildir/{tmp,new,cur}
   artifacts/blobs/sha256/<prefix>/<hash>
   indexes/agentdir.sqlite3
+  state/current-session.json
+  integrations/
 ```
 
-V1 should prove five things:
+AgentDir is designed around five production behaviors:
 
 1. Writes are crash-safe: partial records stay hidden in `tmp`.
 2. Agent work is replayable: deleting the index does not destroy the session.
 3. Events are inspectable: a human can read records without a service.
 4. Handoffs are concrete: humans and agents can exchange work through inboxes.
-5. The system composes: SQLite, notmuch, or other indexers can sit beside the envelope store.
+5. The system composes: hooks, skills, shell tools, SQLite, notmuch, or other indexers can sit beside the envelope store.
 
 ## Quick Start
 
@@ -78,20 +103,14 @@ Run from a checkout without installing:
 PYTHONPATH=src python3 -m agentdir --help
 ```
 
-Create the repo-local `.agentdir` store and emit a session event:
+Create the repo-local `.agentdir` store and capture a command:
 
 ```bash
-printf 'hello from an agent session\n' > /tmp/agentdir-body.txt
-
-PYTHONPATH=src python3 -m agentdir init
-PYTHONPATH=src python3 -m agentdir root
-PYTHONPATH=src python3 -m agentdir emit \
-  --session demo-session \
-  --type agent.message \
-  --body /tmp/agentdir-body.txt
-PYTHONPATH=src python3 -m agentdir index rebuild
-PYTHONPATH=src python3 -m agentdir replay --session demo-session
-PYTHONPATH=src python3 -m agentdir doctor
+PYTHONPATH=src python3 -m agentdir setup --codex-skill store
+PYTHONPATH=src python3 -m agentdir session start --title "demo session"
+PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
+PYTHONPATH=src python3 -m agentdir summarize
+PYTHONPATH=src python3 -m agentdir evidence
 ```
 
 Run the dogfood demo:

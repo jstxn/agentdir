@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.2.0' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -42,14 +42,14 @@ export PATH="$HOME/.local/bin:$PATH"
 agentdir --help
 
 repo="$(mktemp -d)/agentdir-install-smoke"
+mkdir -p "$repo"
 git -C "$repo" init
-printf 'agentdir install smoke\n' > /tmp/agentdir-smoke.txt
 cd "$repo"
-agentdir init
-agentdir root
-agentdir emit --session install-smoke --type agent.message --body /tmp/agentdir-smoke.txt
-agentdir index rebuild
-agentdir replay --session install-smoke
+agentdir setup --codex-skill store
+agentdir session start --id install-smoke --title "install smoke"
+agentdir run -- python3 -c "print('agentdir install smoke')"
+agentdir summarize
+agentdir evidence
 agentdir doctor
 ```
 
@@ -58,13 +58,13 @@ agentdir doctor
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.1.1-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.2.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.1.1-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.2.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Store Location Scopes
@@ -99,6 +99,26 @@ The machine root may require elevated permissions. Override it for managed machi
 AGENTDIR_MACHINE_ROOT=/opt/agentdir agentdir init --scope machine
 ```
 
+## Agent-First Setup
+
+`agentdir setup` is the recommended one-command project setup:
+
+```bash
+agentdir setup
+```
+
+It initializes the default project store, installs AgentDir-managed Git hook shims, and installs the Codex skill in the user skill directory. To keep generated integration files inside the project store instead:
+
+```bash
+agentdir setup --codex-skill store
+```
+
+To install only the Codex skill:
+
+```bash
+agentdir skills install codex --target user
+```
+
 ## Install From Source
 
 For local development:
@@ -129,6 +149,6 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.1.1-py3-none-any.whl`
-- `agentdir-0.1.1.tar.gz`
+- `agentdir-0.2.0-py3-none-any.whl`
+- `agentdir-0.2.0.tar.gz`
 - `install-agentdir.sh`

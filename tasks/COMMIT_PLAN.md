@@ -56,7 +56,7 @@ Files:
 
 Exit criteria:
 
-- Every V1 milestone has tasks and acceptance criteria.
+- Every initial milestone has tasks and acceptance criteria.
 - Open questions are isolated from committed product requirements.
 
 ## Commit 3: Scaffold the Python package
@@ -68,7 +68,7 @@ Create the smallest runnable AgentDir CLI skeleton
 
 Add packaging, module layout, and a no-op CLI so later behavior can be implemented behind stable command names.
 
-Constraint: No new runtime dependencies for V1 scaffold
+Constraint: No new runtime dependencies for initial scaffold
 Rejected: Rust first implementation | Python standard library is faster for protocol iteration
 Confidence: medium
 Scope-risk: narrow
@@ -220,7 +220,7 @@ Make human-agent handoff a first-class filesystem object
 
 Create actor inboxes and outboxes so work requests, approvals, blockers, and results can move through durable local mailboxes.
 
-Constraint: Exact-once delivery is not promised in V1
+Constraint: Exact-once delivery is not promised
 Rejected: Distributed queue leases | too much semantics before the local envelope model is proven
 Confidence: medium
 Scope-risk: moderate

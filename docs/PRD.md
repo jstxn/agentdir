@@ -73,17 +73,17 @@ Needs to inspect a change history, review unresolved threads, and verify that te
 
 ## 6. Goals
 
-### V1 Product Goals
+### Product Goals
 
 - Provide a local envelope store for immutable agent events.
-- Provide a CLI for initialization, event emission, indexing, querying, and replay.
+- Provide a CLI for setup, session lifecycle, command capture, event emission, indexing, querying, and replay.
 - Provide a SQLite sidecar index that can be rebuilt from envelopes.
 - Support session flight recording for coding sessions.
 - Support actor inboxes and outboxes for human-agent handoff.
 - Support content-addressed artifact references.
-- Provide clear docs and examples for agent runtime integration.
+- Provide clear docs, Git hooks, and generated skills for agent runtime integration.
 
-### V1 Technical Goals
+### Technical Goals
 
 - Use only standard-library implementation primitives at first where practical.
 - Keep the raw envelope store readable without AgentDir-specific tooling.
@@ -99,7 +99,7 @@ Needs to inspect a change history, review unresolved threads, and verify that te
 - High-throughput distributed queue replacement.
 - Primary mutable database replacement.
 - Cloud hosted service.
-- Multi-tenant authorization model in V1.
+- Multi-tenant authorization model in the local utility.
 - Real-time collaboration UI.
 - Dependency on Dovecot metadata files.
 
@@ -193,14 +193,15 @@ Acceptance criteria:
 
 ## 10. Functional Requirements
 
-### FR1: Initialize Store
+### FR1: Initialize Store And Agent-First Setup
 
-The CLI must create the root directory layout and any required metadata.
+The CLI must create the root directory layout, install the low-friction agent integration layer, and keep setup safe to rerun.
 
 Default command:
 
 ```text
 agentdir init
+agentdir setup
 ```
 
 Optional root and scope selection:
@@ -212,19 +213,40 @@ agentdir init --scope user|global|machine|project
 
 ### FR2: Emit Event
 
-The CLI must emit an immutable event envelope into a target mailbox.
+The CLI must emit an immutable event envelope into a target mailbox. When no session is passed, it should use the active session or create one.
 
-V1 command:
+Current commands:
 
 ```text
 agentdir emit --session <id> --type <type> --body <file>
+agentdir emit --type <type> --body <file>
 ```
+
+### FR2a: Manage Active Session
+
+The CLI must let agents start, inspect, and end the active session.
+
+```text
+agentdir session start --title <title>
+agentdir session current
+agentdir session end --summary <file>
+```
+
+### FR2b: Capture Tool Calls
+
+The CLI must wrap shell commands, stream output to the terminal, and record both call and result envelopes.
+
+```text
+agentdir run -- <command> [args...]
+```
+
+Captured output must be bounded, avoid environment capture by default, and redact common secret-like patterns in stored records.
 
 ### FR3: Manage Actors
 
 The CLI must create actor inboxes and outboxes.
 
-V1 command:
+Current command:
 
 ```text
 agentdir actor create <actor-id>
@@ -234,7 +256,7 @@ agentdir actor create <actor-id>
 
 The CLI must deliver an envelope to an actor inbox.
 
-V1 command:
+Current command:
 
 ```text
 agentdir send --from <actor> --to <actor> --type <type> --body <file>
@@ -244,7 +266,7 @@ agentdir send --from <actor> --to <actor> --type <type> --body <file>
 
 The CLI must scan visible records and write a rebuildable index.
 
-V1 commands:
+Current commands:
 
 ```text
 agentdir index rebuild
@@ -255,7 +277,7 @@ agentdir index update
 
 The CLI must query indexed records by session, type, actor, tool, task ID, git HEAD, text, and time range.
 
-V1 command:
+Current command:
 
 ```text
 agentdir query [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
@@ -265,7 +287,7 @@ agentdir query [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>
 
 The CLI must render a session timeline from the index or raw envelopes.
 
-V1 command:
+Current command:
 
 ```text
 agentdir replay --session <id>
@@ -275,10 +297,35 @@ agentdir replay --session <id>
 
 The CLI must store artifact blobs by SHA-256 and emit references from envelopes.
 
-V1 command:
+Current command:
 
 ```text
 agentdir artifact add <path>
+```
+
+### FR9: Install Agent Integrations
+
+The CLI must install, inspect, and remove AgentDir-managed Git hook shims without destroying existing hooks.
+
+```text
+agentdir hooks install
+agentdir hooks status
+agentdir hooks uninstall
+```
+
+The CLI must also generate Codex skill guidance at user, project, or store scope.
+
+```text
+agentdir skills install codex --target user|project|store
+```
+
+### FR10: Review Session Evidence
+
+The CLI must provide deterministic local review commands without requiring an LLM or service.
+
+```text
+agentdir summarize
+agentdir evidence
 ```
 
 ## 11. Non-Functional Requirements
@@ -288,7 +335,7 @@ agentdir artifact add <path>
 - Partial writes must not appear in query or replay output.
 - Index rebuild must tolerate malformed records.
 - Duplicate `Message-ID`s must be detected.
-- All semantic state changes must be append-only in V1.
+- All semantic state changes must be append-only.
 
 ### Inspectability
 
@@ -298,22 +345,24 @@ agentdir artifact add <path>
 
 ### Portability
 
-- V1 must run locally on macOS and Linux.
+- AgentDir must run locally on macOS and Linux.
 - Avoid platform-specific file assumptions where possible.
-- Support a configurable info delimiter later for Windows-like filesystems, but do not target Windows in V1.
+- Support a configurable info delimiter later for Windows-like filesystems, but do not target Windows yet.
 
 ### Performance
 
-- V1 should support thousands of envelopes per session.
+- AgentDir should support thousands of envelopes per session.
 - Incremental index updates should avoid full rescans where possible.
 - Large artifacts should not be duplicated into every envelope.
 
 ### Security
 
-- V1 relies on filesystem permissions.
+- AgentDir relies on filesystem permissions.
 - Secrets must not be emitted by default from adapters.
+- `agentdir run` does not capture environment variables by default.
+- `agentdir run` redacts common secret-like patterns in stored command output.
 - `doctor` warns when envelope bodies contain common secret-like patterns.
-- Redaction hooks are a future extension.
+- Configurable redaction policy is a future extension.
 - Signatures and encryption are planned after the envelope protocol stabilizes.
 
 ## 12. Envelope Schema
@@ -412,7 +461,7 @@ Initial event taxonomy:
 - signed envelopes.
 - compacted session summaries.
 
-### Won't Have In V1
+### Not In Current Scope
 
 - IMAP server.
 - network sync daemon.
@@ -467,23 +516,23 @@ Record an agentic coding session and prove replay after index deletion.
 
 ### Directory Scan Races
 
-Maildir-like stores can have scan races under concurrent mutation. V1 mitigates by making semantic truth append-only and using rescans plus idempotent message IDs.
+Maildir-like stores can have scan races under concurrent mutation. AgentDir mitigates by making semantic truth append-only and using rescans plus idempotent message IDs.
 
 ### Index Drift
 
-The SQLite index may drift from raw envelopes. V1 mitigates by making rebuild a core command and treating raw envelopes as canonical for immutable events.
+The SQLite index may drift from raw envelopes. AgentDir mitigates by making rebuild a core command and treating raw envelopes as canonical for immutable events.
 
 ### Metadata Sprawl
 
-Too many custom headers can become hard to reason about. V1 mitigates with a minimal required header set and event-type-specific optional headers.
+Too many custom headers can become hard to reason about. AgentDir mitigates with a minimal required header set and event-type-specific optional headers.
 
 ### Secret Leakage
 
-Agent tool outputs may include secrets. V1 must document this clearly, avoid automatic capture adapters, and warn on common secret-like patterns in `doctor` until redaction policy exists.
+Agent tool outputs may include secrets. AgentDir avoids environment capture, applies bounded stored-output redaction for common secret-like patterns, and warns on common secret-like patterns in `doctor`.
 
 ### Overbuilding Queue Semantics
 
-Maildir is a spool, not a full queue. V1 should record work and handoffs, but avoid promising distributed lease semantics.
+Maildir is a spool, not a full queue. AgentDir should record work and handoffs, but avoid promising distributed lease semantics.
 
 ## 18. Open Decisions
 

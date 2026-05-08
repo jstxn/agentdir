@@ -3,8 +3,8 @@
 ## Product
 
 1. Should the first target be a standalone CLI, a library for agent runtimes, or both?
-2. Should V1 optimize for personal local usage or multi-agent team usage?
-3. Should review threads be in V1 or deferred until the session recorder is proven?
+2. Should AgentDir optimize for personal local usage or multi-agent team usage first?
+3. Should review threads be first-class commands or remain event conventions until the session recorder is proven?
 4. Should AgentDir integrate with existing email tooling early, or keep the protocol email-compatible but tool-independent?
 
 ## Protocol
@@ -17,7 +17,7 @@
 
 ## Implementation
 
-1. Should V1 use Python's `mailbox.Maildir` or a minimal custom writer?
+1. Should AgentDir continue with the minimal custom writer or adopt Python's `mailbox.Maildir` for specific operations?
 2. Is SQLite FTS5 available enough to depend on for local installs?
 3. Should the package be installable as `agentdir` or `agent-maildir`?
 4. Should future config remain JSON, move to TOML, or support both?
@@ -28,7 +28,7 @@
 1. What should be the default redaction policy for tool outputs?
 2. Should secret-looking values remain warnings, or should future release commands hard fail?
 3. What provenance should be signed first: headers, body, artifacts, or all of them?
-4. Should actors have trust levels in V1?
+4. Should actors have trust levels in the current local trust model?
 
 ## Operations
 

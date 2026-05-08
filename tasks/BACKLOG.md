@@ -2,14 +2,14 @@
 
 ## Legend
 
-- `P0`: required for V1 proof
+- `P0`: required for core proof
 - `P1`: important after core proof
 - `P2`: useful but deferrable
 - `Blocked`: requires an open decision
 
 ## Epic 1: Product And Protocol Definition
 
-### AD-001: Finalize V1 envelope schema
+### AD-001: Finalize envelope schema
 
 Priority: `P0`
 

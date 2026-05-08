@@ -1,6 +1,6 @@
-# AgentDir V1 Demo
+# AgentDir Recovery Demo
 
-This demo is the narrow proof for AgentDir V1:
+This demo is the narrow proof for AgentDir's durable recovery model:
 
 1. initialize a local-first root
 2. emit a small coding-session trace as immutable envelopes
@@ -13,7 +13,7 @@ The goal is not a polished user experience. The goal is to prove the product the
 
 ## Scope
 
-This demo stays inside the existing V1 command contract:
+This demo stays inside the explicit-root command contract:
 
 ```text
 agentdir init [<root>]
@@ -36,11 +36,11 @@ It intentionally exercises the event types called out in the planning docs:
 - `agent.message`
 - `session.ended`
 
-The happy-path script does not require actor handoff or artifact storage. Those should be validated separately once the later V1 slices land.
+The happy-path script does not require actor handoff, generated skills, Git hooks, or artifact storage. Those are covered by the main automated test suite.
 
 ## Prerequisites
 
-- A complete V1 checkout that exposes the AgentDir CLI, either as `agentdir` or `python -m agentdir`
+- A complete checkout that exposes the AgentDir CLI, either as `agentdir` or `python -m agentdir`
 - A local shell with `bash`
 - No secrets in the demo bodies or tool outputs
 
@@ -108,4 +108,4 @@ Minimum follow-up cases:
 4. Missing blob
    Once artifact references exist, remove a referenced blob under `artifacts/blobs/sha256/` and confirm `doctor` reports the missing object.
 
-Those cases belong in automated tests for the final V1 implementation, but the checklist here keeps the expected coverage explicit before code lands.
+Those cases belong in automated tests, but the checklist here keeps the expected coverage explicit.

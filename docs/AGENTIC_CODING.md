@@ -19,42 +19,32 @@ Use one immutable envelope per meaningful unit of work:
 
 The index is disposable. The envelope store is the recovery source.
 
+## One-Time Setup
+
+From a git repository:
+
+```bash
+agentdir setup
+```
+
+This initializes `.agentdir`, installs managed Git hook shims, and installs the Codex skill in the user skill directory. Use `agentdir setup --codex-skill store` when you want generated integration files to stay under `.agentdir`.
+
 ## Session Flight Recorder
 
 ```bash
-session="repo-$(basename "$PWD")-$(date -u +%Y%m%dT%H%M%SZ)"
-
-agentdir init --scope project
-
-printf 'User asked for a narrow bug fix in the current repo.\n' > /tmp/user-message.txt
-agentdir emit \
-  --session "$session" \
-  --type user.message \
-  --workspace "$(basename "$PWD")" \
-  --git-head "$(git rev-parse --short HEAD 2>/dev/null || true)" \
-  --body /tmp/user-message.txt
+agentdir session start --title "Fix failing checkout flow"
+agentdir session current
 ```
 
 ## Capturing Tool Calls And Results
 
 ```bash
-cat > /tmp/tool-call.txt <<'EOF'
-tool=pytest
-argv=python -m pytest -q
-EOF
-
-agentdir emit --session "$session" --type tool.call --tool pytest --body /tmp/tool-call.txt
-
-python -m pytest -q > /tmp/tool-result.txt 2>&1
-status=$?
-
-agentdir emit \
-  --session "$session" \
-  --type tool.result \
-  --tool pytest \
-  --tool-exit-code "$status" \
-  --body /tmp/tool-result.txt
+agentdir run -- pytest -q
+agentdir run -- npm test
+agentdir run -- git diff --check
 ```
+
+`agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope.
 
 ## Capturing Diffs As Artifacts
 
@@ -62,7 +52,6 @@ agentdir emit \
 git diff > /tmp/agentdir.diff
 
 agentdir emit \
-  --session "$session" \
   --type file.diff \
   --artifact /tmp/agentdir.diff \
   --body /tmp/agentdir.diff
@@ -82,16 +71,15 @@ agentdir send \
   --from codex \
   --to engineer \
   --type approval.requested \
-  --session "$session" \
   --body /tmp/review-request.txt
 ```
 
-## Rebuild And Replay
+## Review And Replay
 
 ```bash
-agentdir index rebuild
-agentdir query --session "$session"
-agentdir replay --session "$session"
+agentdir summarize
+agentdir evidence
+agentdir replay --session "$(agentdir session current)"
 agentdir doctor
 ```
 
@@ -100,7 +88,35 @@ If the SQLite index is deleted, rebuild it from the envelopes:
 ```bash
 rm -f "$(agentdir root)/indexes/agentdir.sqlite3"
 agentdir index rebuild
-agentdir replay --session "$session"
+agentdir replay --session "$(agentdir session current)"
+```
+
+End the session when the task is done:
+
+```bash
+agentdir session end --summary /tmp/final-summary.txt
+```
+
+## Git Hooks
+
+`agentdir setup` installs managed shims for common local Git hooks. The shims preserve existing hooks by moving them to `*.agentdir-original`, run the original hook first, record the result, and return the original exit code.
+
+```bash
+agentdir hooks status
+agentdir hooks install --hook pre-commit
+agentdir hooks uninstall --hook pre-commit
+```
+
+Hook records use the active session when one exists. If no session is active, AgentDir starts a small automatic hook session.
+
+## Codex Skill
+
+The generated Codex skill tells coding agents to start sessions, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
+
+```bash
+agentdir skills install codex --target user
+agentdir skills install codex --target project
+agentdir skills install codex --target store
 ```
 
 ## Choosing The Storage Scope
