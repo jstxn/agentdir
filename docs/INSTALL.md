@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1 | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
