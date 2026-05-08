@@ -29,18 +29,30 @@ agentdir setup
 
 This initializes `.agentdir`, installs managed Git hook shims, and installs the Codex skill in the user skill directory. Use `agentdir setup --codex-skill store` when you want generated integration files to stay under `.agentdir`.
 
-## Session Flight Recorder
+## Daily Workflow
 
-```bash
-agentdir session start --title "Fix failing checkout flow"
-agentdir session current
-```
+The user should not have to operate AgentDir during a normal coding session. Once the CLI and skill are installed, the coding agent owns the recording workflow.
+
+Agent responsibilities:
+
+- run `agentdir session ensure --title "<task>"` when coding work begins
+- run `agentdir setup` once if the repository has not been prepared yet
+- build context from prior memory when the task is non-trivial
+- wrap verification, build, and release commands with `agentdir run`
+- record important blockers, decisions, and handoffs
+- use `agentdir summarize`, `agentdir evidence`, and `agentdir doctor` before making evidence-backed claims
+
+Human responsibilities:
+
+- install AgentDir
+- ask the coding agent to do the work
+- inspect AgentDir output only when they want evidence, replay, or debugging details
 
 ## Built-In Agent Memory
 
 AgentDir builds vector memory inside the normal SQLite sidecar whenever the index is rebuilt. Agents do not need a vector database daemon, embedding service, or separate install step.
 
-Search similar prior work before and during a task:
+Agents search similar prior work before and during a task:
 
 ```bash
 agentdir context build "checkout failure tests"
@@ -60,7 +72,7 @@ agentdir run -- npm test
 agentdir run -- git diff --check
 ```
 
-`agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope.
+`agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. Agents should use this automatically for commands they run as evidence.
 
 ## Capturing Diffs As Artifacts
 
@@ -92,6 +104,8 @@ agentdir send \
 
 ## Review And Replay
 
+These commands are mainly for agents and for humans who want to inspect the record:
+
 ```bash
 agentdir summarize
 agentdir evidence
@@ -109,7 +123,7 @@ agentdir index rebuild
 agentdir replay --session "$(agentdir session current)"
 ```
 
-End the session when the task is done:
+Agents should end the session when the task is done:
 
 ```bash
 agentdir session end --summary /tmp/final-summary.txt
@@ -129,7 +143,7 @@ Hook records use the active session when one exists. If no session is active, Ag
 
 ## Codex Skill
 
-The generated Codex skill tells coding agents to start sessions, build context, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
+The generated Codex skill tells coding agents that AgentDir is their responsibility, not a user checklist. It instructs agents to ensure sessions, build context, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
 
 ```bash
 agentdir skills install codex --target user

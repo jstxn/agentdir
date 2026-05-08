@@ -15,9 +15,15 @@ description: Automatically record coding-agent sessions with AgentDir when worki
 
 Use AgentDir as the local flight recorder for coding-agent work.
 
+The user should not have to run AgentDir commands during normal coding work.
+Treat AgentDir as agent-owned background instrumentation once it is installed.
+Run the commands yourself when they are useful, and only mention AgentDir to the
+user when reporting evidence, blockers, or setup problems.
+
 ## Start
 
-- At the start of a coding task, run `agentdir session start --title "<short task>"` unless `agentdir session current` already shows an active session.
+- At the start of a coding task in a repository, run `agentdir session ensure --title "<short task>"`.
+- If `.agentdir` is missing and the task is non-trivial, run `agentdir setup` once for the repository before work begins.
 - Prefer the default project store. It writes to the nearest repo `.agentdir`.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output.
 
@@ -38,7 +44,8 @@ Use AgentDir as the local flight recorder for coding-agent work.
 ## Finish
 
 - Before the final response, run `agentdir summarize` and `agentdir doctor` when practical.
-- End the active session with `agentdir session end --summary "<what changed and what was verified>"`.
+- Use `agentdir evidence` when the final response claims tests, builds, hooks, or release checks passed.
+- End the active session with `agentdir session end --summary "<what changed and what was verified>"` when the task is complete.
 """
 
 

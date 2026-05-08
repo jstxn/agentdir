@@ -232,9 +232,10 @@ agentdir emit --type <type> --body <file>
 
 ### FR2a: Manage Active Session
 
-The CLI must let agents start, inspect, and end the active session.
+The CLI must let agents ensure, inspect, start, and end the active session. Normal coding agents should use the idempotent ensure path so humans are not asked to start sessions by hand.
 
 ```text
+agentdir session ensure --title <title>
 agentdir session start --title <title>
 agentdir session current
 agentdir session end --summary <file>
@@ -339,6 +340,12 @@ The CLI must also generate Codex skill guidance at user, project, or store scope
 ```text
 agentdir skills install codex --target user|project|store
 ```
+
+Acceptance criteria:
+
+- Generated agent guidance states that users should not have to run AgentDir commands during normal coding work.
+- Generated agent guidance tells coding agents to run `agentdir session ensure`, build context, wrap evidence commands, and review evidence automatically.
+- Setup remains safe to rerun and should be the only command a human normally needs inside a repository.
 
 ### FR10: Review Session Evidence
 

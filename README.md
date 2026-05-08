@@ -50,7 +50,7 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.2' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -65,21 +65,17 @@ agentdir setup
 
 That creates the repo-local `.agentdir` store, installs AgentDir-managed Git hook shims, and installs the Codex skill into the user skill directory. The default is intentionally hands-off for coding agents. Use `agentdir setup --codex-skill store` if you want the generated skill artifact to stay inside `.agentdir` instead of the user profile.
 
-Normal agent workflow:
+After setup, the human workflow is just normal coding-agent work. The installed Codex skill tells the agent to use AgentDir in the background.
 
-```bash
-agentdir session start --title "Fix failing checkout flow"
-agentdir context build "Fix failing checkout flow"
-agentdir memory search "checkout failure tests"
-agentdir memory explain "checkout failure tests"
-agentdir run -- pytest -q
-agentdir summarize
-agentdir evidence
-agentdir doctor
-agentdir session end --summary /tmp/final-summary.txt
-```
+What the agent handles:
 
-Agents can still emit custom records, but normal tool evidence should go through `agentdir run` so calls and results are captured together.
+- creates or reuses a session with `agentdir session ensure`
+- builds task context from prior AgentDir memory when useful
+- wraps verification commands with `agentdir run`
+- records important blockers, decisions, and handoffs
+- checks `summarize`, `evidence`, and `doctor` before making claims
+
+The CLI remains available for inspection and debugging, but daily users should not have to start sessions or run evidence commands by hand.
 
 ## Store Shape
 
@@ -116,7 +112,7 @@ Create the repo-local `.agentdir` store and capture a command:
 
 ```bash
 PYTHONPATH=src python3 -m agentdir setup --codex-skill store
-PYTHONPATH=src python3 -m agentdir session start --title "demo session"
+PYTHONPATH=src python3 -m agentdir session ensure --title "demo session"
 PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
 PYTHONPATH=src python3 -m agentdir memory search "python agent session"
 PYTHONPATH=src python3 -m agentdir context build "python agent session"

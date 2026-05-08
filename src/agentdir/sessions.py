@@ -64,20 +64,27 @@ def read_current_session(root: str | Path) -> SessionState | None:
 def require_current_session(root: str | Path) -> SessionState:
     state = read_current_session(root)
     if state is None or state.status != "active":
-        raise AgentDirError("No active AgentDir session; run: agentdir session start")
+        raise AgentDirError("No active AgentDir session; run: agentdir session ensure")
     return state
 
 
-def ensure_session(root: str | Path, session_id: str | None = None, *, title: str | None = None) -> SessionState:
+def ensure_session(
+    root: str | Path,
+    session_id: str | None = None,
+    *,
+    title: str | None = None,
+    actor: str = "agent",
+    emit_started: bool = True,
+) -> SessionState:
     if session_id:
         current = read_current_session(root)
         if current and current.session_id == session_id and current.status == "active":
             return current
-        return start_session(root, session_id=session_id, title=title, emit_started=False)
+        return start_session(root, session_id=session_id, title=title, actor=actor, emit_started=emit_started)
     current = read_current_session(root)
     if current and current.status == "active":
         return current
-    return start_session(root, title=title or "AgentDir auto session")
+    return start_session(root, title=title or "AgentDir auto session", actor=actor, emit_started=emit_started)
 
 
 def start_session(

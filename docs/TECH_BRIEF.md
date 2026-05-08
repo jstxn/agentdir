@@ -365,6 +365,7 @@ Current CLI:
 agentdir setup [--codex-skill user|project|store|none]
 agentdir init [<root>] [--scope <scope>]
 agentdir root [--scope <scope>]
+agentdir session ensure [--id <id>] [--title <title>]
 agentdir session start [--id <id>] [--title <title>]
 agentdir session current
 agentdir session end [--summary <file>]
@@ -386,6 +387,8 @@ agentdir summarize [--session <id>]
 agentdir evidence [--session <id>]
 agentdir doctor [--root <root>] [--scope <scope>]
 ```
+
+`session ensure` is the agent-owned path. It creates a session only when one is missing, so generated skills and future tool integrations can start recording without asking the human to manage session state.
 
 ## 14. Implementation Recommendation
 

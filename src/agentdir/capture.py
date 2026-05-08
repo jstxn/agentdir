@@ -65,7 +65,7 @@ def run_tool(
         raise AgentDirError("max_capture_bytes must be non-negative")
 
     cwd_path = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
-    session = ensure_session(root, session_id, title=f"AgentDir run: {argv[0]}")
+    session = ensure_session(root, session_id, title=f"AgentDir run: {argv[0]}", emit_started=session_id is None)
     tool = tool_name or Path(argv[0]).name
     start = datetime.now(UTC)
     command_text = " ".join(argv)

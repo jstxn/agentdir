@@ -87,6 +87,25 @@ def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) 
     run_cli("session", "current", cwd=repo, expected_returncode=2)
 
 
+def test_session_ensure_creates_and_reuses_active_session(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    created = run_cli("session", "ensure", "--title", "Hands Off Agent Work", "--json", cwd=repo)
+    reused = run_cli("session", "ensure", "--title", "Ignored Because Active", "--json", cwd=repo)
+    current = run_cli("session", "current", "--json", cwd=repo)
+    run_cli("index", "rebuild", cwd=repo)
+
+    created_payload = json.loads(created.stdout)
+    reused_payload = json.loads(reused.stdout)
+    current_payload = json.loads(current.stdout)
+    rows = query_rows(repo / ".agentdir", "session.started")
+
+    assert created_payload["session_id"] == reused_payload["session_id"]
+    assert current_payload["session_id"] == created_payload["session_id"]
+    assert created_payload["title"] == "Hands Off Agent Work"
+    assert len(rows) == 1
+
+
 def test_run_wraps_tool_call_result_exit_code_and_redacted_output(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     run_cli("session", "start", "--id", "run-session", cwd=repo)
@@ -198,7 +217,10 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
 
     assert payload["root"] == str(repo / ".agentdir")
     assert skill_path.is_file()
-    assert "agentdir run -- <command>" in skill_path.read_text(encoding="utf-8")
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert "The user should not have to run AgentDir commands during normal coding work." in skill_text
+    assert "agentdir session ensure" in skill_text
+    assert "agentdir run -- <command>" in skill_text
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
 
 

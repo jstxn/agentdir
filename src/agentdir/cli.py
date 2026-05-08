@@ -25,7 +25,7 @@ from .memory import (
 from .query import query_messages
 from .replay import replay_session
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
-from .sessions import end_session, read_current_session, start_session
+from .sessions import end_session, ensure_session, read_current_session, start_session
 from .skills import install_codex_skill
 from .store import AgentDirError, init_root, resolve_root
 
@@ -232,6 +232,20 @@ def cmd_session_current(args: argparse.Namespace) -> int:
     state = read_current_session(command_root(args))
     if state is None:
         raise AgentDirError("No active AgentDir session")
+    if args.json:
+        print_json(asdict(state))
+    else:
+        print(state.session_id)
+    return 0
+
+
+def cmd_session_ensure(args: argparse.Namespace) -> int:
+    state = ensure_session(
+        command_root(args, create=True),
+        session_id=args.session_id,
+        title=args.title,
+        actor=args.actor,
+    )
     if args.json:
         print_json(asdict(state))
     else:
@@ -498,6 +512,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(session_current)
     session_current.add_argument("--json", action="store_true")
     session_current.set_defaults(func=cmd_session_current)
+    session_ensure = session_sub.add_parser("ensure")
+    add_scope_args(session_ensure)
+    session_ensure.add_argument("--id", dest="session_id")
+    session_ensure.add_argument("--title")
+    session_ensure.add_argument("--actor", default="agent")
+    session_ensure.add_argument("--json", action="store_true")
+    session_ensure.set_defaults(func=cmd_session_ensure)
     session_end = session_sub.add_parser("end")
     add_scope_args(session_end)
     session_end.add_argument("--status", default="completed")
