@@ -24,6 +24,11 @@ from .memory import (
 )
 from .query import query_messages
 from .replay import replay_session
+from .retention import (
+    archive_sessions,
+    format_retention_result,
+    prune_sessions,
+)
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
 from .sessions import end_session, ensure_session, read_current_session, start_session
 from .skills import install_codex_skill
@@ -138,6 +143,37 @@ def cmd_index_rebuild(args: argparse.Namespace) -> int:
 def cmd_index_update(args: argparse.Namespace) -> int:
     result = update_index(command_root(args, create=True))
     print_json({"indexed": result.indexed, "malformed": result.malformed, "duplicates": result.duplicates})
+    return 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    result = archive_sessions(
+        command_root(args, create=True),
+        sessions=args.sessions,
+        older_than_days=args.older_than_days,
+        keep_recent=args.keep_recent,
+        apply=args.apply,
+    )
+    if args.json:
+        print_json(result.as_dict())
+    else:
+        print(format_retention_result(result))
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    result = prune_sessions(
+        command_root(args, create=True),
+        sessions=args.sessions,
+        older_than_days=args.older_than_days,
+        keep_recent=args.keep_recent,
+        include_live_sessions=args.include_live_sessions,
+        apply=args.apply,
+    )
+    if args.json:
+        print_json(result.as_dict())
+    else:
+        print(format_retention_result(result))
     return 0
 
 
@@ -561,6 +597,25 @@ def build_parser() -> argparse.ArgumentParser:
     update = index_sub.add_parser("update")
     add_scope_args(update)
     update.set_defaults(func=cmd_index_update)
+
+    archive = sub.add_parser("archive")
+    add_scope_args(archive)
+    archive.add_argument("--session", action="append", dest="sessions")
+    archive.add_argument("--older-than-days", type=int)
+    archive.add_argument("--keep-recent", type=int)
+    archive.add_argument("--apply", action="store_true")
+    archive.add_argument("--json", action="store_true")
+    archive.set_defaults(func=cmd_archive)
+
+    prune = sub.add_parser("prune")
+    add_scope_args(prune)
+    prune.add_argument("--session", action="append", dest="sessions")
+    prune.add_argument("--older-than-days", type=int)
+    prune.add_argument("--keep-recent", type=int)
+    prune.add_argument("--include-live-sessions", action="store_true")
+    prune.add_argument("--apply", action="store_true")
+    prune.add_argument("--json", action="store_true")
+    prune.set_defaults(func=cmd_prune)
 
     query = sub.add_parser("query")
     add_scope_args(query)

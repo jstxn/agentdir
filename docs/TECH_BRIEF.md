@@ -116,6 +116,13 @@ agentdir-root/      +--------+---------+
         ab/
           cd/
             <full-sha256>
+  archives/
+    sessions/
+      <session-id>/
+        Maildir/
+          tmp/
+          new/
+          cur/
   indexes/
     agentdir.sqlite3
   state/
@@ -125,7 +132,7 @@ agentdir-root/      +--------+---------+
   integrations/
 ```
 
-AgentDir creates `sessions`, `actors`, `artifacts`, `indexes`, `state`, `hooks`, and `integrations`. The root itself may be a project hidden directory such as `<repo>/.agentdir`, a user store such as `~/.agentdir`, or an explicit custom path.
+AgentDir creates `sessions`, `actors`, `artifacts`, `archives`, `indexes`, `state`, `hooks`, and `integrations`. The root itself may be a project hidden directory such as `<repo>/.agentdir`, a user store such as `~/.agentdir`, or an explicit custom path.
 
 ## 5. Envelope Format
 
@@ -357,7 +364,27 @@ X-AgentDir-Blob-Mime: text/x-diff
 
 AgentDir supports add and reference. Garbage collection should be postponed until reachability is explicit.
 
-## 13. CLI Surface
+## 13. Retention Model
+
+Retention is explicit only. AgentDir must not archive, prune, compact, or garbage collect records from background workflows, setup, hooks, doctor, summarize, evidence, memory search, or context build.
+
+Session archive moves selected inactive sessions from:
+
+```text
+sessions/<session-id>/
+```
+
+to:
+
+```text
+archives/sessions/<session-id>/
+```
+
+Archived sessions are outside the active mailbox discovery path, so an index rebuild drops them from active query, replay, and memory output without destroying the raw envelopes.
+
+Prune deletes archived sessions by default. It can delete live sessions only when the user explicitly passes `--include-live-sessions`. Both commands are dry-runs unless `--apply` is passed, and the current active session is protected.
+
+## 14. CLI Surface
 
 Current CLI:
 
@@ -374,6 +401,8 @@ agentdir emit [--root <root>] [--scope <scope>] [--session <id>] --type <type> -
 agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
 agentdir send [--root <root>] [--scope <scope>] --from <actor> --to <actor> --type <type> --body <file>
 agentdir artifact add [--root <root>] [--scope <scope>] <path>
+agentdir archive [--session <id>] [--older-than-days <days>] [--keep-recent <n>] [--apply]
+agentdir prune [--session <id>] [--older-than-days <days>] [--keep-recent <n>] [--include-live-sessions] [--apply]
 agentdir hooks install|status|uninstall
 agentdir skills install codex [--target user|project|store]
 agentdir index rebuild [--root <root>] [--scope <scope>]

@@ -117,6 +117,10 @@ A directory with `tmp`, `new`, and `cur`. `tmp` holds incomplete writes, `new` h
 
 A logical agentic work session. Every turn, tool call, tool result, diff, and summary can be emitted into a session mailbox.
 
+### Archive
+
+A user-managed holding area for session mailboxes that should leave active query and memory output without being deleted.
+
 ### Actor
 
 A human, agent, supervisor, CI runner, verifier, or tool process with an inbox and outbox.
@@ -148,6 +152,18 @@ Acceptance criteria:
 - Given a populated session mailbox, `agentdir index rebuild` recreates the message table.
 - Rebuilt session timeline preserves event order according to envelope metadata.
 - Missing or malformed envelopes are reported without stopping unrelated records from indexing.
+
+### Explicit Retention
+
+As an engineer, I can archive or prune selected sessions only when I explicitly run a retention command so that AgentDir does not silently delete evidence.
+
+Acceptance criteria:
+
+- `agentdir archive` moves selected inactive sessions from `sessions/` to `archives/sessions/`.
+- `agentdir prune` deletes archived sessions by default.
+- Both commands dry-run unless the user passes `--apply`.
+- The current active session is protected from archive and prune operations.
+- Prune can target live sessions only when the user passes `--include-live-sessions`.
 
 ### Crash-Safe Event Emission
 
@@ -364,6 +380,7 @@ agentdir evidence
 - Index rebuild must tolerate malformed records.
 - Duplicate `Message-ID`s must be detected.
 - All semantic state changes must be append-only.
+- Retention must be explicit; background agent workflows must not archive or prune records.
 
 ### Inspectability
 

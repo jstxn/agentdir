@@ -129,6 +129,7 @@ def test_init_creates_v1_root_layout(tmp_path: Path) -> None:
     assert (root / "sessions").is_dir()
     assert (root / "actors").is_dir()
     assert (root / "artifacts" / "blobs" / "sha256").is_dir()
+    assert (root / "archives" / "sessions").is_dir()
     assert (root / "indexes").is_dir()
     assert (root / "state").is_dir()
     assert (root / "hooks").is_dir()
@@ -244,6 +245,154 @@ def test_index_rebuild_recreates_database_after_index_deletion(tmp_path: Path) -
     run_cli("index", "rebuild", "--root", str(root))
 
     assert fetch_scalar(db_path, "select count(*) from messages") == 2
+
+
+def test_archive_dry_run_and_apply_moves_session_out_of_active_index(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    body = write_body(tmp_path / "body.txt", "archive candidate event")
+    run_cli(
+        "emit",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--type",
+        "agent.message",
+        "--body",
+        str(body),
+    )
+    run_cli("index", "rebuild", "--root", str(root))
+
+    dry_run = run_cli("archive", "--root", str(root), "--session", "session-1", "--json")
+    payload = json.loads(dry_run.stdout)
+
+    assert payload["dry_run"] is True
+    assert payload["selected"][0]["session_id"] == "session-1"
+    assert (root / "sessions" / "session-1").is_dir()
+    assert not (root / "archives" / "sessions" / "session-1").exists()
+
+    applied = run_cli(
+        "archive",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--apply",
+        "--json",
+    )
+    applied_payload = json.loads(applied.stdout)
+
+    assert applied_payload["dry_run"] is False
+    assert applied_payload["rebuilt_index"] is True
+    assert not (root / "sessions" / "session-1").exists()
+    assert (root / "archives" / "sessions" / "session-1" / "Maildir").is_dir()
+    assert fetch_scalar(index_path(root), "select count(*) from messages") == 0
+
+
+def test_archive_refuses_to_move_the_current_active_session(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("session", "start", "--root", str(root), "--id", "active-session")
+
+    result = run_cli(
+        "archive",
+        "--root",
+        str(root),
+        "--session",
+        "active-session",
+        "--apply",
+        expected_returncode=2,
+    )
+
+    assert "refusing to archive active session" in result.stderr
+    assert (root / "sessions" / "active-session").is_dir()
+
+
+def test_prune_deletes_archived_sessions_only_when_applied(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    body = write_body(tmp_path / "body.txt", "prune candidate event")
+    run_cli(
+        "emit",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--type",
+        "agent.message",
+        "--body",
+        str(body),
+    )
+    run_cli("archive", "--root", str(root), "--session", "session-1", "--apply")
+
+    dry_run = run_cli("prune", "--root", str(root), "--session", "session-1", "--json")
+    payload = json.loads(dry_run.stdout)
+
+    assert payload["dry_run"] is True
+    assert payload["selected"][0]["store"] == "archives"
+    assert (root / "archives" / "sessions" / "session-1").is_dir()
+
+    applied = run_cli(
+        "prune",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--apply",
+        "--json",
+    )
+    applied_payload = json.loads(applied.stdout)
+
+    assert applied_payload["dry_run"] is False
+    assert applied_payload["changed"] == ["session-1:archives->deleted"]
+    assert not (root / "archives" / "sessions" / "session-1").exists()
+
+
+def test_prune_live_session_requires_explicit_live_store_flag(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    body = write_body(tmp_path / "body.txt", "live prune candidate event")
+    run_cli(
+        "emit",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--type",
+        "agent.message",
+        "--body",
+        str(body),
+    )
+    run_cli("index", "rebuild", "--root", str(root))
+
+    result = run_cli(
+        "prune",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        expected_returncode=2,
+    )
+
+    assert "unknown session id" in result.stderr
+    assert (root / "sessions" / "session-1").is_dir()
+
+    applied = run_cli(
+        "prune",
+        "--root",
+        str(root),
+        "--session",
+        "session-1",
+        "--include-live-sessions",
+        "--apply",
+        "--json",
+    )
+    applied_payload = json.loads(applied.stdout)
+
+    assert applied_payload["rebuilt_index"] is True
+    assert applied_payload["changed"] == ["session-1:sessions->deleted"]
+    assert not (root / "sessions" / "session-1").exists()
+    assert fetch_scalar(index_path(root), "select count(*) from messages") == 0
 
 
 def test_query_filters_records_by_session(tmp_path: Path) -> None:

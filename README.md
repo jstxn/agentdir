@@ -71,7 +71,7 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.4' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.4.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -92,7 +92,8 @@ What the agent handles:
 
 - creates or reuses a session with `agentdir session ensure`
 - builds task context from prior AgentDir memory when useful
-- wraps verification commands with `agentdir run`
+- wraps evidence-bearing commands with `agentdir run`
+- leaves routine exploration and file reads as plain shell commands
 - records important blockers, decisions, and handoffs
 - checks `summarize`, `evidence`, and `doctor` before making claims
 
@@ -106,6 +107,7 @@ The CLI remains available for inspection and debugging, but daily users should n
   actors/<actor-id>/inbox/Maildir/{tmp,new,cur}
   actors/<actor-id>/outbox/Maildir/{tmp,new,cur}
   artifacts/blobs/sha256/<prefix>/<hash>
+  archives/sessions/<session-id>/Maildir/{tmp,new,cur}
   indexes/agentdir.sqlite3
   state/current-session.json
   integrations/
@@ -120,6 +122,8 @@ AgentDir is designed around five production behaviors:
 5. Memory is built in: the SQLite sidecar contains exact indexes plus vector memory documents.
 
 Vector memory is not a separate service. `agentdir index rebuild` derives message memory and session-summary memory from the same immutable envelopes. `agentdir memory search`, `agentdir memory explain`, and `agentdir context build` rebuild by default so agents can retrieve similar prior work and produce task-ready context without a separate setup step.
+
+Retention is explicit only. `agentdir archive` moves selected inactive sessions out of the active session store, and `agentdir prune` deletes selected archived sessions. Both commands are dry-runs unless the user passes `--apply`; AgentDir does not run retention automatically.
 
 ## Quick Start
 

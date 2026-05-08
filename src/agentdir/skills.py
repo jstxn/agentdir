@@ -29,8 +29,12 @@ user when reporting evidence, blockers, or setup problems.
 
 ## Tool Calls
 
-- Run verification and build commands through `agentdir run -- <command>`.
+- Run evidence-bearing commands through `agentdir run -- <command>`.
+- Evidence-bearing commands include tests, lint, typecheck, build, release checks, reproduced failures, and diagnostics that support a final claim.
+- Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks.
+- Use plain shell commands while reading files, mapping code, or gathering low-level context.
 - `agentdir run` records both the tool call and the tool result, while still streaming command output to the terminal.
+- Do not wrap command chains unless the whole chain is evidence worth preserving.
 - If a command must not be wrapped, emit the evidence afterward with `agentdir emit`.
 
 ## During Work

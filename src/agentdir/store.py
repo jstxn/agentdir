@@ -28,6 +28,7 @@ class RootPaths:
     actors: Path
     queues: Path
     artifacts: Path
+    archives: Path
     indexes: Path
     state: Path
     hooks: Path
@@ -55,6 +56,7 @@ def paths_for(root: str | Path) -> RootPaths:
         actors=root_path / "actors",
         queues=root_path / "queues",
         artifacts=root_path / "artifacts",
+        archives=root_path / "archives",
         indexes=root_path / "indexes",
         state=root_path / "state",
         hooks=root_path / "hooks",
@@ -140,6 +142,7 @@ def init_root(root: str | Path) -> RootPaths:
         paths.actors,
         paths.queues,
         paths.artifacts / "blobs" / "sha256",
+        paths.archives / "sessions",
         paths.indexes,
         paths.state,
         paths.hooks,

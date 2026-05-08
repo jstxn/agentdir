@@ -38,7 +38,8 @@ Agent responsibilities:
 - run `agentdir session ensure --title "<task>"` when coding work begins
 - run `agentdir setup` once if the repository has not been prepared yet
 - build context from prior memory when the task is non-trivial
-- wrap verification, build, and release commands with `agentdir run`
+- wrap evidence-bearing commands with `agentdir run`
+- use plain shell commands for routine exploration and file reads
 - record important blockers, decisions, and handoffs
 - use `agentdir summarize`, `agentdir evidence`, and `agentdir doctor` before making evidence-backed claims
 
@@ -73,6 +74,8 @@ agentdir run -- git diff --check
 ```
 
 `agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. Agents should use this automatically for commands they run as evidence.
+
+Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks. Use plain shell commands while reading files, mapping code, or gathering low-level context. The evidence trail should capture verification, reproduced failures, important diagnostics, and final support for claims, not every glance at a file.
 
 ## Capturing Diffs As Artifacts
 
@@ -128,6 +131,19 @@ Agents should end the session when the task is done:
 ```bash
 agentdir session end --summary /tmp/final-summary.txt
 ```
+
+## Store Hygiene
+
+Retention commands are explicit user operations, not background maintenance. They default to dry-run and require `--apply` before moving or deleting session records.
+
+```bash
+agentdir archive --keep-recent 20
+agentdir archive --older-than-days 30 --apply
+agentdir prune --session old-session-id
+agentdir prune --session old-session-id --apply
+```
+
+`agentdir archive` moves inactive sessions from `sessions/` to `archives/sessions/`, then rebuilds the active index when applied. `agentdir prune` deletes archived sessions by default. It only considers live `sessions/` when the user also passes `--include-live-sessions`. The current active session is protected.
 
 ## Git Hooks
 

@@ -222,6 +222,7 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     assert "The user should not have to run AgentDir commands during normal coding work." in skill_text
     assert "agentdir session ensure" in skill_text
     assert "agentdir run -- <command>" in skill_text
+    assert "Do not wrap routine exploration commands" in skill_text
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
 
 

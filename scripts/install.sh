@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.3.4}"
+AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.4.0}"
 AGENTDIR_REPO="${AGENTDIR_REPO:-jstxn/agentdir}"
 AGENTDIR_PACKAGE_VERSION="${AGENTDIR_VERSION#v}"
 AGENTDIR_WHEEL_NAME="agentdir-${AGENTDIR_PACKAGE_VERSION}-py3-none-any.whl"
 AGENTDIR_PREFIX="${AGENTDIR_PREFIX:-$HOME/.local}"
 AGENTDIR_HOME="${AGENTDIR_HOME:-$HOME/.local/share/agentdir}"
+AGENTDIR_MIN_PYTHON_MAJOR=3
+AGENTDIR_MIN_PYTHON_MINOR=11
 AGENTDIR_TMP_DIR=""
 
 log() {
@@ -20,6 +22,35 @@ fail() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+python_is_supported() {
+  local python_cmd="$1"
+  "$python_cmd" - "$AGENTDIR_MIN_PYTHON_MAJOR" "$AGENTDIR_MIN_PYTHON_MINOR" <<'PY'
+import sys
+
+required = (int(sys.argv[1]), int(sys.argv[2]))
+raise SystemExit(0 if sys.version_info[:2] >= required else 1)
+PY
+}
+
+find_python() {
+  if [ -n "${AGENTDIR_PYTHON:-}" ]; then
+    command -v "$AGENTDIR_PYTHON" >/dev/null 2>&1 || fail "AGENTDIR_PYTHON not found: $AGENTDIR_PYTHON"
+    python_is_supported "$AGENTDIR_PYTHON" || fail "AGENTDIR_PYTHON must be Python 3.11 or newer"
+    printf '%s\n' "$AGENTDIR_PYTHON"
+    return
+  fi
+
+  local candidate
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
+      command -v "$candidate"
+      return
+    fi
+  done
+
+  fail "missing Python 3.11 or newer; set AGENTDIR_PYTHON=/path/to/python3.11+"
 }
 
 download_wheel() {
@@ -49,10 +80,10 @@ install_with_pipx() {
 
 install_with_venv() {
   local wheel="$1"
+  local python_cmd="$2"
   local venv="$AGENTDIR_HOME/venv"
-  need_cmd python3
   log "installing into $venv"
-  python3 -m venv "$venv"
+  "$python_cmd" -m venv "$venv"
   "$venv/bin/python" -m pip install --upgrade pip >/dev/null
   "$venv/bin/python" -m pip install --force-reinstall "$wheel" >/dev/null
   mkdir -p "$AGENTDIR_PREFIX/bin"
@@ -61,7 +92,8 @@ install_with_venv() {
 }
 
 main() {
-  need_cmd python3
+  local python_cmd
+  python_cmd="$(find_python)"
   local tmp_dir
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdir-install.XXXXXX")"
   AGENTDIR_TMP_DIR="$tmp_dir"
@@ -72,7 +104,7 @@ main() {
   if [ "${AGENTDIR_FORCE_VENV:-0}" != "1" ] && install_with_pipx "$wheel"; then
     :
   else
-    install_with_venv "$wheel"
+    install_with_venv "$wheel" "$python_cmd"
   fi
 
   if ! command -v agentdir >/dev/null 2>&1; then

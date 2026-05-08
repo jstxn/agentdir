@@ -34,4 +34,4 @@
 1. Should the index live inside the AgentDir root or in an external cache path?
 2. Should a future `agentdir repair` command exist, separate from read-only `doctor`?
 3. Should old `tmp` files be cleaned automatically?
-4. Should `cur` records ever be pruned, or is retention explicit only?
+4. What higher-level retention presets should sit on top of explicit `archive` and `prune` commands?
