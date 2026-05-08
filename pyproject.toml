@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentdir"
+version = "0.1.0"
+description = "Local-first Maildir-inspired work mailstore for software agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "AgentDir Contributors" }
+]
+dependencies = []
+
+[project.scripts]
+agentdir = "agentdir.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
