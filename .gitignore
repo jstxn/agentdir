@@ -1,4 +1,5 @@
 .venv/
+.agentdir/
 .pytest_cache/
 __pycache__/
 *.py[cod]
@@ -6,4 +7,3 @@ __pycache__/
 dist/
 build/
 uv.lock
-

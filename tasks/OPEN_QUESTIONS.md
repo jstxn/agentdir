@@ -20,7 +20,7 @@
 1. Should V1 use Python's `mailbox.Maildir` or a minimal custom writer?
 2. Is SQLite FTS5 available enough to depend on for local installs?
 3. Should the package be installable as `agentdir` or `agent-maildir`?
-4. Should the root contain `.agentdir/config.json`, TOML, or no config until needed?
+4. Should future config remain JSON, move to TOML, or support both?
 5. Should body hashes cover the raw body, decoded body, or entire message bytes?
 
 ## Security

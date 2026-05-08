@@ -32,7 +32,7 @@ Priority: `P0`
 
 Tasks:
 
-- Define `.agentdir/VERSION`.
+- Define root `VERSION`.
 - Define `config.json` minimal fields.
 - Define sessions, actors, artifacts, and indexes paths.
 - Document which paths are canonical versus cache.
@@ -90,7 +90,7 @@ Tasks:
 
 Acceptance criteria:
 
-- `agentdir init <root>` creates a valid root.
+- `agentdir init` creates a valid project-scoped root at `.agentdir` by default.
 - Re-running init is safe.
 
 ### AD-021: Implement mailbox helper

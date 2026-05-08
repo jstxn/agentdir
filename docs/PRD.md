@@ -157,7 +157,7 @@ As an engineer, I can place a task or approval into an agent inbox and see the a
 
 Acceptance criteria:
 
-- `agentdir actor create --root <root> <id>` creates inbox and outbox mailboxes.
+- `agentdir actor create <id>` creates inbox and outbox mailboxes in the current repo's `.agentdir` store by default.
 - `agentdir send --to <actor> ...` emits a message into the recipient inbox.
 - Message headers include sender, recipient, task ID, and event type.
 
@@ -197,10 +197,17 @@ Acceptance criteria:
 
 The CLI must create the root directory layout and any required metadata.
 
-V1 command:
+Default command:
+
+```text
+agentdir init
+```
+
+Optional root and scope selection:
 
 ```text
 agentdir init <root>
+agentdir init --scope user|global|machine|project
 ```
 
 ### FR2: Emit Event
@@ -210,7 +217,7 @@ The CLI must emit an immutable event envelope into a target mailbox.
 V1 command:
 
 ```text
-agentdir emit --root <root> --session <id> --type <type> --body <file>
+agentdir emit --session <id> --type <type> --body <file>
 ```
 
 ### FR3: Manage Actors
@@ -220,7 +227,7 @@ The CLI must create actor inboxes and outboxes.
 V1 command:
 
 ```text
-agentdir actor create --root <root> <actor-id>
+agentdir actor create <actor-id>
 ```
 
 ### FR4: Send Handoff Message
@@ -240,8 +247,8 @@ The CLI must scan visible records and write a rebuildable index.
 V1 commands:
 
 ```text
-agentdir index rebuild --root <root>
-agentdir index update --root <root>
+agentdir index rebuild
+agentdir index update
 ```
 
 ### FR6: Query Records
@@ -251,7 +258,7 @@ The CLI must query indexed records by session, type, actor, tool, task ID, git H
 V1 command:
 
 ```text
-agentdir query --root <root> [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
+agentdir query [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
 ```
 
 ### FR7: Replay Session
@@ -261,7 +268,7 @@ The CLI must render a session timeline from the index or raw envelopes.
 V1 command:
 
 ```text
-agentdir replay --root <root> --session <id>
+agentdir replay --session <id>
 ```
 
 ### FR8: Store Artifacts
@@ -271,7 +278,7 @@ The CLI must store artifact blobs by SHA-256 and emit references from envelopes.
 V1 command:
 
 ```text
-agentdir artifact add --root <root> <path>
+agentdir artifact add <path>
 ```
 
 ## 11. Non-Functional Requirements

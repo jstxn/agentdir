@@ -42,15 +42,11 @@ AgentDir is distributed through GitHub Releases. For the private `jstxn/agentdir
 gh auth login
 ```
 
-Install the latest V1 release:
+Install the latest V1 release with one command:
 
 ```bash
-tmpdir="$(mktemp -d)"
-gh release download v0.1.0 \
-  --repo jstxn/agentdir \
-  --pattern install-agentdir.sh \
-  --dir "$tmpdir"
-bash "$tmpdir/install-agentdir.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+  repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1 | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -82,21 +78,20 @@ Run from a checkout without installing:
 PYTHONPATH=src python3 -m agentdir --help
 ```
 
-Create a local AgentDir root and emit a session event:
+Create the repo-local `.agentdir` store and emit a session event:
 
 ```bash
-ROOT="$(mktemp -d)/agentdir-root"
 printf 'hello from an agent session\n' > /tmp/agentdir-body.txt
 
-PYTHONPATH=src python3 -m agentdir init "$ROOT"
+PYTHONPATH=src python3 -m agentdir init
+PYTHONPATH=src python3 -m agentdir root
 PYTHONPATH=src python3 -m agentdir emit \
-  --root "$ROOT" \
   --session demo-session \
   --type agent.message \
   --body /tmp/agentdir-body.txt
-PYTHONPATH=src python3 -m agentdir index rebuild --root "$ROOT"
-PYTHONPATH=src python3 -m agentdir replay --root "$ROOT" --session demo-session
-PYTHONPATH=src python3 -m agentdir doctor --root "$ROOT"
+PYTHONPATH=src python3 -m agentdir index rebuild
+PYTHONPATH=src python3 -m agentdir replay --session demo-session
+PYTHONPATH=src python3 -m agentdir doctor
 ```
 
 Run the dogfood demo:
@@ -106,6 +101,14 @@ bash examples/dogfood-session.sh
 ```
 
 Agentic coding recipes are in [docs/AGENTIC_CODING.md](docs/AGENTIC_CODING.md).
+
+AgentDir also works without `--root`. By default it writes to the nearest repo's project store:
+
+```text
+<repo>/.agentdir/
+```
+
+Use `--scope user`, `--scope global`, or `--scope machine` when a session should live outside the current repo.
 
 ## Verification
 

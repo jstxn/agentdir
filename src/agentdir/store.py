@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 STORE_VERSION = "0.1"
 CONFIG_DIR = ".agentdir"
 INDEX_FILE = "agentdir.sqlite3"
+SCOPE_CHOICES = ("project", "user", "global", "machine")
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
 
@@ -37,15 +41,70 @@ def normalize_root(root: str | Path) -> Path:
 
 def paths_for(root: str | Path) -> RootPaths:
     root_path = normalize_root(root)
+    meta_path = root_path
+    legacy_meta = root_path / CONFIG_DIR
+    if not (root_path / "VERSION").exists() and (legacy_meta / "VERSION").exists():
+        meta_path = legacy_meta
     return RootPaths(
         root=root_path,
-        meta=root_path / CONFIG_DIR,
+        meta=meta_path,
         sessions=root_path / "sessions",
         actors=root_path / "actors",
         queues=root_path / "queues",
         artifacts=root_path / "artifacts",
         indexes=root_path / "indexes",
     )
+
+
+def find_project_base(cwd: str | Path | None = None) -> Path:
+    start = Path(cwd or Path.cwd()).expanduser().resolve()
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=start,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve()
+    except OSError:
+        pass
+    return start
+
+
+def machine_root() -> Path:
+    override = os.environ.get("AGENTDIR_MACHINE_ROOT")
+    if override:
+        return normalize_root(override)
+    if platform.system() == "Darwin":
+        return Path("/Library/Application Support/AgentDir").resolve()
+    return Path("/var/lib/agentdir").resolve()
+
+
+def root_for_scope(scope: str | None = None, cwd: str | Path | None = None) -> Path:
+    selected = scope or os.environ.get("AGENTDIR_SCOPE") or "project"
+    if selected not in SCOPE_CHOICES:
+        raise AgentDirError(
+            f"Invalid scope {selected!r}; expected one of {', '.join(SCOPE_CHOICES)}"
+        )
+    if selected == "project":
+        return find_project_base(cwd) / CONFIG_DIR
+    if selected in {"user", "global"}:
+        return Path.home().expanduser().resolve() / CONFIG_DIR
+    return machine_root()
+
+
+def resolve_root(
+    root: str | Path | None = None,
+    scope: str | None = None,
+    cwd: str | Path | None = None,
+) -> Path:
+    if root is not None:
+        return normalize_root(root)
+    if scope is None and os.environ.get("AGENTDIR_ROOT"):
+        return normalize_root(os.environ["AGENTDIR_ROOT"])
+    return root_for_scope(scope, cwd)
 
 
 def validate_id(value: str, label: str = "id") -> str:
@@ -149,4 +208,3 @@ def discover_mailboxes(root: str | Path) -> list[tuple[str, Path]]:
         if is_mailbox(queue):
             discovered.append(("queue", queue))
     return discovered
-

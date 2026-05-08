@@ -24,25 +24,25 @@ chmod +x dist/install-agentdir.sh
 Expected assets:
 
 ```text
-dist/agentdir-0.1.0-py3-none-any.whl
-dist/agentdir-0.1.0.tar.gz
+dist/agentdir-0.1.1-py3-none-any.whl
+dist/agentdir-0.1.1.tar.gz
 dist/install-agentdir.sh
 ```
 
 ## Tag And Release
 
 ```bash
-git tag -a v0.1.0 -m "Release AgentDir v0.1.0"
+git tag -a v0.1.1 -m "Release AgentDir v0.1.1"
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 
-gh release create v0.1.0 \
-  dist/agentdir-0.1.0-py3-none-any.whl \
-  dist/agentdir-0.1.0.tar.gz \
+gh release create v0.1.1 \
+  dist/agentdir-0.1.1-py3-none-any.whl \
+  dist/agentdir-0.1.1.tar.gz \
   dist/install-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.1.0" \
-  --notes-file docs/releases/v0.1.0.md
+  --title "AgentDir v0.1.1" \
+  --notes-file docs/releases/v0.1.1.md
 ```
 
 ## Release Verification
@@ -51,7 +51,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.1.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.1.1 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 ```
@@ -59,12 +59,15 @@ AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agent
 Then run a real local session:
 
 ```bash
-root="$tmp/root"
+repo="$tmp/repo"
+mkdir -p "$repo"
+git -C "$repo" init
 printf 'release smoke\n' > "$tmp/body.txt"
-"$tmp/prefix/bin/agentdir" init "$root"
-"$tmp/prefix/bin/agentdir" emit --root "$root" --session release-smoke --type agent.message --body "$tmp/body.txt"
-"$tmp/prefix/bin/agentdir" index rebuild --root "$root"
-"$tmp/prefix/bin/agentdir" replay --root "$root" --session release-smoke
-"$tmp/prefix/bin/agentdir" doctor --root "$root"
+cd "$repo"
+"$tmp/prefix/bin/agentdir" init
+"$tmp/prefix/bin/agentdir" root
+"$tmp/prefix/bin/agentdir" emit --session release-smoke --type agent.message --body "$tmp/body.txt"
+"$tmp/prefix/bin/agentdir" index rebuild
+"$tmp/prefix/bin/agentdir" replay --session release-smoke
+"$tmp/prefix/bin/agentdir" doctor
 ```
-

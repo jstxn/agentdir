@@ -16,13 +16,15 @@ The goal is not a polished user experience. The goal is to prove the product the
 This demo stays inside the existing V1 command contract:
 
 ```text
-agentdir init <root>
-agentdir emit --root <root> --session <id> --type <type> --body <file>
-agentdir index rebuild --root <root>
-agentdir query --root <root> --session <id>
-agentdir replay --root <root> --session <id>
-agentdir doctor --root <root>
+agentdir init [<root>]
+agentdir emit [--root <root>] [--scope <scope>] --session <id> --type <type> --body <file>
+agentdir index rebuild [--root <root>] [--scope <scope>]
+agentdir query [--root <root>] [--scope <scope>] --session <id>
+agentdir replay [--root <root>] [--scope <scope>] --session <id>
+agentdir doctor [--root <root>] [--scope <scope>]
 ```
+
+The normal engineer flow omits `--root`, which writes to the nearest repo's `.agentdir` store. The demo script passes a temporary explicit root so it can clean up after itself.
 
 It intentionally exercises the event types called out in the planning docs:
 
@@ -63,7 +65,7 @@ If `KEEP_WORKDIR=1` is set, the script prints the retained root so you can inspe
 
 Expected flow:
 
-1. `init` creates the `.agentdir`, `sessions`, `actors`, `artifacts`, and `indexes` layout.
+1. `init` creates the `VERSION`, `config.json`, `sessions`, `actors`, `artifacts`, and `indexes` layout.
 2. A toy coding-session trace is written into the session mailbox through immutable envelopes.
 3. `index rebuild` creates `indexes/agentdir.sqlite3`.
 4. `query --session <id>` shows the emitted records.

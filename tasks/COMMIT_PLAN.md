@@ -115,7 +115,7 @@ Files:
 
 Exit criteria:
 
-- `agentdir init <root>` creates `.agentdir`, sessions, actors, artifacts, and indexes directories.
+- `agentdir init` creates `VERSION`, `config.json`, sessions, actors, artifacts, and indexes directories in the default project store.
 - Mailbox helper creates `tmp`, `new`, and `cur`.
 - Existing valid roots are handled idempotently.
 

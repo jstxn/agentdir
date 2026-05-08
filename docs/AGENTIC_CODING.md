@@ -22,14 +22,12 @@ The index is disposable. The envelope store is the recovery source.
 ## Session Flight Recorder
 
 ```bash
-root="${AGENTDIR_ROOT:-$HOME/.agentdir}"
 session="repo-$(basename "$PWD")-$(date -u +%Y%m%dT%H%M%SZ)"
 
-agentdir init "$root"
+agentdir init --scope project
 
 printf 'User asked for a narrow bug fix in the current repo.\n' > /tmp/user-message.txt
 agentdir emit \
-  --root "$root" \
   --session "$session" \
   --type user.message \
   --workspace "$(basename "$PWD")" \
@@ -45,13 +43,12 @@ tool=pytest
 argv=python -m pytest -q
 EOF
 
-agentdir emit --root "$root" --session "$session" --type tool.call --tool pytest --body /tmp/tool-call.txt
+agentdir emit --session "$session" --type tool.call --tool pytest --body /tmp/tool-call.txt
 
 python -m pytest -q > /tmp/tool-result.txt 2>&1
 status=$?
 
 agentdir emit \
-  --root "$root" \
   --session "$session" \
   --type tool.result \
   --tool pytest \
@@ -65,7 +62,6 @@ agentdir emit \
 git diff > /tmp/agentdir.diff
 
 agentdir emit \
-  --root "$root" \
   --session "$session" \
   --type file.diff \
   --artifact /tmp/agentdir.diff \
@@ -77,13 +73,12 @@ The artifact is stored by SHA-256 and referenced from the envelope.
 ## Human And Agent Handoff
 
 ```bash
-agentdir actor create --root "$root" engineer
-agentdir actor create --root "$root" codex
+agentdir actor create engineer
+agentdir actor create codex
 
 printf 'Please review the failing test evidence before merge.\n' > /tmp/review-request.txt
 
 agentdir send \
-  --root "$root" \
   --from codex \
   --to engineer \
   --type approval.requested \
@@ -94,18 +89,41 @@ agentdir send \
 ## Rebuild And Replay
 
 ```bash
-agentdir index rebuild --root "$root"
-agentdir query --root "$root" --session "$session"
-agentdir replay --root "$root" --session "$session"
-agentdir doctor --root "$root"
+agentdir index rebuild
+agentdir query --session "$session"
+agentdir replay --session "$session"
+agentdir doctor
 ```
 
 If the SQLite index is deleted, rebuild it from the envelopes:
 
 ```bash
-rm -f "$root/indexes/agentdir.sqlite3"
-agentdir index rebuild --root "$root"
-agentdir replay --root "$root" --session "$session"
+rm -f "$(agentdir root)/indexes/agentdir.sqlite3"
+agentdir index rebuild
+agentdir replay --session "$session"
+```
+
+## Choosing The Storage Scope
+
+Project scope is the default for coding agents:
+
+```text
+<repo>/.agentdir
+```
+
+Use it when the evidence belongs with a single repository.
+
+Use user/global scope for personal cross-repo agent memory:
+
+```bash
+agentdir init --scope user
+agentdir emit --scope user --session daily-agent-log --type user.message --body /tmp/note.txt
+```
+
+Use machine scope for shared workstation or CI-runner stores:
+
+```bash
+AGENTDIR_MACHINE_ROOT=/opt/agentdir agentdir init --scope machine
 ```
 
 ## Guardrails
@@ -115,4 +133,3 @@ agentdir replay --root "$root" --session "$session"
 - Treat `cur` as local processing state only.
 - Emit a new envelope for state changes instead of editing old message bodies.
 - Keep large artifacts content-addressed instead of copying them into many records.
-

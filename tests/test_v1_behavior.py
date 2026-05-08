@@ -23,12 +23,19 @@ PROJECT_ROOT = find_project_root()
 SRC_ROOT = PROJECT_ROOT / "src"
 
 
-def run_cli(*args: str, expected_returncode: int = 0) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    *args: str,
+    expected_returncode: int = 0,
+    cwd: Path | None = None,
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_ROOT)
+    if env_extra:
+        env.update(env_extra)
     result = subprocess.run(
         [sys.executable, "-m", "agentdir", *args],
-        cwd=PROJECT_ROOT,
+        cwd=cwd or PROJECT_ROOT,
         env=env,
         text=True,
         capture_output=True,
@@ -115,14 +122,50 @@ def test_init_creates_v1_root_layout(tmp_path: Path) -> None:
 
     run_cli("init", str(root))
 
-    assert (root / ".agentdir" / "VERSION").is_file()
-    config = root / ".agentdir" / "config.json"
+    assert (root / "VERSION").is_file()
+    config = root / "config.json"
     assert config.is_file()
     json.loads(config.read_text(encoding="utf-8"))
     assert (root / "sessions").is_dir()
     assert (root / "actors").is_dir()
     assert (root / "artifacts" / "blobs" / "sha256").is_dir()
     assert (root / "indexes").is_dir()
+
+
+def test_project_scope_defaults_to_repo_hidden_agentdir(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    body = write_body(tmp_path / "body.txt", "project scoped event")
+
+    run_cli("init", cwd=repo)
+    result = run_cli("root", cwd=repo)
+    run_cli("emit", "--session", "session-1", "--type", "agent.message", "--body", str(body), cwd=repo)
+    run_cli("index", "rebuild", cwd=repo)
+
+    project_root = repo / ".agentdir"
+    assert result.stdout.strip() == str(project_root)
+    assert (project_root / "VERSION").is_file()
+    assert visible_messages(session_maildir(project_root, "session-1"))
+
+
+def test_user_and_machine_scopes_resolve_without_explicit_root(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    machine = tmp_path / "machine"
+    home.mkdir()
+
+    user_result = run_cli("init", "--scope", "user", env_extra={"HOME": str(home)})
+    machine_result = run_cli(
+        "init",
+        "--scope",
+        "machine",
+        env_extra={"AGENTDIR_MACHINE_ROOT": str(machine)},
+    )
+
+    assert user_result.stdout.strip() == str(home / ".agentdir")
+    assert (home / ".agentdir" / "VERSION").is_file()
+    assert machine_result.stdout.strip() == str(machine)
+    assert (machine / "VERSION").is_file()
 
 
 def test_emit_publishes_a_parseable_envelope_into_session_new(tmp_path: Path) -> None:

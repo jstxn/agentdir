@@ -11,15 +11,11 @@ gh auth login
 gh auth status
 ```
 
-Download the release installer and run it:
+Install with one command:
 
 ```bash
-tmpdir="$(mktemp -d)"
-gh release download v0.1.0 \
-  --repo jstxn/agentdir \
-  --pattern install-agentdir.sh \
-  --dir "$tmpdir"
-bash "$tmpdir/install-agentdir.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+  repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.1.1 | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -45,13 +41,16 @@ export PATH="$HOME/.local/bin:$PATH"
 ```bash
 agentdir --help
 
-root="$(mktemp -d)/agentdir-root"
+repo="$(mktemp -d)/agentdir-install-smoke"
+git -C "$repo" init
 printf 'agentdir install smoke\n' > /tmp/agentdir-smoke.txt
-agentdir init "$root"
-agentdir emit --root "$root" --session install-smoke --type agent.message --body /tmp/agentdir-smoke.txt
-agentdir index rebuild --root "$root"
-agentdir replay --root "$root" --session install-smoke
-agentdir doctor --root "$root"
+cd "$repo"
+agentdir init
+agentdir root
+agentdir emit --session install-smoke --type agent.message --body /tmp/agentdir-smoke.txt
+agentdir index rebuild
+agentdir replay --session install-smoke
+agentdir doctor
 ```
 
 ## Install From A Downloaded Wheel
@@ -59,13 +58,45 @@ agentdir doctor --root "$root"
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.1.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.1.1-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.1.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.1.1-py3-none-any.whl bash scripts/install.sh
+```
+
+## Store Location Scopes
+
+AgentDir stores mailboxes, artifacts, and indexes in an AgentDir root. You can choose the root explicitly or use a scope.
+
+Default behavior:
+
+```bash
+agentdir init
+agentdir root
+```
+
+Inside a git repository, the default root is:
+
+```text
+<repo>/.agentdir
+```
+
+Available scopes:
+
+```bash
+agentdir root --scope project   # nearest git repo .agentdir, or current directory .agentdir
+agentdir root --scope user      # ~/.agentdir
+agentdir root --scope global    # alias for ~/.agentdir
+agentdir root --scope machine   # /Library/Application Support/AgentDir on macOS, /var/lib/agentdir on Linux
+```
+
+The machine root may require elevated permissions. Override it for managed machines:
+
+```bash
+AGENTDIR_MACHINE_ROOT=/opt/agentdir agentdir init --scope machine
 ```
 
 ## Install From Source
@@ -98,6 +129,6 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.1.0-py3-none-any.whl`
-- `agentdir-0.1.0.tar.gz`
+- `agentdir-0.1.1-py3-none-any.whl`
+- `agentdir-0.1.1.tar.gz`
 - `install-agentdir.sh`

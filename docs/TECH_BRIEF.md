@@ -82,9 +82,8 @@ agentdir-root/      +--------+---------+
 
 ```text
 <root>/
-  .agentdir/
-    VERSION
-    config.json
+  VERSION
+  config.json
   sessions/
     <session-id>/
       Maildir/
@@ -119,7 +118,7 @@ agentdir-root/      +--------+---------+
     agentdir.sqlite3
 ```
 
-V1 can create `sessions`, `actors`, `artifacts`, and `indexes`. `queues` can be reserved until task spool semantics are explicit.
+V1 creates `sessions`, `actors`, `artifacts`, and `indexes`. The root itself may be a project hidden directory such as `<repo>/.agentdir`, a user store such as `~/.agentdir`, or an explicit custom path.
 
 ## 5. Envelope Format
 
@@ -237,8 +236,8 @@ If FTS5 is unavailable in a given Python SQLite build, V1 should degrade to LIKE
 Index commands:
 
 ```text
-agentdir index rebuild --root <root>
-agentdir index update --root <root>
+agentdir index rebuild [--root <root>] [--scope <scope>]
+agentdir index update [--root <root>] [--scope <scope>]
 ```
 
 Rebuild strategy:
@@ -326,15 +325,16 @@ V1 should support add and reference. Garbage collection should be postponed unti
 Proposed V1 CLI:
 
 ```text
-agentdir init <root>
-agentdir emit --root <root> --session <id> --type <type> --body <file>
-agentdir actor create --root <root> <actor-id>
-agentdir send --root <root> --from <actor> --to <actor> --type <type> --body <file>
-agentdir artifact add --root <root> <path>
-agentdir index rebuild --root <root>
-agentdir query --root <root> [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>]
-agentdir replay --root <root> --session <id>
-agentdir doctor --root <root>
+agentdir init [<root>] [--scope <scope>]
+agentdir root [--scope <scope>]
+agentdir emit [--root <root>] [--scope <scope>] --session <id> --type <type> --body <file>
+agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
+agentdir send [--root <root>] [--scope <scope>] --from <actor> --to <actor> --type <type> --body <file>
+agentdir artifact add [--root <root>] [--scope <scope>] <path>
+agentdir index rebuild [--root <root>] [--scope <scope>]
+agentdir query [--root <root>] [--scope <scope>] [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>]
+agentdir replay [--root <root>] [--scope <scope>] --session <id>
+agentdir doctor [--root <root>] [--scope <scope>]
 ```
 
 ## 14. Implementation Recommendation
