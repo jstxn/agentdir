@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .envelope import parse_envelope, validate_required
 from .mailbox import iter_records
-from .memory import index_memory_document, memory_schema_sql
+from .memory import index_memory_document, index_session_summaries, memory_schema_sql
 from .store import AgentDirError, discover_mailboxes, paths_for, require_root
 
 SCHEMA = """
@@ -81,7 +81,7 @@ def now_iso() -> str:
 def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.executescript(memory_schema_sql())
-    conn.execute("insert or replace into metadata(key, value) values('schema_version', '2')")
+    conn.execute("insert or replace into metadata(key, value) values('schema_version', '3')")
     conn.execute("insert or replace into metadata(key, value) values('vector_memory', 'yes')")
     try:
         conn.execute(
@@ -152,6 +152,7 @@ def _index_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
             if message_id:
                 seen[message_id].append(str(record.path.relative_to(paths.root)))
 
+    index_session_summaries(conn)
     result.duplicates = {mid: files for mid, files in seen.items() if len(files) > 1}
     return result
 
@@ -185,10 +186,16 @@ def _insert_record(
     message_id = get("Message-ID")
     event_type = get("X-AgentDir-Event-Type")
     subject = get("Subject")
+    from_actor = get("From")
+    to_actor = get("To")
     session_id = get("X-AgentDir-Session")
+    task_id = get("X-AgentDir-Task")
+    date_header = get("Date")
+    date_utc = _date_to_utc_iso(date_header)
     git_head = get("X-AgentDir-Git-Head")
     workspace = get("X-AgentDir-Workspace")
     tool = get("X-AgentDir-Tool")
+    tool_exit_code = _int_or_none(get("X-AgentDir-Tool-Exit-Code"))
     indexed_at = now_iso()
     cursor = conn.execute(
         """
@@ -208,18 +215,18 @@ def _insert_record(
             state,
             event_type,
             subject,
-            get("From"),
-            get("To"),
+            from_actor,
+            to_actor,
             session_id,
-            get("X-AgentDir-Task"),
+            task_id,
             get("In-Reply-To"),
-            get("Date"),
-            _date_to_utc_iso(get("Date")),
+            date_header,
+            date_utc,
             _int_or_none(get("X-AgentDir-Created-Ns")),
             git_head,
             workspace,
             tool,
-            _int_or_none(get("X-AgentDir-Tool-Exit-Code")),
+            tool_exit_code,
             body_sha,
             body_text,
             indexed_at,
@@ -253,9 +260,16 @@ def _insert_record(
         session_id=session_id,
         event_type=event_type,
         subject=subject,
+        from_actor=from_actor,
+        to_actor=to_actor,
+        task_id=task_id,
         tool=tool,
+        tool_exit_code=tool_exit_code,
         workspace=workspace,
         git_head=git_head,
+        date_header=date_header,
+        date_utc=date_utc,
+        file_path=relative_file,
         body_text=body_text,
         indexed_at=indexed_at,
     )

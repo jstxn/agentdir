@@ -29,7 +29,8 @@ Use AgentDir as the local flight recorder for coding-agent work.
 
 ## During Work
 
-- Before non-trivial work, run `agentdir memory search "<task, error, or subsystem>"` to retrieve similar prior sessions.
+- Before non-trivial work, run `agentdir context build "<task, error, or subsystem>"` to gather relevant memory, evidence, and recent session summaries.
+- Use `agentdir memory search "<task, error, or subsystem>"` and `agentdir memory explain "<same query>"` when you need to inspect retrieval.
 - Emit important plans, blockers, diffs, review decisions, and final handoffs as immutable events.
 - Use `agentdir index rebuild` if query, replay, memory, summarize, or evidence output looks stale.
 - Use `agentdir evidence` before claiming tests or checks passed.

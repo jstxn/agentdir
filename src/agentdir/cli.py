@@ -8,12 +8,20 @@ from pathlib import Path
 
 from .actors import create_actor, send_message
 from .artifacts import add_artifact
+from .context import build_context_pack, format_context_pack, write_context_pack
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
 from .doctor import run_doctor
 from .events import emit_event
 from .hooks import hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
-from .memory import DEFAULT_MIN_SCORE, format_memory_hits, memory_stats, search_memory
+from .memory import (
+    DEFAULT_MIN_SCORE,
+    explain_memory_match,
+    format_memory_explanation,
+    format_memory_hits,
+    memory_stats,
+    search_memory,
+)
 from .query import query_messages
 from .replay import replay_session
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
@@ -390,6 +398,23 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_explain(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if not args.no_rebuild:
+        rebuild_index(root)
+    explanation = explain_memory_match(
+        root,
+        args.query,
+        source_id=args.source,
+        min_score=args.min_score,
+    )
+    if args.json:
+        print_json(explanation)
+    else:
+        print(format_memory_explanation(explanation))
+    return 0
+
+
 def cmd_memory_stats(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
@@ -400,8 +425,30 @@ def cmd_memory_stats(args: argparse.Namespace) -> int:
     else:
         print(f"messages={stats['messages']}")
         print(f"memory_documents={stats['memory_documents']}")
+        print(f"message_documents={stats['message_documents']}")
+        print(f"session_summary_documents={stats['session_summary_documents']}")
         print(f"coverage={stats['coverage']:.3f}")
         print(f"vector_dim={stats['vector_dim']}")
+    return 0
+
+
+def cmd_context_build(args: argparse.Namespace) -> int:
+    pack = build_context_pack(
+        command_root(args),
+        args.task,
+        session_id=args.session,
+        memory_limit=args.memory_limit,
+        evidence_limit=args.evidence_limit,
+        recent_limit=args.recent_limit,
+        min_score=args.min_score,
+    )
+    if args.output:
+        path = write_context_pack(args.output, pack, as_json=args.json)
+        print(path)
+    elif args.json:
+        print_json(pack)
+    else:
+        print(format_context_pack(pack), end="")
     return 0
 
 
@@ -606,11 +653,33 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--no-rebuild", action="store_true")
     memory_search.add_argument("--json", action="store_true")
     memory_search.set_defaults(func=cmd_memory_search)
+    memory_explain = memory_sub.add_parser("explain")
+    add_scope_args(memory_explain)
+    memory_explain.add_argument("query")
+    memory_explain.add_argument("--source")
+    memory_explain.add_argument("--min-score", type=float, default=0.0)
+    memory_explain.add_argument("--no-rebuild", action="store_true")
+    memory_explain.add_argument("--json", action="store_true")
+    memory_explain.set_defaults(func=cmd_memory_explain)
     memory_stats_parser = memory_sub.add_parser("stats")
     add_scope_args(memory_stats_parser)
     memory_stats_parser.add_argument("--no-rebuild", action="store_true")
     memory_stats_parser.add_argument("--json", action="store_true")
     memory_stats_parser.set_defaults(func=cmd_memory_stats)
+
+    context = sub.add_parser("context")
+    context_sub = context.add_subparsers(dest="context_command", required=True)
+    context_build = context_sub.add_parser("build")
+    add_scope_args(context_build)
+    context_build.add_argument("task")
+    context_build.add_argument("--session")
+    context_build.add_argument("--memory-limit", type=int, default=8)
+    context_build.add_argument("--evidence-limit", type=int, default=20)
+    context_build.add_argument("--recent-limit", type=int, default=5)
+    context_build.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    context_build.add_argument("--output")
+    context_build.add_argument("--json", action="store_true")
+    context_build.set_defaults(func=cmd_context_build)
 
     return parser
 

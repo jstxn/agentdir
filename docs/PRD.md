@@ -133,6 +133,10 @@ A rebuildable SQLite database that materializes messages, headers, sessions, act
 
 A derived similarity layer built from indexed envelope metadata and body text. It is bundled with AgentDir, stored in SQLite, and rebuilt from raw envelopes.
 
+### Context Pack
+
+An agent-ready briefing generated from semantic memory hits, current-session evidence, and recent session summaries.
+
 ## 9. User Stories
 
 ### Session Recovery
@@ -287,14 +291,18 @@ Current command:
 agentdir query [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--since <iso>] [--until <iso>]
 agentdir query --semantic <text>
 agentdir memory search <text>
+agentdir memory explain <text>
 agentdir memory stats
+agentdir context build <task>
 ```
 
 Acceptance criteria:
 
 - `agentdir index rebuild` creates memory documents in the SQLite sidecar.
 - `agentdir memory search <text>` works without installing a separate vector database.
+- `agentdir memory explain <text>` shows the matching source, overlap terms, score, and excerpt.
 - `agentdir query --semantic <text>` returns vector-ranked records and honors existing filters.
+- `agentdir context build <task>` returns an agent-ready context pack with memory, evidence, and recent summaries.
 
 ### FR7: Replay Session
 

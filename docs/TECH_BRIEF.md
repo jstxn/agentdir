@@ -225,11 +225,25 @@ create table message_artifacts (
 );
 
 create table memory_documents (
-  message_rowid integer primary key references messages(id) on delete cascade,
+  id integer primary key,
+  source_kind text not null,
+  source_id text not null unique,
+  message_rowid integer references messages(id) on delete cascade,
   message_id text,
   session_id text,
   event_type text,
   subject text,
+  from_actor text,
+  to_actor text,
+  task_id text,
+  git_head text,
+  workspace text,
+  tool text,
+  tool_exit_code integer,
+  date_header text,
+  date_utc text,
+  file_path text,
+  body_text text not null,
   vector_dim integer not null,
   vector_json text not null,
   text_sha256 text not null,
@@ -251,7 +265,7 @@ create virtual table message_fts using fts5(
 
 If FTS5 is unavailable in a given Python SQLite build, AgentDir should degrade to LIKE search and report the limitation.
 
-Vector memory is not optional. The first implementation uses deterministic feature-hashed vectors stored in SQLite so the package keeps its zero-runtime-dependency install shape. Future embedding backends can improve ranking, but they must remain rebuildable from envelopes and must not replace the raw record.
+Vector memory is not optional. The first implementation uses deterministic feature-hashed vectors stored in SQLite so the package keeps its zero-runtime-dependency install shape. It stores message-level documents and derived session-summary documents. Future embedding backends can improve ranking, but they must remain rebuildable from envelopes and must not replace the raw record.
 
 ## 8. Indexing Model
 
@@ -268,7 +282,7 @@ Rebuild strategy:
 - scan `new` and `cur` under known mailboxes
 - parse headers with a standard email parser
 - hash body or full message bytes
-- derive vector memory documents from message metadata and body text
+- derive vector memory documents from message metadata, body text, and session summaries
 - detect duplicate `Message-ID`s
 - replace old index by atomic rename after successful build
 - treat rebuild as a point-in-time best effort under concurrent writers, then allow a follow-up `index update` pass
@@ -362,7 +376,11 @@ agentdir artifact add [--root <root>] [--scope <scope>] <path>
 agentdir hooks install|status|uninstall
 agentdir skills install codex [--target user|project|store]
 agentdir index rebuild [--root <root>] [--scope <scope>]
-agentdir query [--root <root>] [--scope <scope>] [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>]
+agentdir query [--root <root>] [--scope <scope>] [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>] [--semantic <query>]
+agentdir memory search <query>
+agentdir memory explain <query> [--source <source-id>]
+agentdir memory stats
+agentdir context build <task>
 agentdir replay [--root <root>] [--scope <scope>] --session <id>
 agentdir summarize [--session <id>]
 agentdir evidence [--session <id>]

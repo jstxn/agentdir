@@ -306,13 +306,13 @@ Intent:
 ```text
 Make prior agent work retrievable without a separate memory service
 
-Derive vector memory documents during the normal SQLite rebuild so agents can search similar sessions, failures, and evidence out of the box.
+Derive vector memory documents during the normal SQLite rebuild so agents can search similar sessions, explain retrieval, and build task-ready context packs out of the box.
 
 Constraint: No new runtime dependencies
 Rejected: External vector database as a required install | raises setup cost and makes local recovery depend on a daemon
 Confidence: medium
 Scope-risk: moderate
-Tested: vector memory table creation, memory search ranking, semantic query filters
+Tested: vector memory table creation, memory search ranking, explain output, context build, semantic query filters
 Not-tested: Large cross-repo memory corpora
 ```
 
@@ -331,4 +331,6 @@ Exit criteria:
 
 - `agentdir index rebuild` creates vector memory rows.
 - `agentdir memory search <text>` works without extra install steps.
+- `agentdir memory explain <text>` reports why retrieval matched.
+- `agentdir context build <task>` creates a context pack from memory, evidence, and summaries.
 - `agentdir query --semantic <text>` honors existing filters.

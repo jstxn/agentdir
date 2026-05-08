@@ -24,25 +24,25 @@ chmod +x dist/install-agentdir.sh
 Expected assets:
 
 ```text
-dist/agentdir-0.2.0-py3-none-any.whl
-dist/agentdir-0.2.0.tar.gz
+dist/agentdir-0.3.0-py3-none-any.whl
+dist/agentdir-0.3.0.tar.gz
 dist/install-agentdir.sh
 ```
 
 ## Tag And Release
 
 ```bash
-git tag -a v0.2.0 -m "Release AgentDir v0.2.0"
+git tag -a v0.3.0 -m "Release AgentDir v0.3.0"
 git push origin main
-git push origin v0.2.0
+git push origin v0.3.0
 
-gh release create v0.2.0 \
-  dist/agentdir-0.2.0-py3-none-any.whl \
-  dist/agentdir-0.2.0.tar.gz \
+gh release create v0.3.0 \
+  dist/agentdir-0.3.0-py3-none-any.whl \
+  dist/agentdir-0.3.0.tar.gz \
   dist/install-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.2.0" \
-  --notes-file docs/releases/v0.2.0.md
+  --title "AgentDir v0.3.0" \
+  --notes-file docs/releases/v0.3.0.md
 ```
 
 ## Release Verification
@@ -51,7 +51,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.2.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.3.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 ```
@@ -67,6 +67,8 @@ cd "$repo"
 "$tmp/prefix/bin/agentdir" setup --codex-skill store
 "$tmp/prefix/bin/agentdir" session start --id release-smoke --title "release smoke"
 "$tmp/prefix/bin/agentdir" run -- python3 -c "print('release smoke')"
+"$tmp/prefix/bin/agentdir" context build "release smoke"
+"$tmp/prefix/bin/agentdir" memory search "release smoke"
 "$tmp/prefix/bin/agentdir" summarize
 "$tmp/prefix/bin/agentdir" evidence
 "$tmp/prefix/bin/agentdir" doctor

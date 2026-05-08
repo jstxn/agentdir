@@ -46,7 +46,7 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.2.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.3.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -65,7 +65,9 @@ Normal agent workflow:
 
 ```bash
 agentdir session start --title "Fix failing checkout flow"
+agentdir context build "Fix failing checkout flow"
 agentdir memory search "checkout failure tests"
+agentdir memory explain "checkout failure tests"
 agentdir run -- pytest -q
 agentdir summarize
 agentdir evidence
@@ -96,7 +98,7 @@ AgentDir is designed around five production behaviors:
 4. Handoffs are concrete: humans and agents can exchange work through inboxes.
 5. Memory is built in: the SQLite sidecar contains exact indexes plus vector memory documents.
 
-Vector memory is not a separate service. `agentdir index rebuild` derives it from the same immutable envelopes, and `agentdir memory search` rebuilds by default before searching so agents can ask for similar prior work without a separate setup step.
+Vector memory is not a separate service. `agentdir index rebuild` derives message memory and session-summary memory from the same immutable envelopes. `agentdir memory search`, `agentdir memory explain`, and `agentdir context build` rebuild by default so agents can retrieve similar prior work and produce task-ready context without a separate setup step.
 
 ## Quick Start
 
@@ -113,6 +115,7 @@ PYTHONPATH=src python3 -m agentdir setup --codex-skill store
 PYTHONPATH=src python3 -m agentdir session start --title "demo session"
 PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
 PYTHONPATH=src python3 -m agentdir memory search "python agent session"
+PYTHONPATH=src python3 -m agentdir context build "python agent session"
 PYTHONPATH=src python3 -m agentdir summarize
 PYTHONPATH=src python3 -m agentdir evidence
 ```

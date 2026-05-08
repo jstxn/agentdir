@@ -43,12 +43,14 @@ AgentDir builds vector memory inside the normal SQLite sidecar whenever the inde
 Search similar prior work before and during a task:
 
 ```bash
+agentdir context build "checkout failure tests"
 agentdir memory search "checkout failure tests"
+agentdir memory explain "checkout failure tests"
 agentdir query --semantic "sqlite index failure" --type tool.result
 agentdir memory stats
 ```
 
-`agentdir memory search` rebuilds the index by default, then ranks matching envelopes by vector similarity. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
+`agentdir memory search` rebuilds the index by default, then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
 
 ## Capturing Tool Calls And Results
 
@@ -94,6 +96,7 @@ agentdir send \
 agentdir summarize
 agentdir evidence
 agentdir memory search "similar failing verification"
+agentdir context build "similar failing verification"
 agentdir replay --session "$(agentdir session current)"
 agentdir doctor
 ```
@@ -126,7 +129,7 @@ Hook records use the active session when one exists. If no session is active, Ag
 
 ## Codex Skill
 
-The generated Codex skill tells coding agents to start sessions, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
+The generated Codex skill tells coding agents to start sessions, build context, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
 
 ```bash
 agentdir skills install codex --target user

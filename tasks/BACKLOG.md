@@ -233,6 +233,8 @@ Tasks:
 
 - Store derived vector memory documents in the SQLite sidecar during normal index rebuilds.
 - Add a first-class `agentdir memory search` command for agents.
+- Add `agentdir memory explain` so agents and engineers can inspect why retrieval matched.
+- Add `agentdir context build` so agents can gather memory, evidence, and recent summaries before work.
 - Add semantic search through `agentdir query --semantic`.
 - Keep vector memory rebuildable from raw envelopes without extra services or dependencies.
 
@@ -240,6 +242,8 @@ Acceptance criteria:
 
 - `agentdir index rebuild` creates memory rows for indexed records.
 - `agentdir memory search <text>` returns ranked prior records out of the box.
+- `agentdir memory explain <text>` reports score, source, overlap terms, and excerpt.
+- `agentdir context build <task>` returns an agent-ready context pack.
 - Existing query filters still apply during semantic search.
 
 ### AD-044: Add FTS fallback strategy
