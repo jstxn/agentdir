@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.2' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -55,7 +55,7 @@ Useful variants:
 ```bash
 agentdir --upgrade --upgrade-install-skill none
 agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.5.1
+agentdir --upgrade --upgrade-version v0.5.2
 agentdir --upgrade --upgrade-dry-run
 ```
 
@@ -84,13 +84,13 @@ agentdir work finish
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.5.1-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.5.2-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.5.1-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.5.2-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -102,21 +102,21 @@ To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.2' | bash
 ```
 
 To choose a specific release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.1' | bash -s -- v0.5.0
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.2' | bash -s -- v0.5.1
 ```
 
 The equivalent manual rollback is:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.0' | AGENTDIR_VERSION=v0.5.0 bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.1' | AGENTDIR_VERSION=v0.5.1 bash
 ```
 
 ## Optional Extras
@@ -222,7 +222,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.5.1-py3-none-any.whl`
-- `agentdir-0.5.1.tar.gz`
+- `agentdir-0.5.2-py3-none-any.whl`
+- `agentdir-0.5.2.tar.gz`
 - `install-agentdir.sh`
 - `rollback-agentdir.sh`

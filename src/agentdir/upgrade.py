@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,6 +212,9 @@ def _git_root(cwd: Path) -> Path | None:
 
 
 def _agentdir_bin() -> str:
+    invoked = Path(sys.argv[0])
+    if invoked.name == "agentdir" and invoked.exists():
+        return str(invoked.resolve())
     return shutil.which("agentdir") or str(Path.home() / ".local" / "bin" / "agentdir")
 
 
