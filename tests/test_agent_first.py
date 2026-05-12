@@ -66,6 +66,12 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
+def test_cli_version_reports_package_version() -> None:
+    result = run_cli("--version")
+
+    assert result.stdout.strip() == "agentdir 0.5.0"
+
+
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     body = tmp_path / "body.txt"
@@ -220,10 +226,107 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     assert skill_path.is_file()
     skill_text = skill_path.read_text(encoding="utf-8")
     assert "The user should not have to run AgentDir commands during normal coding work." in skill_text
-    assert "agentdir session ensure" in skill_text
+    assert 'agentdir work start "<short task>" --emit-context' in skill_text
+    assert "agentdir status" in skill_text
     assert "agentdir run -- <command>" in skill_text
+    assert "agentdir context consume --pack <pack-id>" in skill_text
+    assert "agentdir roots suggest" in skill_text
+    assert "agentdir memory search --group <name>" in skill_text
+    assert "agentdir work finish" in skill_text
     assert "Do not wrap routine exploration commands" in skill_text
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
+
+
+def test_codex_skill_install_updates_existing_agentdir_skill(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    skill_path = home / ".codex" / "skills" / "agentdir" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\nname: agentdir\n---\n\n# AgentDir\n\nold generated guidance\n",
+        encoding="utf-8",
+    )
+
+    run_cli(
+        "skills",
+        "install",
+        "codex",
+        "--target",
+        "user",
+        cwd=repo,
+        env_extra={"HOME": str(home)},
+    )
+
+    skill_text = skill_path.read_text(encoding="utf-8")
+    backup_text = skill_path.with_suffix(".md.bak").read_text(encoding="utf-8")
+    assert "old generated guidance" not in skill_text
+    assert "<!-- agentdir-managed-skill -->" in skill_text
+    assert "old generated guidance" in backup_text
+
+
+def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = run_cli(
+        "adopt",
+        "--install-skill",
+        "user",
+        "--json",
+        cwd=repo,
+        env_extra={"HOME": str(home)},
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["root"] == str(repo / ".agentdir")
+    assert payload["doctor"]["ok"] is True
+    assert payload["next"] == 'agentdir work start "<task>"'
+    assert (home / ".codex" / "skills" / "agentdir" / "SKILL.md").is_file()
+    assert (repo / ".git" / "hooks" / "pre-commit").is_file()
+
+
+def test_work_start_status_report_and_finish_are_agent_owned_flow(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    started = run_cli("work", "start", "control plane task", "--emit-context", "--json", cwd=repo)
+    start_payload = json.loads(started.stdout)
+    session_id = start_payload["session"]["session_id"]
+    pack_id = start_payload["context_pack"]["pack_id"]
+    run_cli(
+        "run",
+        "--name",
+        "python",
+        "--",
+        sys.executable,
+        "-c",
+        "print('control plane evidence passed')",
+        cwd=repo,
+    )
+
+    status = run_cli("status", "--json", cwd=repo)
+    report = run_cli("report", "final", "--format", "json", cwd=repo)
+    finished = run_cli("work", "finish", "--json", cwd=repo)
+    run_cli("session", "current", cwd=repo, expected_returncode=2)
+    run_cli("index", "rebuild", cwd=repo)
+
+    status_payload = json.loads(status.stdout)
+    report_payload = json.loads(report.stdout)
+    finish_payload = json.loads(finished.stdout)
+    rows = query_rows(repo / ".agentdir")
+    event_types = [row["event_type"] for row in rows]
+
+    assert status_payload["session"]["current"]["session_id"] == session_id
+    assert status_payload["context"]["latest_pack"]["pack_id"] == pack_id
+    assert report_payload["summary"]["session_id"] == session_id
+    assert report_payload["context"]["latest_pack"]["pack_id"] == pack_id
+    assert any(row["tool"] == "python" and row["tool_exit_code"] == 0 for row in report_payload["evidence"])
+    assert finish_payload["ended_session"]["session_id"] == session_id
+    assert "work.started" in event_types
+    assert "context.pack.created" in event_types
+    assert "work.report.final" in event_types
+    assert "work.finished" in event_types
+    assert "session.ended" in event_types
 
 
 def test_summarize_and_evidence_use_current_session(tmp_path: Path) -> None:

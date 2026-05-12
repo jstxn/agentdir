@@ -74,8 +74,8 @@ def build_envelope(
     tool_exit_code: int | None = None,
     parent_message_id: str | None = None,
     references: Iterable[str] | None = None,
-    artifact_headers: dict[str, str] | None = None,
-    extra_headers: dict[str, str] | None = None,
+    artifact_headers: dict[str, str | Iterable[str]] | None = None,
+    extra_headers: dict[str, str | Iterable[str]] | None = None,
     message_id: str | None = None,
 ) -> EmailMessage:
     if not event_type:
@@ -113,8 +113,14 @@ def build_envelope(
 
     for source in (artifact_headers or {}, extra_headers or {}):
         for name, value in source.items():
-            if value is not None:
-                msg[name] = str(value)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                msg[name] = value
+                continue
+            for item in value:
+                if item is not None:
+                    msg[name] = str(item)
 
     msg.set_content(body, subtype="plain", charset="utf-8")
     return msg

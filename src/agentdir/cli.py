@@ -6,22 +6,46 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from . import __version__
 from .actors import create_actor, send_message
 from .artifacts import add_artifact
-from .context import build_context_pack, format_context_pack, write_context_pack
+from .context import (
+    CONSUMPTION_PURPOSES,
+    audit_context_pack,
+    build_context_pack,
+    cite_context_sources,
+    consume_context_sources,
+    emit_context_pack,
+    format_context_audit,
+    format_context_pack,
+    write_context_pack,
+)
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
+from .control import (
+    adopt_repo,
+    build_final_report,
+    build_status,
+    finish_work,
+    format_final_report,
+    format_status,
+    format_work_start,
+    start_work,
+)
+from .daemon import format_memory_daemon_status, memory_daemon_status
+from .daemon import run_memory_daemon, start_memory_daemon, stop_memory_daemon
 from .doctor import run_doctor
 from .events import emit_event
+from .federation import VISIBILITY_CHOICES, add_root_to_group, create_root_group
+from .federation import doctor_registered_roots, format_federated_hits, format_registered_roots
+from .federation import format_root_diagnostics, format_root_groups, format_root_suggestions
+from .federation import list_registered_roots, list_root_groups, rebuild_registered_roots, register_root, remove_registered_root
+from .federation import remove_root_from_group, suggest_roots
+from .federation import search_federated_memory
 from .hooks import hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
-from .memory import (
-    DEFAULT_MIN_SCORE,
-    explain_memory_match,
-    format_memory_explanation,
-    format_memory_hits,
-    memory_stats,
-    search_memory,
-)
+from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_MODES, explain_memory_match, memory_backend_status
+from .memory import configure_embeddings, configure_team_backend, configure_vector_backend
+from .memory import format_memory_explanation, format_memory_hits, memory_stats, search_memory
 from .query import query_messages
 from .replay import replay_session
 from .retention import (
@@ -31,6 +55,7 @@ from .retention import (
 )
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
 from .sessions import end_session, ensure_session, read_current_session, start_session
+from .rendering import rich_doctor
 from .skills import install_codex_skill
 from .store import AgentDirError, init_root, resolve_root
 
@@ -39,6 +64,17 @@ def read_body(path: str | None) -> str:
     if not path or path == "-":
         return sys.stdin.read()
     return Path(path).expanduser().read_text(encoding="utf-8")
+
+
+def read_body_or_literal(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value == "-":
+        return sys.stdin.read()
+    path = Path(value).expanduser()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return value
 
 
 def print_json(data: object) -> None:
@@ -146,6 +182,105 @@ def cmd_index_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_roots_register(args: argparse.Namespace) -> int:
+    entry = register_root(command_root(args, create=True), args.path, name=args.name, visibility=args.visibility)
+    if args.json:
+        print_json(entry)
+    else:
+        print(f"{entry['root_id']} {entry['name']} {entry['root_path']}")
+    return 0
+
+
+def cmd_roots_list(args: argparse.Namespace) -> int:
+    roots = list_registered_roots(command_root(args, create=True))
+    if args.json:
+        print_json(roots)
+    else:
+        print(format_registered_roots(roots), end="")
+    return 0
+
+
+def cmd_roots_remove(args: argparse.Namespace) -> int:
+    removed = remove_registered_root(command_root(args, create=True), args.identifier)
+    if args.json:
+        print_json(removed)
+    else:
+        print(f"removed={removed['root_id']}")
+    return 0
+
+
+def cmd_roots_rebuild(args: argparse.Namespace) -> int:
+    results = rebuild_registered_roots(
+        command_root(args, create=True),
+        group=args.group,
+        stale_only=args.stale,
+    )
+    if args.json:
+        print_json(results)
+    else:
+        for result in results:
+            if result.get("skipped"):
+                status = f"skipped={result.get('reason')}"
+            else:
+                status = f"indexed={result['indexed']} malformed={result['malformed']}" if result.get("ok") else f"error={result.get('error')}"
+            print(f"{result['root_id']} {status}")
+    return 0
+
+
+def cmd_roots_suggest(args: argparse.Namespace) -> int:
+    suggestions = suggest_roots(command_root(args, create=True), near=args.near)
+    if args.json:
+        print_json(suggestions)
+    else:
+        print(format_root_suggestions(suggestions), end="")
+    return 0
+
+
+def cmd_roots_doctor(args: argparse.Namespace) -> int:
+    diagnostics = doctor_registered_roots(command_root(args, create=True), group=args.group)
+    if args.json:
+        print_json(diagnostics)
+    else:
+        print(format_root_diagnostics(diagnostics), end="")
+    return 0
+
+
+def cmd_roots_group_create(args: argparse.Namespace) -> int:
+    group = create_root_group(command_root(args, create=True), args.name, args.members)
+    if args.json:
+        print_json(group)
+    else:
+        print(f"{group['name']} roots={len(group['root_ids'])}")
+    return 0
+
+
+def cmd_roots_group_list(args: argparse.Namespace) -> int:
+    groups = list_root_groups(command_root(args, create=True))
+    if args.json:
+        print_json(groups)
+    else:
+        print(format_root_groups(groups), end="")
+    return 0
+
+
+def cmd_roots_group_add(args: argparse.Namespace) -> int:
+    group = add_root_to_group(command_root(args, create=True), args.name, args.root_id)
+    if args.json:
+        print_json(group)
+    else:
+        print(f"{group['name']} roots={len(group['root_ids'])}")
+    return 0
+
+
+def cmd_roots_group_remove(args: argparse.Namespace) -> int:
+    group = remove_root_from_group(command_root(args, create=True), args.name, args.root_id)
+    if args.json:
+        print_json(group)
+    else:
+        print(f"{group['name']} roots={len(group['root_ids'])}")
+    return 0
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     result = archive_sessions(
         command_root(args, create=True),
@@ -183,7 +318,8 @@ def cmd_query(args: argparse.Namespace) -> int:
         raise AgentDirError("Use either --text for literal search or --semantic for vector memory search")
     if args.semantic:
         rebuild_index(root)
-        rows = search_memory(
+        search = search_federated_memory if args.federated else search_memory
+        rows = search(
             root,
             args.semantic,
             session_id=args.session,
@@ -197,6 +333,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             until=args.until,
             limit=args.limit,
             min_score=args.min_score,
+            retrieval_mode=args.retrieval,
         )
     else:
         rows = query_messages(
@@ -216,7 +353,7 @@ def cmd_query(args: argparse.Namespace) -> int:
     if args.json:
         print_json(rows)
     elif args.semantic:
-        print(format_memory_hits(rows))
+        print(format_federated_hits(rows) if args.federated else format_memory_hits(rows))
     else:
         for row in rows:
             body = (row.get("body_text") or "").strip().replace("\n", "\\n")
@@ -241,11 +378,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if args.json:
         print_json(report.as_dict())
     else:
-        print(f"ok={str(report.ok).lower()}")
-        for warning in report.warnings:
-            print(f"warning: {warning}")
-        for error in report.errors:
-            print(f"error: {error}")
+        rendered = rich_doctor(report.as_dict())
+        if rendered is not None:
+            print(rendered, end="")
+        else:
+            print(f"ok={str(report.ok).lower()}")
+            for warning in report.warnings:
+                print(f"warning: {warning}")
+            for error in report.errors:
+                print(f"error: {error}")
     return 0 if report.ok else 1
 
 
@@ -293,7 +434,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     state = end_session(
         command_root(args),
         status=args.status,
-        summary=read_body(args.summary) if args.summary else None,
+        summary=read_body_or_literal(args.summary),
         actor=args.actor,
     )
     if args.json:
@@ -404,6 +545,88 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adopt(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
+    skill = None
+    if args.install_skill != "none":
+        skill = install_codex_skill(root, target=args.install_skill, force=args.force)
+    result = adopt_repo(
+        root,
+        install_hooks_result=[asdict(info) for info in hooks],
+        codex_skill_path=str(skill.path) if skill else None,
+    )
+    if args.json:
+        print_json(result)
+    else:
+        print(f"root={result['root']}")
+        print(f"doctor_ok={str(result['doctor']['ok']).lower()}")
+        if hooks:
+            print(f"hooks={len(hooks)}")
+        if skill:
+            print(f"codex_skill={skill.path}")
+        print(f"next={result['next']}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    status = build_status(command_root(args), scope=args.scope, rebuild=not args.no_rebuild)
+    if args.json:
+        print_json(status)
+    else:
+        print(format_status(status), end="")
+    return 0 if status["health"]["ok"] else 1
+
+
+def cmd_work_start(args: argparse.Namespace) -> int:
+    result = start_work(
+        command_root(args, create=True),
+        args.task,
+        actor=args.actor,
+        emit_context=args.emit_context,
+        federated=args.federated,
+        federation_group=args.group,
+        memory_limit=args.memory_limit,
+        evidence_limit=args.evidence_limit,
+        recent_limit=args.recent_limit,
+        min_score=args.min_score,
+        retrieval_mode=args.retrieval,
+    )
+    if args.json:
+        print_json(result)
+    else:
+        print(format_work_start(result), end="")
+    return 0
+
+
+def cmd_work_finish(args: argparse.Namespace) -> int:
+    result = finish_work(
+        command_root(args),
+        session_id=args.session,
+        actor=args.actor,
+        run_health_check=not args.no_doctor,
+        end=not args.keep_session,
+    )
+    if args.json:
+        print_json({key: value for key, value in result.items() if key != "rendered"})
+    else:
+        print(result["rendered"], end="")
+    return 0
+
+
+def cmd_report_final(args: argparse.Namespace) -> int:
+    report = build_final_report(
+        command_root(args),
+        session_id=args.session,
+        run_health_check=not args.no_doctor,
+    )
+    if args.format == "json":
+        print_json(report)
+    else:
+        print(format_final_report(report), end="")
+    return 0
+
+
 def cmd_summarize(args: argparse.Namespace) -> int:
     summary = summarize_session(command_root(args), args.session)
     if args.json:
@@ -426,25 +649,31 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
         rebuild_index(root)
-    rows = search_memory(
+    search_kwargs = {
+        "session_id": args.session,
+        "event_type": args.type,
+        "actor": args.actor,
+        "task_id": args.task,
+        "tool": args.tool,
+        "git_head": args.git_head,
+        "workspace": args.workspace,
+        "since": args.since,
+        "until": args.until,
+        "limit": args.limit,
+        "min_score": args.min_score,
+        "retrieval_mode": args.retrieval,
+    }
+    rows = search_federated_memory(
         root,
         args.query,
-        session_id=args.session,
-        event_type=args.type,
-        actor=args.actor,
-        task_id=args.task,
-        tool=args.tool,
-        git_head=args.git_head,
-        workspace=args.workspace,
-        since=args.since,
-        until=args.until,
-        limit=args.limit,
-        min_score=args.min_score,
-    )
+        rebuild=not args.no_rebuild,
+        group=args.group,
+        **search_kwargs,
+    ) if args.federated or args.group else search_memory(root, args.query, **search_kwargs)
     if args.json:
         print_json(rows)
     else:
-        print(format_memory_hits(rows))
+        print(format_federated_hits(rows) if args.federated or args.group else format_memory_hits(rows))
     return 0
 
 
@@ -479,31 +708,228 @@ def cmd_memory_stats(args: argparse.Namespace) -> int:
         print(f"session_summary_documents={stats['session_summary_documents']}")
         print(f"coverage={stats['coverage']:.3f}")
         print(f"vector_dim={stats['vector_dim']}")
+        print(f"passages={stats['passages']}")
+        print(f"terms={stats['terms']}")
+        print(f"retrieval_backend={stats['retrieval_backend']}")
+    return 0
+
+
+def cmd_memory_backend_list(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if not args.no_rebuild:
+        rebuild_index(root)
+    status = memory_backend_status(root)
+    if args.json:
+        print_json(status)
+    else:
+        print(f"active={status['active']}")
+        print(f"source_of_truth={status['source_of_truth']}")
+        for backend in status["backends"]:
+            print(
+                f"{backend['name']} enabled={str(backend['enabled']).lower()} "
+                f"kind={backend['kind']}"
+            )
+    return 0
+
+
+def cmd_memory_backend_configure(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    rebuild_index(root)
+    status = configure_vector_backend(root, args.backend)
+    if args.json:
+        print_json(status)
+    else:
+        print(f"vector_backend={status['config'].get('vector_backend') or 'none'}")
+        print(f"active={status['active']}")
+    return 0
+
+
+def cmd_memory_embeddings_configure(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    rebuild_index(root)
+    status = configure_embeddings(root, args.provider, model=args.model)
+    if args.json:
+        print_json(status)
+    else:
+        embeddings = status["config"].get("embeddings") or {}
+        print(f"embedding_provider={embeddings.get('provider') or 'none'}")
+        print(f"embedding_model={embeddings.get('model') or ''}")
+        print(f"active={status['active']}")
+    return 0
+
+
+def cmd_memory_team_configure(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    rebuild_index(root)
+    status = configure_team_backend(root, args.backend)
+    if args.json:
+        print_json(status)
+    else:
+        print(f"team_backend={status['config'].get('team_backend') or 'none'}")
+        print(f"active={status['active']}")
+    return 0
+
+
+def cmd_memory_daemon_start(args: argparse.Namespace) -> int:
+    status = start_memory_daemon(
+        command_root(args, create=True),
+        interval=args.interval,
+        group=args.group,
+        force=args.force,
+    )
+    if args.json:
+        print_json(status)
+    else:
+        print(format_memory_daemon_status(status), end="")
+    return 0
+
+
+def cmd_memory_daemon_status(args: argparse.Namespace) -> int:
+    status = memory_daemon_status(command_root(args))
+    if args.json:
+        print_json(status)
+    else:
+        print(format_memory_daemon_status(status), end="")
+    return 0
+
+
+def cmd_memory_daemon_stop(args: argparse.Namespace) -> int:
+    status = stop_memory_daemon(command_root(args), timeout=args.timeout)
+    if args.json:
+        print_json(status)
+    else:
+        print(format_memory_daemon_status(status), end="")
+    return 0
+
+
+def cmd_memory_daemon_run(args: argparse.Namespace) -> int:
+    status = run_memory_daemon(
+        command_root(args, create=True),
+        interval=args.interval,
+        group=args.group,
+        once=args.once,
+    )
+    if args.json:
+        print_json(status)
+    else:
+        print(format_memory_daemon_status(status), end="")
     return 0
 
 
 def cmd_context_build(args: argparse.Namespace) -> int:
+    root = command_root(args, create=args.emit)
+    if args.emit and not args.session and read_current_session(root) is None:
+        ensure_session(root, title=f"Context pack: {args.task}")
     pack = build_context_pack(
-        command_root(args),
+        root,
         args.task,
         session_id=args.session,
         memory_limit=args.memory_limit,
         evidence_limit=args.evidence_limit,
         recent_limit=args.recent_limit,
         min_score=args.min_score,
+        federated=args.federated,
+        federation_group=args.group,
+        retrieval_mode=args.retrieval,
     )
+    emitted = None
+    if args.emit:
+        emitted = emit_context_pack(
+            root,
+            pack,
+            selection_policy={
+                "memory_limit": args.memory_limit,
+                "evidence_limit": args.evidence_limit,
+                "recent_limit": args.recent_limit,
+                "min_score": args.min_score,
+                "federated": args.federated,
+                "federation_group": args.group,
+                "retrieval_mode": args.retrieval,
+            },
+            scope=args.group or ("federated" if args.federated else args.scope or "project"),
+        )
     if args.output:
         path = write_context_pack(args.output, pack, as_json=args.json)
-        print(path)
+        if emitted and args.json:
+            print_json(
+                {
+                    "context_output": str(path),
+                    "event_path": str(emitted.event_path),
+                    "artifact": {
+                        "sha256": emitted.artifact_sha256,
+                        "path": str(emitted.artifact_path),
+                    },
+                    "manifest": emitted.manifest,
+                }
+            )
+        else:
+            print(path)
+            if emitted:
+                print(f"context_pack={emitted.manifest['pack_id']}")
     elif args.json:
-        print_json(pack)
+        if emitted:
+            print_json(
+                {
+                    "event_path": str(emitted.event_path),
+                    "artifact": {
+                        "sha256": emitted.artifact_sha256,
+                        "path": str(emitted.artifact_path),
+                    },
+                    "manifest": emitted.manifest,
+                }
+            )
+        else:
+            print_json(pack)
     else:
         print(format_context_pack(pack), end="")
+        if emitted:
+            print(f"\nContext pack: {emitted.manifest['pack_id']}")
+    return 0
+
+
+def cmd_context_consume(args: argparse.Namespace) -> int:
+    result = consume_context_sources(
+        command_root(args),
+        pack_id=args.pack,
+        source_ids=args.sources,
+        purpose=args.purpose,
+        session_id=args.session,
+        actor=args.actor,
+    )
+    if args.json:
+        print_json(result)
+    else:
+        print(f"context_consumed={result['pack_id']}")
+        print(f"purpose={result['purpose']}")
+        print(f"sources={len(result['source_ids'])}")
+    return 0
+
+
+def cmd_context_cite(args: argparse.Namespace) -> int:
+    citation = cite_context_sources(
+        command_root(args),
+        pack_id=args.pack,
+        source_ids=args.sources,
+        output_format=args.format,
+        session_id=args.session,
+        actor=args.actor,
+    )
+    print(citation["rendered"], end="")
+    return 0
+
+
+def cmd_audit_context(args: argparse.Namespace) -> int:
+    audit = audit_context_pack(command_root(args), args.pack)
+    if args.json:
+        print_json(audit)
+    else:
+        print(format_context_audit(audit))
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
+    parser.add_argument("--version", action="version", version=f"agentdir {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     init = sub.add_parser("init")
@@ -515,6 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(root)
     root.add_argument("--json", action="store_true")
     root.set_defaults(func=cmd_root)
+
+    status = sub.add_parser("status")
+    add_scope_args(status)
+    status.add_argument("--no-rebuild", action="store_true")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
 
     emit = sub.add_parser("emit")
     add_scope_args(emit)
@@ -598,6 +1030,65 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(update)
     update.set_defaults(func=cmd_index_update)
 
+    roots = sub.add_parser("roots")
+    roots_sub = roots.add_subparsers(dest="roots_command", required=True)
+    roots_register = roots_sub.add_parser("register")
+    add_scope_args(roots_register)
+    roots_register.add_argument("path")
+    roots_register.add_argument("--name")
+    roots_register.add_argument("--visibility", choices=VISIBILITY_CHOICES, default="private")
+    roots_register.add_argument("--json", action="store_true")
+    roots_register.set_defaults(func=cmd_roots_register)
+    roots_list = roots_sub.add_parser("list")
+    add_scope_args(roots_list)
+    roots_list.add_argument("--json", action="store_true")
+    roots_list.set_defaults(func=cmd_roots_list)
+    roots_remove = roots_sub.add_parser("remove")
+    add_scope_args(roots_remove)
+    roots_remove.add_argument("identifier")
+    roots_remove.add_argument("--json", action="store_true")
+    roots_remove.set_defaults(func=cmd_roots_remove)
+    roots_rebuild = roots_sub.add_parser("rebuild")
+    add_scope_args(roots_rebuild)
+    roots_rebuild.add_argument("--group")
+    roots_rebuild.add_argument("--stale", action="store_true")
+    roots_rebuild.add_argument("--json", action="store_true")
+    roots_rebuild.set_defaults(func=cmd_roots_rebuild)
+    roots_suggest = roots_sub.add_parser("suggest")
+    add_scope_args(roots_suggest)
+    roots_suggest.add_argument("--near")
+    roots_suggest.add_argument("--json", action="store_true")
+    roots_suggest.set_defaults(func=cmd_roots_suggest)
+    roots_doctor = roots_sub.add_parser("doctor")
+    add_scope_args(roots_doctor)
+    roots_doctor.add_argument("--group")
+    roots_doctor.add_argument("--json", action="store_true")
+    roots_doctor.set_defaults(func=cmd_roots_doctor)
+    roots_group = roots_sub.add_parser("group")
+    roots_group_sub = roots_group.add_subparsers(dest="roots_group_command", required=True)
+    roots_group_create = roots_group_sub.add_parser("create")
+    add_scope_args(roots_group_create)
+    roots_group_create.add_argument("name")
+    roots_group_create.add_argument("--member", action="append", dest="members", required=True)
+    roots_group_create.add_argument("--json", action="store_true")
+    roots_group_create.set_defaults(func=cmd_roots_group_create)
+    roots_group_list = roots_group_sub.add_parser("list")
+    add_scope_args(roots_group_list)
+    roots_group_list.add_argument("--json", action="store_true")
+    roots_group_list.set_defaults(func=cmd_roots_group_list)
+    roots_group_add = roots_group_sub.add_parser("add")
+    add_scope_args(roots_group_add)
+    roots_group_add.add_argument("name")
+    roots_group_add.add_argument("root_id")
+    roots_group_add.add_argument("--json", action="store_true")
+    roots_group_add.set_defaults(func=cmd_roots_group_add)
+    roots_group_remove = roots_group_sub.add_parser("remove")
+    add_scope_args(roots_group_remove)
+    roots_group_remove.add_argument("name")
+    roots_group_remove.add_argument("root_id")
+    roots_group_remove.add_argument("--json", action="store_true")
+    roots_group_remove.set_defaults(func=cmd_roots_group_remove)
+
     archive = sub.add_parser("archive")
     add_scope_args(archive)
     archive.add_argument("--session", action="append", dest="sessions")
@@ -628,6 +1119,8 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--workspace")
     query.add_argument("--text")
     query.add_argument("--semantic")
+    query.add_argument("--federated", action="store_true")
+    query.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
     query.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     query.add_argument("--since")
     query.add_argument("--until")
@@ -698,6 +1191,48 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--json", action="store_true")
     setup.set_defaults(func=cmd_setup)
 
+    adopt = sub.add_parser("adopt")
+    add_scope_args(adopt)
+    adopt.add_argument("--install-skill", choices=("user", "project", "store", "none"), default="user")
+    adopt.add_argument("--no-hooks", action="store_true")
+    adopt.add_argument("--force", action="store_true")
+    adopt.add_argument("--json", action="store_true")
+    adopt.set_defaults(func=cmd_adopt)
+
+    work = sub.add_parser("work")
+    work_sub = work.add_subparsers(dest="work_command", required=True)
+    work_start = work_sub.add_parser("start")
+    add_scope_args(work_start)
+    work_start.add_argument("task")
+    work_start.add_argument("--actor", default="agent")
+    work_start.add_argument("--emit-context", action="store_true")
+    work_start.add_argument("--federated", action="store_true")
+    work_start.add_argument("--group")
+    work_start.add_argument("--memory-limit", type=int, default=8)
+    work_start.add_argument("--evidence-limit", type=int, default=20)
+    work_start.add_argument("--recent-limit", type=int, default=5)
+    work_start.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    work_start.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    work_start.add_argument("--json", action="store_true")
+    work_start.set_defaults(func=cmd_work_start)
+    work_finish = work_sub.add_parser("finish")
+    add_scope_args(work_finish)
+    work_finish.add_argument("--session")
+    work_finish.add_argument("--actor", default="agent")
+    work_finish.add_argument("--keep-session", action="store_true")
+    work_finish.add_argument("--no-doctor", action="store_true")
+    work_finish.add_argument("--json", action="store_true")
+    work_finish.set_defaults(func=cmd_work_finish)
+
+    report = sub.add_parser("report")
+    report_sub = report.add_subparsers(dest="report_command", required=True)
+    report_final = report_sub.add_parser("final")
+    add_scope_args(report_final)
+    report_final.add_argument("--session")
+    report_final.add_argument("--format", choices=("md", "json"), default="md")
+    report_final.add_argument("--no-doctor", action="store_true")
+    report_final.set_defaults(func=cmd_report_final)
+
     summarize = sub.add_parser("summarize")
     add_scope_args(summarize)
     summarize.add_argument("--session")
@@ -726,6 +1261,9 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--until")
     memory_search.add_argument("--limit", type=int, default=10)
     memory_search.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    memory_search.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    memory_search.add_argument("--federated", action="store_true")
+    memory_search.add_argument("--group")
     memory_search.add_argument("--no-rebuild", action="store_true")
     memory_search.add_argument("--json", action="store_true")
     memory_search.set_defaults(func=cmd_memory_search)
@@ -742,6 +1280,58 @@ def build_parser() -> argparse.ArgumentParser:
     memory_stats_parser.add_argument("--no-rebuild", action="store_true")
     memory_stats_parser.add_argument("--json", action="store_true")
     memory_stats_parser.set_defaults(func=cmd_memory_stats)
+    memory_backend = memory_sub.add_parser("backend")
+    memory_backend_sub = memory_backend.add_subparsers(dest="memory_backend_command", required=True)
+    memory_backend_list = memory_backend_sub.add_parser("list")
+    add_scope_args(memory_backend_list)
+    memory_backend_list.add_argument("--no-rebuild", action="store_true")
+    memory_backend_list.add_argument("--json", action="store_true")
+    memory_backend_list.set_defaults(func=cmd_memory_backend_list)
+    memory_backend_configure = memory_backend_sub.add_parser("configure")
+    add_scope_args(memory_backend_configure)
+    memory_backend_configure.add_argument("backend", choices=("sqlite-vec", "none"))
+    memory_backend_configure.add_argument("--json", action="store_true")
+    memory_backend_configure.set_defaults(func=cmd_memory_backend_configure)
+    memory_embeddings = memory_sub.add_parser("embeddings")
+    memory_embeddings_sub = memory_embeddings.add_subparsers(dest="memory_embeddings_command", required=True)
+    memory_embeddings_configure = memory_embeddings_sub.add_parser("configure")
+    add_scope_args(memory_embeddings_configure)
+    memory_embeddings_configure.add_argument("provider", choices=("fastembed", "none"))
+    memory_embeddings_configure.add_argument("--model")
+    memory_embeddings_configure.add_argument("--json", action="store_true")
+    memory_embeddings_configure.set_defaults(func=cmd_memory_embeddings_configure)
+    memory_team = memory_sub.add_parser("team")
+    memory_team_sub = memory_team.add_subparsers(dest="memory_team_command", required=True)
+    memory_team_configure = memory_team_sub.add_parser("configure")
+    add_scope_args(memory_team_configure)
+    memory_team_configure.add_argument("backend", choices=("qdrant", "lancedb", "none"))
+    memory_team_configure.add_argument("--json", action="store_true")
+    memory_team_configure.set_defaults(func=cmd_memory_team_configure)
+    memory_daemon = memory_sub.add_parser("daemon")
+    memory_daemon_sub = memory_daemon.add_subparsers(dest="memory_daemon_command", required=True)
+    memory_daemon_start = memory_daemon_sub.add_parser("start")
+    add_scope_args(memory_daemon_start)
+    memory_daemon_start.add_argument("--interval", type=float, default=2.0)
+    memory_daemon_start.add_argument("--group")
+    memory_daemon_start.add_argument("--force", action="store_true")
+    memory_daemon_start.add_argument("--json", action="store_true")
+    memory_daemon_start.set_defaults(func=cmd_memory_daemon_start)
+    memory_daemon_status_parser = memory_daemon_sub.add_parser("status")
+    add_scope_args(memory_daemon_status_parser)
+    memory_daemon_status_parser.add_argument("--json", action="store_true")
+    memory_daemon_status_parser.set_defaults(func=cmd_memory_daemon_status)
+    memory_daemon_stop = memory_daemon_sub.add_parser("stop")
+    add_scope_args(memory_daemon_stop)
+    memory_daemon_stop.add_argument("--timeout", type=float, default=5.0)
+    memory_daemon_stop.add_argument("--json", action="store_true")
+    memory_daemon_stop.set_defaults(func=cmd_memory_daemon_stop)
+    memory_daemon_run = memory_daemon_sub.add_parser("run")
+    add_scope_args(memory_daemon_run)
+    memory_daemon_run.add_argument("--interval", type=float, default=2.0)
+    memory_daemon_run.add_argument("--group")
+    memory_daemon_run.add_argument("--once", action="store_true")
+    memory_daemon_run.add_argument("--json", action="store_true")
+    memory_daemon_run.set_defaults(func=cmd_memory_daemon_run)
 
     context = sub.add_parser("context")
     context_sub = context.add_subparsers(dest="context_command", required=True)
@@ -753,9 +1343,38 @@ def build_parser() -> argparse.ArgumentParser:
     context_build.add_argument("--evidence-limit", type=int, default=20)
     context_build.add_argument("--recent-limit", type=int, default=5)
     context_build.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    context_build.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    context_build.add_argument("--federated", action="store_true")
+    context_build.add_argument("--group")
     context_build.add_argument("--output")
+    context_build.add_argument("--emit", action="store_true")
     context_build.add_argument("--json", action="store_true")
     context_build.set_defaults(func=cmd_context_build)
+    context_consume = context_sub.add_parser("consume")
+    add_scope_args(context_consume)
+    context_consume.add_argument("--pack", required=True)
+    context_consume.add_argument("--source", action="append", dest="sources", required=True)
+    context_consume.add_argument("--purpose", choices=CONSUMPTION_PURPOSES, required=True)
+    context_consume.add_argument("--session")
+    context_consume.add_argument("--actor", default="agent")
+    context_consume.add_argument("--json", action="store_true")
+    context_consume.set_defaults(func=cmd_context_consume)
+    context_cite = context_sub.add_parser("cite")
+    add_scope_args(context_cite)
+    context_cite.add_argument("--pack", required=True)
+    context_cite.add_argument("--source", action="append", dest="sources")
+    context_cite.add_argument("--format", choices=("md", "json"), default="md")
+    context_cite.add_argument("--session")
+    context_cite.add_argument("--actor", default="agent")
+    context_cite.set_defaults(func=cmd_context_cite)
+
+    audit = sub.add_parser("audit")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True)
+    audit_context = audit_sub.add_parser("context")
+    add_scope_args(audit_context)
+    audit_context.add_argument("--pack", required=True)
+    audit_context.add_argument("--json", action="store_true")
+    audit_context.set_defaults(func=cmd_audit_context)
 
     return parser
 

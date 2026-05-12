@@ -90,6 +90,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(memory_schema_sql())
     conn.execute("insert or replace into metadata(key, value) values('schema_version', '3')")
     conn.execute("insert or replace into metadata(key, value) values('vector_memory', 'yes')")
+    conn.execute("insert or replace into metadata(key, value) values('hybrid_passages', 'yes')")
+    conn.execute("insert or replace into metadata(key, value) values('memory_backend', 'local-hybrid')")
+    conn.execute("insert or replace into metadata(key, value) values('semantic_embeddings', 'optional')")
     try:
         conn.execute(
             "create virtual table if not exists message_fts using fts5(message_id, subject, body_text)"
@@ -151,6 +154,8 @@ def update_index(root: str | Path) -> IndexResult:
 
 
 def _index_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
+    conn.execute("delete from memory_terms")
+    conn.execute("delete from memory_passages")
     conn.execute("delete from memory_documents")
     conn.execute("delete from message_artifacts")
     conn.execute("delete from headers")

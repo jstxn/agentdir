@@ -24,10 +24,13 @@ The index is disposable. The envelope store is the recovery source.
 From a git repository:
 
 ```bash
-agentdir setup
+agentdir adopt
 ```
 
-This initializes `.agentdir`, installs managed Git hook shims, and installs the Codex skill in the user skill directory. Use `agentdir setup --codex-skill store` when you want generated integration files to stay under `.agentdir`.
+This initializes `.agentdir`, installs managed Git hook shims, installs the
+Codex skill in the user skill directory, runs doctor, and prints the next
+command. Use `agentdir adopt --install-skill store` when you want generated
+integration files to stay under `.agentdir`.
 
 ## Daily Workflow
 
@@ -35,13 +38,16 @@ The user should not have to operate AgentDir during a normal coding session. Onc
 
 Agent responsibilities:
 
-- run `agentdir session ensure --title "<task>"` when coding work begins
-- run `agentdir setup` once if the repository has not been prepared yet
-- build context from prior memory when the task is non-trivial
+- run `agentdir work start "<task>" --emit-context` when coding work begins
+- run `agentdir adopt` once if the repository has not been prepared yet
+- use `agentdir status` when a single health view is needed
+- emit context packs when retrieved context materially informs the work
+- record which context sources were consumed and cited when reporting lineage
 - wrap evidence-bearing commands with `agentdir run`
 - use plain shell commands for routine exploration and file reads
 - record important blockers, decisions, and handoffs
-- use `agentdir summarize`, `agentdir evidence`, and `agentdir doctor` before making evidence-backed claims
+- use `agentdir report final` to preview a handoff report
+- use `agentdir work finish` before final claims when practical
 
 Human responsibilities:
 
@@ -51,7 +57,7 @@ Human responsibilities:
 
 ## Built-In Agent Memory
 
-AgentDir builds vector memory inside the normal SQLite sidecar whenever the index is rebuilt. Agents do not need a vector database daemon, embedding service, or separate install step.
+AgentDir builds vector memory inside the normal SQLite sidecar whenever the index is rebuilt. Agents do not need a vector database daemon, embedding service, or separate install step. The default retriever is hybrid: it uses passage chunks and term shortlists first, then reranks with deterministic vector similarity.
 
 Agents search similar prior work before and during a task:
 
@@ -61,9 +67,69 @@ agentdir memory search "checkout failure tests"
 agentdir memory explain "checkout failure tests"
 agentdir query --semantic "sqlite index failure" --type tool.result
 agentdir memory stats
+agentdir memory backend list
+agentdir memory daemon status
 ```
 
 `agentdir memory search` rebuilds the index by default, then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
+
+When retrieved context materially influences a plan, tool call, answer, or handoff,
+emit an auditable context pack:
+
+```bash
+agentdir context build "checkout failure tests" --emit --json
+agentdir context consume --pack <pack-id> --source <source-id> --purpose plan
+agentdir context cite --pack <pack-id> --source <source-id>
+agentdir audit context --pack <pack-id>
+```
+
+The emitted pack stores a JSON source manifest as a content-addressed artifact.
+Consumption and citation events are append-only records that connect retrieval to
+later work. This is an advisory audit trail for cooperative agents; evidence
+claims still need evidence rows and fresh verification.
+
+For cross-repo memory, register roots explicitly:
+
+```bash
+agentdir roots suggest --near ..
+agentdir roots register ../other-repo --name other-repo
+agentdir roots list
+agentdir roots doctor
+agentdir memory search --federated "checkout failure tests"
+agentdir context build --federated "checkout failure tests" --emit
+```
+
+Federated search does not copy full stores into one canonical database. It
+searches registered child roots, returns root-qualified source IDs, and keeps
+the child roots as the source of truth.
+
+For repeated cross-repo work, create a group and use it as the memory plane:
+
+```bash
+agentdir roots group create product-work --member root-abc123def456
+agentdir memory search --group product-work "checkout failure tests"
+agentdir work start "checkout failure tests" --group product-work --emit-context
+```
+
+Warm indexing is opt-in. Use it when repeated cross-repo or large-store work
+would otherwise spend too much time rebuilding:
+
+```bash
+agentdir memory daemon start --group product-work
+agentdir memory daemon status
+agentdir memory daemon stop
+```
+
+Optional semantic retrieval is also opt-in:
+
+```bash
+agentdir memory embeddings configure fastembed --model BAAI/bge-small-en-v1.5
+agentdir memory backend configure sqlite-vec
+agentdir memory search --retrieval semantic "checkout failure tests"
+```
+
+If the optional dependencies are missing, AgentDir reports that clearly and keeps
+the default local hybrid retriever active.
 
 ## Capturing Tool Calls And Results
 
@@ -110,10 +176,15 @@ agentdir send \
 These commands are mainly for agents and for humans who want to inspect the record:
 
 ```bash
+agentdir status
+agentdir report final
 agentdir summarize
 agentdir evidence
 agentdir memory search "similar failing verification"
+agentdir memory search --federated "similar failing verification"
+agentdir memory search --group product-work "similar failing verification"
 agentdir context build "similar failing verification"
+agentdir audit context --pack <pack-id>
 agentdir replay --session "$(agentdir session current)"
 agentdir doctor
 ```
@@ -129,7 +200,7 @@ agentdir replay --session "$(agentdir session current)"
 Agents should end the session when the task is done:
 
 ```bash
-agentdir session end --summary /tmp/final-summary.txt
+agentdir work finish
 ```
 
 ## Store Hygiene
@@ -159,7 +230,7 @@ Hook records use the active session when one exists. If no session is active, Ag
 
 ## Codex Skill
 
-The generated Codex skill tells coding agents that AgentDir is their responsibility, not a user checklist. It instructs agents to ensure sessions, build context, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `summarize`, `evidence`, and `doctor`.
+The generated Codex skill tells coding agents that AgentDir is their responsibility, not a user checklist. It instructs agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `work finish` when practical.
 
 ```bash
 agentdir skills install codex --target user

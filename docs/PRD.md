@@ -139,7 +139,11 @@ A derived similarity layer built from indexed envelope metadata and body text. I
 
 ### Context Pack
 
-An agent-ready briefing generated from semantic memory hits, current-session evidence, and recent session summaries.
+An agent-ready briefing generated from semantic memory hits, current-session evidence, and recent session summaries. A context pack can also be emitted as an immutable event with a JSON source manifest artifact.
+
+### Context Audit
+
+Append-only context events that record which pack sources a cooperative agent consumed and cited. The audit is advisory: it records source lineage, but it does not prove model attention.
 
 ## 9. User Stories
 
@@ -225,7 +229,7 @@ Default command:
 
 ```text
 agentdir init
-agentdir setup
+agentdir adopt
 ```
 
 Optional root and scope selection:
@@ -248,13 +252,17 @@ agentdir emit --type <type> --body <file>
 
 ### FR2a: Manage Active Session
 
-The CLI must let agents ensure, inspect, start, and end the active session. Normal coding agents should use the idempotent ensure path so humans are not asked to start sessions by hand.
+The CLI must let agents ensure, inspect, start, and end the active session. Normal coding agents should use the workbench path so humans are not asked to start sessions, build context, or finish evidence reports by hand.
 
 ```text
+agentdir work start <task> [--emit-context] [--group <name>]
+agentdir work finish [--keep-session]
+agentdir report final [--format md|json]
+agentdir status [--json]
 agentdir session ensure --title <title>
 agentdir session start --title <title>
 agentdir session current
-agentdir session end --summary <file>
+agentdir session end --summary <file-or-text>
 ```
 
 ### FR2b: Capture Tool Calls
@@ -300,7 +308,7 @@ agentdir index update
 
 ### FR6: Query Records And Memory
 
-The CLI must query indexed records by session, type, actor, tool, task ID, git HEAD, text, time range, and semantic similarity.
+The CLI must query indexed records by session, type, actor, tool, task ID, git HEAD, text, time range, semantic similarity, and explicit federated root search.
 
 Current command:
 
@@ -310,16 +318,56 @@ agentdir query --semantic <text>
 agentdir memory search <text>
 agentdir memory explain <text>
 agentdir memory stats
+agentdir memory backend list
+agentdir memory backend configure sqlite-vec|none
+agentdir memory embeddings configure fastembed|none [--model <model>]
+agentdir memory team configure qdrant|lancedb|none
+agentdir memory daemon start|status|stop
+agentdir roots register <root-or-repo> [--name <name>] [--visibility private|team|machine]
+agentdir roots list
+agentdir roots remove <root-id-or-name>
+agentdir roots rebuild [--stale] [--group <name>]
+agentdir roots suggest [--near <path>]
+agentdir roots doctor [--group <name>]
+agentdir roots group create <name> --member <root-id>
+agentdir roots group list
+agentdir roots group add <name> <root-id>
+agentdir roots group remove <name> <root-id>
+agentdir memory search --federated <text>
+agentdir memory search --group <name> <text>
 agentdir context build <task>
+agentdir context build <task> --federated
+agentdir context build <task> --group <name>
+agentdir context build <task> --emit
+agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff
+agentdir context cite --pack <pack-id> [--source <source-id>] [--format md|json]
+agentdir audit context --pack <pack-id>
 ```
 
 Acceptance criteria:
 
 - `agentdir index rebuild` creates memory documents in the SQLite sidecar.
+- `agentdir index rebuild` creates passage and term indexes derived from memory documents.
 - `agentdir memory search <text>` works without installing a separate vector database.
-- `agentdir memory explain <text>` shows the matching source, overlap terms, score, and excerpt.
+- `agentdir memory search --retrieval semantic <text>` requires explicit embedding configuration and optional dependencies.
+- `agentdir memory explain <text>` shows the matching source, overlap terms, document score, passage score, and excerpt.
 - `agentdir query --semantic <text>` returns vector-ranked records and honors existing filters.
+- `agentdir roots register` only adds explicit roots and does not discover or import private stores automatically.
+- `agentdir roots suggest` discovers nearby AgentDir roots without mutating the registry.
+- `agentdir roots doctor` reports availability and stale indexes for registered roots.
+- Root groups constrain repeated cross-repo search and context builds.
+- `agentdir memory search --federated <text>` returns root-qualified source IDs from registered roots only.
+- `agentdir memory search --group <name> <text>` searches only the roots in that group.
+- `agentdir memory backend list` reports the built-in local hybrid backend and optional unconfigured vector extras.
+- `agentdir memory backend configure`, `memory embeddings configure`, and `memory team configure` store optional backend intent without replacing envelopes as truth.
+- `agentdir memory daemon start/status/stop` manages an opt-in warm indexer, and commands remain correct without the daemon.
 - `agentdir context build <task>` returns an agent-ready context pack with memory, evidence, and recent summaries.
+- `agentdir context build <task> --federated` can include root-qualified sources while keeping child roots canonical.
+- `agentdir context build <task> --group <name>` can scope cross-root retrieval to a named group.
+- `agentdir context build <task> --emit` stores a context pack manifest artifact and emits `context.pack.created`.
+- `agentdir context consume` emits `context.pack.consumed` for selected sources and an explicit purpose.
+- `agentdir context cite` emits `context.sources.cited` and renders a source manifest.
+- `agentdir audit context` reports retrieved, consumed, cited, and evidence-backed source counts.
 
 ### FR7: Replay Session
 
@@ -360,8 +408,8 @@ agentdir skills install codex --target user|project|store
 Acceptance criteria:
 
 - Generated agent guidance states that users should not have to run AgentDir commands during normal coding work.
-- Generated agent guidance tells coding agents to run `agentdir session ensure`, build context, wrap evidence commands, and review evidence automatically.
-- Setup remains safe to rerun and should be the only command a human normally needs inside a repository.
+- Generated agent guidance tells coding agents to run `agentdir work start`, use `agentdir status`, wrap evidence commands, and close with `agentdir work finish` when practical.
+- Adopt remains safe to rerun and should be the only command a human normally needs inside a repository.
 
 ### FR10: Review Session Evidence
 
@@ -456,6 +504,18 @@ X-AgentDir-Blob-Bytes: <bytes>
 X-AgentDir-Blob-Mime: <mime-type>
 ```
 
+Context protocol headers:
+
+```text
+X-AgentDir-Protocol: agentdir.context-pack.v1
+X-AgentDir-Pack-Id: <pack-id>
+X-AgentDir-Context-Query: <query>
+X-AgentDir-Context-Scope: <scope>
+X-AgentDir-Source-Id: <source-id>
+X-AgentDir-Consumption-Purpose: plan|tool|answer|handoff
+X-AgentDir-Enforcement-Mode: advisory
+```
+
 ## 13. Event Types
 
 Initial event taxonomy:
@@ -478,6 +538,9 @@ Initial event taxonomy:
 - `approval.granted`
 - `approval.denied`
 - `summary.compacted`
+- `context.pack.created`
+- `context.pack.consumed`
+- `context.sources.cited`
 
 ## 14. MVP Scope
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.4.0}"
+AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.5.0}"
 AGENTDIR_REPO="${AGENTDIR_REPO:-jstxn/agentdir}"
 AGENTDIR_PACKAGE_VERSION="${AGENTDIR_VERSION#v}"
 AGENTDIR_WHEEL_NAME="agentdir-${AGENTDIR_PACKAGE_VERSION}-py3-none-any.whl"
@@ -101,18 +101,24 @@ main() {
 
   local wheel
   wheel="$(download_wheel "$tmp_dir")"
+  local installed_with_venv=0
   if [ "${AGENTDIR_FORCE_VENV:-0}" != "1" ] && install_with_pipx "$wheel"; then
-    :
+    installed_with_venv=0
   else
     install_with_venv "$wheel" "$python_cmd"
+    installed_with_venv=1
   fi
 
-  if ! command -v agentdir >/dev/null 2>&1; then
+  local agentdir_bin="$AGENTDIR_PREFIX/bin/agentdir"
+  if [ "$installed_with_venv" = "1" ]; then
+    [ -x "$agentdir_bin" ] || fail "agentdir executable was not found at $agentdir_bin"
+    "$agentdir_bin" --help >/dev/null
+  elif command -v agentdir >/dev/null 2>&1; then
+    agentdir --help >/dev/null
+  else
     log "agentdir installed, but not found on PATH"
     log "add this to PATH: $AGENTDIR_PREFIX/bin"
-    "$AGENTDIR_PREFIX/bin/agentdir" --help >/dev/null
-  else
-    agentdir --help >/dev/null
+    fail "agentdir executable was not found on PATH after pipx install"
   fi
   log "installed AgentDir $AGENTDIR_VERSION"
 }

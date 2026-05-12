@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from .artifacts import add_artifact, artifact_headers
 from .envelope import build_envelope, envelope_bytes
@@ -32,7 +33,7 @@ def emit_event(
     tool_exit_code: int | None = None,
     parent_message_id: str | None = None,
     artifact: str | Path | None = None,
-    extra_headers: dict[str, str] | None = None,
+    extra_headers: dict[str, str | Iterable[str]] | None = None,
     message_id: str | None = None,
 ) -> EmittedEvent:
     init_root(root)

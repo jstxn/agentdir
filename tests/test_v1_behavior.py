@@ -166,8 +166,10 @@ def test_user_and_machine_scopes_resolve_without_explicit_root(tmp_path: Path) -
         env_extra={"AGENTDIR_MACHINE_ROOT": str(machine)},
     )
 
-    assert user_result.stdout.strip() == str(home / ".agentdir")
-    assert (home / ".agentdir" / "VERSION").is_file()
+    user_root = Path(user_result.stdout.strip())
+    assert user_root.name == "AgentDir"
+    assert home in user_root.parents
+    assert (user_root / "VERSION").is_file()
     assert machine_result.stdout.strip() == str(machine)
     assert (machine / "VERSION").is_file()
 

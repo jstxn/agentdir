@@ -272,7 +272,16 @@ create virtual table message_fts using fts5(
 
 If FTS5 is unavailable in a given Python SQLite build, AgentDir should degrade to LIKE search and report the limitation.
 
-Vector memory is not optional. The first implementation uses deterministic feature-hashed vectors stored in SQLite so the package keeps its zero-runtime-dependency install shape. It stores message-level documents and derived session-summary documents. Future embedding backends can improve ranking, but they must remain rebuildable from envelopes and must not replace the raw record.
+Vector memory is not optional. The first implementation uses deterministic feature-hashed vectors stored in SQLite so the package keeps its zero-runtime-dependency install shape. It stores message-level documents, derived session-summary documents, passage chunks, and term shortlists. Future embedding backends can improve ranking, but they must remain rebuildable from envelopes and must not replace the raw record.
+
+Hybrid retrieval is the default path:
+
+1. Apply metadata filters to memory documents.
+2. Use `memory_terms` to shortlist matching passages.
+3. Rerank passages with deterministic vector similarity.
+4. Collapse passages back to source-level rows.
+5. Penalize derived summaries so direct message evidence wins when both match.
+6. Fall back to document-level vector scoring when no passage candidate matches.
 
 ## 8. Indexing Model
 
@@ -290,6 +299,7 @@ Rebuild strategy:
 - parse headers with a standard email parser
 - hash body or full message bytes
 - derive vector memory documents from message metadata, body text, and session summaries
+- derive passage and term indexes from those memory documents
 - detect duplicate `Message-ID`s
 - replace old index by atomic rename after successful build
 - treat rebuild as a point-in-time best effort under concurrent writers, then allow a follow-up `index update` pass
@@ -389,13 +399,18 @@ Prune deletes archived sessions by default. It can delete live sessions only whe
 Current CLI:
 
 ```text
+agentdir adopt [--install-skill user|project|store|none]
 agentdir setup [--codex-skill user|project|store|none]
 agentdir init [<root>] [--scope <scope>]
 agentdir root [--scope <scope>]
+agentdir status [--json]
+agentdir work start <task> [--emit-context] [--federated] [--group <name>]
+agentdir work finish [--keep-session] [--json]
+agentdir report final [--format md|json]
 agentdir session ensure [--id <id>] [--title <title>]
 agentdir session start [--id <id>] [--title <title>]
 agentdir session current
-agentdir session end [--summary <file>]
+agentdir session end [--summary <file-or-text>]
 agentdir run [--session <id>] [--name <tool>] -- <command> [args...]
 agentdir emit [--root <root>] [--scope <scope>] [--session <id>] --type <type> --body <file>
 agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
@@ -408,16 +423,69 @@ agentdir skills install codex [--target user|project|store]
 agentdir index rebuild [--root <root>] [--scope <scope>]
 agentdir query [--root <root>] [--scope <scope>] [--session <id>] [--type <type>] [--actor <actor>] [--tool <tool>] [--git-head <sha>] [--text <query>] [--semantic <query>]
 agentdir memory search <query>
+agentdir memory search --retrieval semantic <query>
 agentdir memory explain <query> [--source <source-id>]
 agentdir memory stats
-agentdir context build <task>
+agentdir memory backend list
+agentdir memory backend configure sqlite-vec|none
+agentdir memory embeddings configure fastembed|none [--model <model>]
+agentdir memory team configure qdrant|lancedb|none
+agentdir memory daemon start|status|stop
+agentdir roots register <root-or-repo> [--name <name>] [--visibility private|team|machine]
+agentdir roots list
+agentdir roots remove <root-id-or-name>
+agentdir roots rebuild [--stale] [--group <name>]
+agentdir roots suggest [--near <path>]
+agentdir roots doctor [--group <name>]
+agentdir roots group create <name> --member <root-id>
+agentdir roots group list
+agentdir roots group add <name> <root-id>
+agentdir roots group remove <name> <root-id>
+agentdir memory search --federated <query>
+agentdir memory search --group <name> <query>
+agentdir context build <task> [--emit]
+agentdir context build <task> --federated [--emit]
+agentdir context build <task> --group <name> [--emit]
+agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff
+agentdir context cite --pack <pack-id> [--source <source-id>] [--format md|json]
+agentdir audit context --pack <pack-id>
 agentdir replay [--root <root>] [--scope <scope>] --session <id>
 agentdir summarize [--session <id>]
 agentdir evidence [--session <id>]
 agentdir doctor [--root <root>] [--scope <scope>]
 ```
 
-`session ensure` is the agent-owned path. It creates a session only when one is missing, so generated skills and future tool integrations can start recording without asking the human to manage session state.
+`work start` is the agent-owned path. It ensures a session, emits a work-start
+event, builds task context, and can emit an auditable context pack. `status`
+gives the engineer and the agent one health view for the active session,
+evidence, memory, roots, and doctor state. `work finish` emits a final report,
+records a work-finished event, and closes the session by default.
+
+Context pack emission is also agent-owned. `context build --emit` writes a
+manifest artifact and emits `context.pack.created`; `context consume`,
+`context cite`, and `audit context` preserve advisory source lineage without
+claiming hard proof of model attention.
+
+Federation is explicit and derived. `roots register` stores registered root
+metadata in `state/registered-roots.json` under the controller root. `roots
+suggest` discovers nearby AgentDir roots without registration. `roots doctor`
+reports availability and stale indexes. Root groups store named sets of
+registered root IDs so repeated cross-repo work can search a scoped memory
+plane. Federated search rebuilds each selected child root, returns
+root-qualified source IDs, and copies only metadata, scores, excerpts, and
+source references into the result surface. The child root remains the canonical
+store.
+
+`memory backend list` exposes the active local hybrid backend plus optional
+vector-extra lanes. Optional backend configuration records operator intent in
+state, checks dependency availability, and never replaces envelopes as the
+canonical store. Semantic retrieval requires explicit fastembed configuration
+and optional dependencies; otherwise the local hybrid retriever remains active.
+
+The memory daemon is an opt-in warm indexer. It records process state under
+`state/memory-daemon.json`, rebuilds the local index and selected registered
+roots, and can use `watchfiles` when that extra is installed. Commands remain
+correct without the daemon because the index is still rebuildable on demand.
 
 ## 14. Implementation Recommendation
 

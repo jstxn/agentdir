@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.4.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.0' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -42,19 +42,20 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 agentdir --help
+agentdir --version
 
 repo="$(mktemp -d)/agentdir-install-smoke"
 mkdir -p "$repo"
 git -C "$repo" init
 cd "$repo"
-agentdir setup --codex-skill store
-agentdir session ensure --id install-smoke --title "install smoke"
+agentdir adopt --install-skill store
+agentdir work start "install smoke" --emit-context
 agentdir run -- python3 -c "print('agentdir install smoke')"
 agentdir context build "install smoke"
 agentdir memory search "install smoke"
-agentdir summarize
-agentdir evidence
-agentdir doctor
+agentdir status
+agentdir report final
+agentdir work finish
 ```
 
 ## Install From A Downloaded Wheel
@@ -62,14 +63,55 @@ agentdir doctor
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.4.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.5.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.4.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.5.0-py3-none-any.whl bash scripts/install.sh
 ```
+
+## Roll Back To The Previous Release
+
+Rollback does not rely on the installed `agentdir` binary. It fetches the
+installer from the target GitHub Release tag and reinstalls that wheel.
+
+To return to the previous stable release:
+
+```bash
+gh api -H "Accept: application/vnd.github.raw" \
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.0' | bash
+```
+
+To choose a specific release:
+
+```bash
+gh api -H "Accept: application/vnd.github.raw" \
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.0' | bash -s -- v0.4.0
+```
+
+The equivalent manual rollback is:
+
+```bash
+gh api -H "Accept: application/vnd.github.raw" \
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.4.0' | AGENTDIR_VERSION=v0.4.0 bash
+```
+
+## Optional Extras
+
+The default install includes the core control-plane dependencies for platform
+paths and richer terminal output. Heavier lanes are explicit extras:
+
+```bash
+pipx inject agentdir 'agentdir[watch]'
+pipx inject agentdir 'agentdir[semantic]'
+pipx inject agentdir 'agentdir[team]'
+```
+
+`watch` enables the warm index daemon to use file events when available.
+`semantic` adds local embeddings and the embedded vector backend configuration
+surface. `team` adds optional shared-memory backend clients.
 
 ## Store Location Scopes
 
@@ -92,9 +134,9 @@ Available scopes:
 
 ```bash
 agentdir root --scope project   # nearest git repo .agentdir, or current directory .agentdir
-agentdir root --scope user      # ~/.agentdir
-agentdir root --scope global    # alias for ~/.agentdir
-agentdir root --scope machine   # /Library/Application Support/AgentDir on macOS, /var/lib/agentdir on Linux
+agentdir root --scope user      # platform user data root, legacy ~/.agentdir if it already exists
+agentdir root --scope global    # alias for user scope
+agentdir root --scope machine   # platform site data root, legacy machine root if it already exists
 ```
 
 The machine root may require elevated permissions. Override it for managed machines:
@@ -105,18 +147,22 @@ AGENTDIR_MACHINE_ROOT=/opt/agentdir agentdir init --scope machine
 
 ## Agent-First Setup
 
-`agentdir setup` is the recommended one-command project setup:
+`agentdir adopt` is the recommended one-command project setup:
 
 ```bash
-agentdir setup
+agentdir adopt
 ```
 
-It initializes the default project store, installs AgentDir-managed Git hook shims, and installs the Codex skill in the user skill directory. After that, daily use should be handled by the coding agent. The user should not need to start sessions, wrap commands, summarize, or gather evidence manually.
+It initializes the default project store, installs AgentDir-managed Git hook
+shims, installs the Codex skill in the user skill directory, runs doctor, and
+prints the next workbench command. After that, daily use should be handled by
+the coding agent. The user should not need to start sessions, wrap commands,
+summarize, or gather evidence manually.
 
 To keep generated integration files inside the project store instead:
 
 ```bash
-agentdir setup --codex-skill store
+agentdir adopt --install-skill store
 ```
 
 To install only the Codex skill:
@@ -155,6 +201,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.4.0-py3-none-any.whl`
-- `agentdir-0.4.0.tar.gz`
+- `agentdir-0.5.0-py3-none-any.whl`
+- `agentdir-0.5.0.tar.gz`
 - `install-agentdir.sh`
+- `rollback-agentdir.sh`

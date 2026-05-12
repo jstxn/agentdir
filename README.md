@@ -23,7 +23,14 @@ It gives agents a durable place to record what happened during a coding session:
 - **Maildir-inspired durability**
   Each event is written as an immutable file, so raw records remain recoverable even if indexes are deleted or rebuilt.
 - **Searchable agent memory**
-  AgentDir builds a local SQLite sidecar index with exact search and built-in vector-like memory documents, so agents can find similar prior work.
+  AgentDir builds a local SQLite sidecar index with exact search, hybrid passage retrieval, and built-in vector-like memory, so agents can find similar prior work.
+- **Auditable context packs**
+  Agents can emit retrieved context as source manifests, then record which sources were consumed and cited.
+- **Federated local memory**
+  Explicitly registered AgentDir roots can be searched together without moving the canonical records out of their project stores.
+- **Warm indexing and optional semantic extras**
+  An opt-in local memory daemon can keep indexes warm, while optional embedding,
+  vector, and team backends stay derived from the envelope store.
 - **Better handoffs**
   Agents can leave reviewable summaries, evidence, blockers, and task context for engineers or other agents.
 - **Agent-owned workflow**
@@ -71,17 +78,25 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.4.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
+
+Rollback is also one command and does not rely on the installed `agentdir`
+binary. To return to the previous stable release:
+
+```bash
+gh api -H "Accept: application/vnd.github.raw" \
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.0' | bash
+```
 
 ## Agent-First Setup
 
 Run this once from a git repository:
 
 ```bash
-agentdir setup
+agentdir adopt
 ```
 
 That creates the repo-local `.agentdir` store, installs AgentDir-managed Git hook shims, and installs the Codex skill into the user skill directory. The default is intentionally hands-off for coding agents. Use `agentdir setup --codex-skill store` if you want the generated skill artifact to stay inside `.agentdir` instead of the user profile.
@@ -90,12 +105,13 @@ After setup, the human workflow is just normal coding-agent work. The installed 
 
 What the agent handles:
 
-- creates or reuses a session with `agentdir session ensure`
-- builds task context from prior AgentDir memory when useful
+- starts inside AgentDir with `agentdir work start "<task>" --emit-context`
+- checks session, evidence, memory, registered roots, and doctor state with `agentdir status`
+- emits and cites context packs when retrieval informs a plan, tool use, answer, or handoff
 - wraps evidence-bearing commands with `agentdir run`
 - leaves routine exploration and file reads as plain shell commands
 - records important blockers, decisions, and handoffs
-- checks `summarize`, `evidence`, and `doctor` before making claims
+- finishes with `agentdir work finish`, which emits a final report and closes the session
 
 The CLI remains available for inspection and debugging, but daily users should not have to start sessions or run evidence commands by hand.
 
@@ -110,6 +126,8 @@ The CLI remains available for inspection and debugging, but daily users should n
   archives/sessions/<session-id>/Maildir/{tmp,new,cur}
   indexes/agentdir.sqlite3
   state/current-session.json
+  state/last-session.json
+  state/registered-roots.json
   integrations/
 ```
 
@@ -121,7 +139,47 @@ AgentDir is designed around five production behaviors:
 4. Handoffs are concrete: humans and agents can exchange work through inboxes.
 5. Memory is built in: the SQLite sidecar contains exact indexes plus vector memory documents.
 
-Vector memory is not a separate service. `agentdir index rebuild` derives message memory and session-summary memory from the same immutable envelopes. `agentdir memory search`, `agentdir memory explain`, and `agentdir context build` rebuild by default so agents can retrieve similar prior work and produce task-ready context without a separate setup step.
+Vector memory is not a separate service. `agentdir index rebuild` derives message memory, session-summary memory, passage chunks, and term shortlists from the same immutable envelopes. `agentdir memory search`, `agentdir memory explain`, and `agentdir context build` rebuild by default so agents can retrieve similar prior work and produce task-ready context without a separate setup step.
+
+Context packs can be emitted as immutable events. `agentdir context build --emit`
+stores a JSON source manifest as a content-addressed artifact, while
+`agentdir context consume`, `agentdir context cite`, and
+`agentdir audit context` record retrieved, consumed, cited, and evidence-backed
+source lineage. This audit is advisory: it records cooperative agent behavior,
+not proof that a model paid attention to the retrieved context.
+
+Federated memory is explicit. `agentdir roots register <root-or-repo>` adds a
+child AgentDir root to the current root's registry, `agentdir roots list`
+shows availability, and `agentdir memory search --federated <query>` searches
+registered roots with root-qualified source IDs. Child roots remain canonical;
+federated results copy metadata, scores, excerpts, and source IDs only.
+`agentdir roots suggest` discovers nearby AgentDir roots without registering
+them, `agentdir roots doctor` reports root freshness, and root groups scope
+repeated cross-repo work:
+
+```bash
+agentdir roots group create agent-tools --member root-abc123def456
+agentdir memory search --group agent-tools "release evidence"
+agentdir context build --group agent-tools "release evidence" --emit
+```
+
+Optional vector extras are extension points, not required infrastructure.
+`agentdir memory backend list` reports the active local hybrid backend, optional
+`sqlite-vec`, local embeddings through `fastembed`, and team backends such as
+Qdrant or LanceDB. Use `agentdir memory embeddings configure fastembed` and
+`agentdir memory backend configure sqlite-vec` only when those optional extras
+are installed. Semantic results remain retrieval hints.
+
+Warm indexing is opt-in:
+
+```bash
+agentdir memory daemon start
+agentdir memory daemon status
+agentdir memory daemon stop
+```
+
+The daemon is an accelerator only. Normal commands still rebuild or refresh
+derived indexes when needed.
 
 Retention is explicit only. `agentdir archive` moves selected inactive sessions out of the active session store, and `agentdir prune` deletes selected archived sessions. Both commands are dry-runs unless the user passes `--apply`; AgentDir does not run retention automatically.
 
@@ -136,13 +194,26 @@ PYTHONPATH=src python3 -m agentdir --help
 Create the repo-local `.agentdir` store and capture a command:
 
 ```bash
-PYTHONPATH=src python3 -m agentdir setup --codex-skill store
-PYTHONPATH=src python3 -m agentdir session ensure --title "demo session"
+PYTHONPATH=src python3 -m agentdir adopt --install-skill store
+PYTHONPATH=src python3 -m agentdir work start "demo session" --emit-context
 PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
+PYTHONPATH=src python3 -m agentdir status
 PYTHONPATH=src python3 -m agentdir memory search "python agent session"
+PYTHONPATH=src python3 -m agentdir memory backend list
+PYTHONPATH=src python3 -m agentdir memory daemon run --once
 PYTHONPATH=src python3 -m agentdir context build "python agent session"
-PYTHONPATH=src python3 -m agentdir summarize
-PYTHONPATH=src python3 -m agentdir evidence
+PYTHONPATH=src python3 -m agentdir context build "python agent session" --emit
+PYTHONPATH=src python3 -m agentdir report final
+PYTHONPATH=src python3 -m agentdir work finish
+```
+
+After another repo has its own AgentDir store, register it explicitly before
+using federated search:
+
+```bash
+PYTHONPATH=src python3 -m agentdir roots register /path/to/other-repo --name other-repo
+PYTHONPATH=src python3 -m agentdir roots doctor
+PYTHONPATH=src python3 -m agentdir memory search --federated "python agent session"
 ```
 
 Run the dogfood demo:
@@ -159,7 +230,7 @@ AgentDir also works without `--root`. By default it writes to the nearest repo's
 <repo>/.agentdir/
 ```
 
-Use `--scope user`, `--scope global`, or `--scope machine` when a session should live outside the current repo.
+Use `--scope user`, `--scope global`, or `--scope machine` when a session should live outside the current repo. User and machine scopes use platform application-data locations when available, while existing legacy roots continue to be honored.
 
 ## Verification
 

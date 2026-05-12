@@ -85,9 +85,57 @@ def machine_root() -> Path:
     override = os.environ.get("AGENTDIR_MACHINE_ROOT")
     if override:
         return normalize_root(override)
+    legacy = _legacy_machine_root()
+    if legacy.exists():
+        return legacy
+    candidate = _platform_site_data_path()
+    if candidate is not None:
+        return candidate
+    return legacy
+
+
+def user_root() -> Path:
+    override = os.environ.get("AGENTDIR_USER_ROOT")
+    if override:
+        return normalize_root(override)
+    legacy = Path.home().expanduser().resolve() / CONFIG_DIR
+    if legacy.exists():
+        return legacy
+    candidate = _platform_user_data_path()
+    if candidate is not None:
+        return candidate
+    return _fallback_user_data_path()
+
+
+def _legacy_machine_root() -> Path:
     if platform.system() == "Darwin":
         return Path("/Library/Application Support/AgentDir").resolve()
     return Path("/var/lib/agentdir").resolve()
+
+
+def _platform_user_data_path() -> Path | None:
+    try:
+        from platformdirs import user_data_path
+    except ImportError:
+        return None
+    return Path(user_data_path("AgentDir", appauthor=False)).expanduser().resolve()
+
+
+def _platform_site_data_path() -> Path | None:
+    try:
+        from platformdirs import site_data_path
+    except ImportError:
+        return None
+    return Path(site_data_path("AgentDir", appauthor=False)).expanduser().resolve()
+
+
+def _fallback_user_data_path() -> Path:
+    if platform.system() == "Darwin":
+        return (Path.home().expanduser() / "Library" / "Application Support" / "AgentDir").resolve()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return (Path(xdg).expanduser() / "AgentDir").resolve()
+    return (Path.home().expanduser() / ".local" / "share" / "AgentDir").resolve()
 
 
 def root_for_scope(scope: str | None = None, cwd: str | Path | None = None) -> Path:
@@ -99,7 +147,7 @@ def root_for_scope(scope: str | None = None, cwd: str | Path | None = None) -> P
     if selected == "project":
         return find_project_base(cwd) / CONFIG_DIR
     if selected in {"user", "global"}:
-        return Path.home().expanduser().resolve() / CONFIG_DIR
+        return user_root()
     return machine_root()
 
 
