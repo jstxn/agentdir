@@ -7,6 +7,7 @@ from typing import Iterable
 from .artifacts import add_artifact, artifact_headers
 from .envelope import build_envelope, envelope_bytes
 from .mailbox import atomic_deliver
+from .redaction import redact_text
 from .store import init_root, session_mailbox
 
 
@@ -38,9 +39,14 @@ def emit_event(
 ) -> EmittedEvent:
     init_root(root)
     stored_artifact = add_artifact(root, artifact) if artifact else None
+    redacted = redact_text(body)
+    headers = dict(extra_headers or {})
+    if redacted.replacements:
+        headers["X-AgentDir-Redactions"] = str(_redaction_count(headers) + redacted.replacements)
+        headers["X-AgentDir-Redaction-Labels"] = ",".join(redacted.labels)
     message = build_envelope(
         event_type=event_type,
-        body=body,
+        body=redacted.text,
         subject=subject,
         from_actor=from_actor,
         to_actor=to_actor,
@@ -52,8 +58,15 @@ def emit_event(
         tool_exit_code=tool_exit_code,
         parent_message_id=parent_message_id,
         artifact_headers=artifact_headers(stored_artifact) if stored_artifact else {},
-        extra_headers=extra_headers,
+        extra_headers=headers,
         message_id=message_id,
     )
     delivered = atomic_deliver(session_mailbox(root, session_id), envelope_bytes(message))
     return EmittedEvent(path=delivered, session_id=session_id, event_type=event_type)
+
+
+def _redaction_count(headers: dict[str, str | Iterable[str]]) -> int:
+    try:
+        return int(str(headers.get("X-AgentDir-Redactions") or "0"))
+    except ValueError:
+        return 0

@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.5.0"
+    assert result.stdout.strip() == "agentdir 0.5.1"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -164,6 +164,24 @@ def test_run_returns_wrapped_command_exit_code(tmp_path: Path) -> None:
     result_rows = query_rows(repo / ".agentdir", "tool.result")
     assert result_rows[0]["session_id"] == "failed-run"
     assert result_rows[0]["tool_exit_code"] == 7
+
+
+def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    result = run_cli(
+        "--upgrade",
+        "--upgrade-dry-run",
+        "--upgrade-version",
+        "v9.9.9",
+        "--upgrade-install-skill",
+        "none",
+        cwd=repo,
+    )
+
+    assert "target_version=v9.9.9" in result.stdout
+    assert "install=install jstxn/agentdir@v9.9.9" in result.stdout
+    assert "adopt=agentdir adopt --install-skill none" in result.stdout
 
 
 def test_hooks_install_record_and_uninstall_preserve_original_hook(tmp_path: Path) -> None:

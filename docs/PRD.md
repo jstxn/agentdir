@@ -454,7 +454,9 @@ agentdir evidence
 - Secrets must not be emitted by default from adapters.
 - `agentdir run` does not capture environment variables by default.
 - `agentdir run` redacts common secret-like patterns in stored command output.
-- `doctor` warns when envelope bodies contain common secret-like patterns.
+- AgentDir redacts common secret-like patterns from emitted envelope bodies before persistence.
+- `doctor` errors when persisted envelope bodies contain common secret-like patterns.
+- `agentdir secrets scan` and `agentdir secrets redact --apply` provide path-only detection and cleanup.
 - Configurable redaction policy is a future extension.
 - Signatures and encryption are planned after the envelope protocol stabilizes.
 
@@ -636,7 +638,7 @@ Too many custom headers can become hard to reason about. AgentDir mitigates with
 
 ### Secret Leakage
 
-Agent tool outputs may include secrets. AgentDir avoids environment capture, applies bounded stored-output redaction for common secret-like patterns, and warns on common secret-like patterns in `doctor`.
+Agent tool outputs may include secrets. AgentDir avoids environment capture, applies bounded stored-output redaction for common secret-like patterns, redacts common patterns from emitted bodies before persistence, and fails `doctor` when persisted envelope bodies still contain secret-like text.
 
 ### Overbuilding Queue Semantics
 

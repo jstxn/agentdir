@@ -139,7 +139,7 @@ agentdir run -- npm test
 agentdir run -- git diff --check
 ```
 
-`agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. Agents should use this automatically for commands they run as evidence.
+`agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. AgentDir also redacts common secret-like patterns from emitted message bodies before persistence. Agents should use this automatically for commands they run as evidence.
 
 Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks. Use plain shell commands while reading files, mapping code, or gathering low-level context. The evidence trail should capture verification, reproduced failures, important diagnostics, and final support for claims, not every glance at a file.
 
@@ -261,9 +261,23 @@ Use machine scope for shared workstation or CI-runner stores:
 AGENTDIR_MACHINE_ROOT=/opt/agentdir agentdir init --scope machine
 ```
 
+## Secret Hygiene
+
+```bash
+agentdir secrets scan
+agentdir secrets redact
+agentdir secrets redact --apply
+```
+
+`doctor` treats persisted secret-like envelope bodies as errors. `secrets scan`
+prints only paths and pattern labels, not body content. `secrets redact` is a
+dry run by default; `--apply` rewrites affected bodies with redaction markers
+and rebuilds the derived SQLite index so old body copies are removed from
+messages, FTS, and memory tables.
+
 ## Guardrails
 
-- Do not emit secrets. `doctor` warns on common secret-like patterns, but it is not a redaction engine.
+- Do not emit secrets. Redaction catches common patterns only and is not a complete data-loss prevention system.
 - Prefer workspace names over absolute paths when the record may be shared.
 - Treat `cur` as local processing state only.
 - Emit a new envelope for state changes instead of editing old message bodies.

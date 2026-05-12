@@ -78,17 +78,23 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.1' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
+
+To update an existing machine install and refresh the current repo adoption:
+
+```bash
+agentdir --upgrade
+```
 
 Rollback is also one command and does not rely on the installed `agentdir`
 binary. To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.1' | bash
 ```
 
 ## Agent-First Setup
@@ -114,6 +120,25 @@ What the agent handles:
 - finishes with `agentdir work finish`, which emits a final report and closes the session
 
 The CLI remains available for inspection and debugging, but daily users should not have to start sessions or run evidence commands by hand.
+
+## Secret Hygiene
+
+AgentDir does not promise complete secret detection, but it should not treat
+persisted secret-like bodies as healthy. New emitted message bodies are redacted
+for common token, key, password, and private-key patterns before persistence.
+For older stores or accidental captures:
+
+```bash
+agentdir secrets scan
+agentdir secrets redact
+agentdir secrets redact --apply
+agentdir doctor
+```
+
+`secrets scan` prints only affected paths and pattern labels. `secrets redact`
+is a dry run by default; `--apply` rewrites affected bodies with redaction
+markers and rebuilds the derived SQLite index. `doctor` fails while persisted
+secret-like envelope bodies remain.
 
 ## Store Shape
 

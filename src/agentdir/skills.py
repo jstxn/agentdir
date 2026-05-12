@@ -29,6 +29,9 @@ user when reporting evidence, blockers, or setup problems.
 - If `.agentdir` is missing and the task is non-trivial, run `agentdir adopt` once for the repository before work begins.
 - Prefer the default project store. It writes to the nearest repo `.agentdir`.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output.
+- If `doctor` reports secret-like persisted bodies, do not print the bodies.
+  Use `agentdir secrets scan` for path-only triage and
+  `agentdir secrets redact --apply` when cleanup is approved.
 - Use `agentdir status` when you need one health view for the active session,
   evidence, context pack, memory index, doctor result, and registered roots.
 

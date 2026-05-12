@@ -541,15 +541,83 @@ def test_doctor_reports_a_healthy_root(tmp_path: Path) -> None:
     run_cli("doctor", "--root", str(root))
 
 
-def test_doctor_warns_on_secret_like_message_bodies(tmp_path: Path) -> None:
+def test_emit_redacts_secret_like_message_bodies_by_default(tmp_path: Path) -> None:
     root = tmp_path / "store"
     run_cli("init", str(root))
     body = write_body(tmp_path / "secret.txt", "API_KEY=sk_test_1234567890abcdef")
     run_cli("emit", "--root", str(root), "--session", "session-1", "--type", "tool.result", "--body", str(body))
 
-    result = run_cli("doctor", "--root", str(root))
+    message = parse_message(visible_messages(session_maildir(root, "session-1"))[0])
+    content = message.get_body(preferencelist=("plain",)).get_content()
+
+    assert "<redacted:key-value-secret>" in content
+    assert "sk_test_1234567890abcdef" not in content
+    assert message["X-AgentDir-Redactions"] == "1"
+    run_cli("doctor", "--root", str(root))
+
+
+def test_doctor_errors_on_legacy_secret_like_message_bodies(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    maildir = ensure_maildir(session_maildir(root, "session-1")) / "new"
+    write_envelope(
+        maildir / "secret",
+        message_id="<secret@agentdir.local>",
+        event_type="tool.result",
+        subject="legacy secret",
+        body="API_KEY=sk_test_1234567890abcdef",
+        session_id="session-1",
+    )
+
+    result = run_cli("doctor", "--root", str(root), expected_returncode=1)
 
     assert "secret-like" in result.stdout
+    assert "agentdir secrets redact --apply" in result.stdout
+    assert "sk_test_1234567890abcdef" not in result.stdout
+
+
+def test_secrets_redact_rewrites_bodies_and_rebuilds_index(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    maildir = ensure_maildir(session_maildir(root, "session-1")) / "new"
+    write_envelope(
+        maildir / "secret",
+        message_id="<secret@agentdir.local>",
+        event_type="tool.result",
+        subject="legacy secret",
+        body="API_KEY=sk_test_1234567890abcdef",
+        session_id="session-1",
+    )
+    run_cli("index", "rebuild", "--root", str(root))
+
+    scan = run_cli("secrets", "scan", "--root", str(root), "--json", expected_returncode=1)
+    scan_payload = json.loads(scan.stdout)
+    assert scan_payload[0]["path"] == "sessions/session-1/Maildir/new/secret"
+    assert "sk_test_1234567890abcdef" not in scan.stdout
+
+    dry_run = run_cli("secrets", "redact", "--root", str(root))
+    assert "Dry run only" in dry_run.stdout
+
+    applied = run_cli("secrets", "redact", "--root", str(root), "--apply", "--json")
+    payload = json.loads(applied.stdout)
+    assert payload["count"] == 1
+    assert payload["index_rebuilt"] is True
+
+    message = parse_message(maildir / "secret")
+    content = message.get_body(preferencelist=("plain",)).get_content()
+    assert "<redacted:key-value-secret>" in content
+    assert "sk_test_1234567890abcdef" not in content
+    assert message["X-AgentDir-Secret-Redacted"] == "true"
+    assert fetch_scalar(index_path(root), "select count(*) from messages where body_text like '%sk_test%'") == 0
+    assert (
+        fetch_scalar(index_path(root), "select count(*) from memory_documents where body_text like '%sk_test%'")
+        == 0
+    )
+    assert (
+        fetch_scalar(index_path(root), "select count(*) from memory_passages where body_text like '%sk_test%'")
+        == 0
+    )
+    run_cli("doctor", "--root", str(root))
 
 
 def test_doctor_errors_on_conflicting_duplicate_message_ids(tmp_path: Path) -> None:

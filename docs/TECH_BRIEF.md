@@ -559,7 +559,10 @@ AgentDir security is intentionally simple and honest:
 - AgentDir does not promise complete secret detection
 - `agentdir run` avoids environment capture by default
 - `agentdir run` redacts common secret-like patterns in stored command output
-- `doctor` warns on common token, key, password, and private-key patterns
+- emitted envelope bodies are redacted for common secret-like patterns before persistence
+- `doctor` errors on persisted secret-like envelope bodies
+- `agentdir secrets scan` reports only affected paths and pattern labels
+- `agentdir secrets redact --apply` redacts affected bodies and rebuilds the derived index
 - configurable redaction policy is future work
 - signing and encryption are future work
 

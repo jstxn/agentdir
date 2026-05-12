@@ -56,8 +56,15 @@ from .retention import (
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
 from .sessions import end_session, ensure_session, read_current_session, start_session
 from .rendering import rich_doctor
+from .secrets import (
+    format_secret_findings,
+    format_secret_redaction,
+    redact_secret_records,
+    scan_secret_records,
+)
 from .skills import install_codex_skill
 from .store import AgentDirError, init_root, resolve_root
+from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, upgrade_exit_code
 
 
 def read_body(path: str | None) -> str:
@@ -388,6 +395,42 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             for error in report.errors:
                 print(f"error: {error}")
     return 0 if report.ok else 1
+
+
+def cmd_secrets_scan(args: argparse.Namespace) -> int:
+    findings = scan_secret_records(command_root(args))
+    if args.json:
+        print_json([asdict(finding) for finding in findings])
+    else:
+        print(format_secret_findings(findings))
+    return 1 if findings else 0
+
+
+def cmd_secrets_redact(args: argparse.Namespace) -> int:
+    result = redact_secret_records(command_root(args), apply=args.apply)
+    if args.json:
+        print_json(result)
+    else:
+        print(format_secret_redaction(result))
+    return 0
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    result = upgrade_agentdir(
+        UpgradeOptions(
+            repo=args.upgrade_repo,
+            version=args.upgrade_version,
+            adopt=not args.upgrade_no_adopt,
+            install_skill=args.upgrade_install_skill,
+            hooks=not args.upgrade_no_hooks,
+            dry_run=args.upgrade_dry_run,
+        )
+    )
+    if args.upgrade_json:
+        print_json(result)
+    else:
+        print(format_upgrade_result(result))
+    return upgrade_exit_code(result)
 
 
 def cmd_session_start(args: argparse.Namespace) -> int:
@@ -930,7 +973,20 @@ def cmd_audit_context(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
     parser.add_argument("--version", action="version", version=f"agentdir {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--upgrade", action="store_true", help="reinstall latest AgentDir and re-adopt this repo")
+    parser.add_argument("--upgrade-version", help="release tag to install instead of the latest release")
+    parser.add_argument("--upgrade-repo", default="jstxn/agentdir", help="GitHub repo to install from")
+    parser.add_argument(
+        "--upgrade-install-skill",
+        choices=("user", "project", "store", "none"),
+        default="user",
+        help="Codex skill target to use during re-adoption",
+    )
+    parser.add_argument("--upgrade-no-adopt", action="store_true", help="only reinstall, do not re-adopt repo")
+    parser.add_argument("--upgrade-no-hooks", action="store_true", help="re-adopt without installing Git hooks")
+    parser.add_argument("--upgrade-dry-run", action="store_true", help="show the upgrade plan without changing files")
+    parser.add_argument("--upgrade-json", action="store_true", help="print upgrade result as JSON")
+    sub = parser.add_subparsers(dest="command")
 
     init = sub.add_parser("init")
     init.add_argument("root", nargs="?")
@@ -1137,6 +1193,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(doctor)
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=cmd_doctor)
+
+    secrets = sub.add_parser("secrets")
+    secrets_sub = secrets.add_subparsers(dest="secrets_command", required=True)
+    secrets_scan = secrets_sub.add_parser("scan")
+    add_scope_args(secrets_scan)
+    secrets_scan.add_argument("--json", action="store_true")
+    secrets_scan.set_defaults(func=cmd_secrets_scan)
+    secrets_redact = secrets_sub.add_parser("redact")
+    add_scope_args(secrets_redact)
+    secrets_redact.add_argument("--apply", action="store_true")
+    secrets_redact.add_argument("--json", action="store_true")
+    secrets_redact.set_defaults(func=cmd_secrets_redact)
 
     run = sub.add_parser("run")
     add_scope_args(run)
@@ -1388,6 +1456,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.upgrade:
+            return int(cmd_upgrade(args))
+        if not hasattr(args, "func"):
+            parser.print_help(sys.stderr)
+            return 2
         return int(args.func(args))
     except AgentDirError as exc:
         print(f"agentdir: {exc}", file=sys.stderr)

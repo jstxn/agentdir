@@ -19,16 +19,24 @@ SECRET_PATTERNS = [
 class RedactionResult:
     text: str
     replacements: int
+    labels: tuple[str, ...] = ()
 
 
 def redact_text(text: str) -> RedactionResult:
     replacements = 0
     redacted = text
+    labels: list[str] = []
     for label, pattern in SECRET_PATTERNS:
         redacted, count = pattern.subn(f"<redacted:{label}>", redacted)
         replacements += count
-    return RedactionResult(text=redacted, replacements=replacements)
+        if count:
+            labels.append(label)
+    return RedactionResult(text=redacted, replacements=replacements, labels=tuple(labels))
 
 
 def looks_secret_bearing(text: str) -> bool:
     return any(pattern.search(text) for _label, pattern in SECRET_PATTERNS)
+
+
+def secret_labels(text: str) -> tuple[str, ...]:
+    return tuple(label for label, pattern in SECRET_PATTERNS if pattern.search(text))
