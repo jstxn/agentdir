@@ -620,6 +620,22 @@ def test_secrets_redact_rewrites_bodies_and_rebuilds_index(tmp_path: Path) -> No
     run_cli("doctor", "--root", str(root))
 
 
+def test_doctor_ignores_passage_only_secret_like_false_positive(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    body = write_body(tmp_path / "body.txt", "harmless source body")
+    run_cli("emit", "--root", str(root), "--session", "session-1", "--type", "tool.result", "--body", str(body))
+    run_cli("index", "rebuild", "--root", str(root))
+
+    with sqlite3.connect(index_path(root)) as conn:
+        conn.execute(
+            "update memory_passages set body_text = ? where id = (select min(id) from memory_passages)",
+            ("API_KEY=sk_test_1234567890abcdef",),
+        )
+
+    run_cli("doctor", "--root", str(root))
+
+
 def test_doctor_errors_on_conflicting_duplicate_message_ids(tmp_path: Path) -> None:
     root = tmp_path / "store"
     run_cli("init", str(root))

@@ -78,7 +78,7 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.3' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -94,7 +94,7 @@ binary. To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.3' | bash
 ```
 
 ## Agent-First Setup

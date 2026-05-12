@@ -95,7 +95,6 @@ def _index_secret_findings(index_path: Path) -> list[str]:
     tables = (
         ("messages", "id", "body_text"),
         ("memory_documents", "id", "body_text"),
-        ("memory_passages", "id", "body_text"),
     )
     try:
         with sqlite3.connect(index_path) as conn:

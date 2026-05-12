@@ -26,8 +26,8 @@ chmod +x dist/rollback-agentdir.sh
 Expected assets:
 
 ```text
-dist/agentdir-0.5.2-py3-none-any.whl
-dist/agentdir-0.5.2.tar.gz
+dist/agentdir-0.5.3-py3-none-any.whl
+dist/agentdir-0.5.3.tar.gz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -35,18 +35,18 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.5.2 -m "Release AgentDir v0.5.2"
+git tag -a v0.5.3 -m "Release AgentDir v0.5.3"
 git push origin main
-git push origin v0.5.2
+git push origin v0.5.3
 
-gh release create v0.5.2 \
-  dist/agentdir-0.5.2-py3-none-any.whl \
-  dist/agentdir-0.5.2.tar.gz \
+gh release create v0.5.3 \
+  dist/agentdir-0.5.3-py3-none-any.whl \
+  dist/agentdir-0.5.3.tar.gz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.5.2" \
-  --notes-file docs/releases/v0.5.2.md
+  --title "AgentDir v0.5.3" \
+  --notes-file docs/releases/v0.5.3.md
 ```
 
 ## Release Verification
@@ -55,7 +55,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.5.2 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.5.3 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -89,13 +89,13 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir-0.5.2-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir-0.5.3-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.5.1
+  bash dist/rollback-agentdir.sh v0.5.2
 
 "$tmp/prefix/bin/agentdir" --help
 ```
