@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.6.0"
+    assert result.stdout.strip() == "agentdir 0.7.0"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -302,6 +302,108 @@ def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) 
     assert payload["next"] == 'agentdir work start "<task>"'
     assert (home / ".codex" / "skills" / "agentdir" / "SKILL.md").is_file()
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
+    assert (repo / "AGENTS.md").is_file()
+    assert (repo / "CLAUDE.md").is_file()
+    assert (repo / ".github" / "copilot-instructions.md").is_file()
+    assert (repo / ".cursor" / "rules" / "agentdir.mdc").is_file()
+    assert (repo / ".windsurf" / "rules" / "agentdir.md").is_file()
+
+
+def test_adopt_dry_run_does_not_write_and_unadopt_preserves_evidence(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    home.mkdir()
+    original_hook = repo / ".git" / "hooks" / "pre-commit"
+    original_hook.write_text("#!/bin/sh\necho original\n", encoding="utf-8")
+    original_hook.chmod(0o755)
+    agents = repo / "AGENTS.md"
+    agents.write_text("# Local Agent Notes\n\nKeep this note.\n", encoding="utf-8")
+
+    dry_run = run_cli("adopt", "--dry-run", "--json", cwd=repo, env_extra={"HOME": str(home)})
+    setup_dry_run = run_cli("setup", "--dry-run", "--json", cwd=repo, env_extra={"HOME": str(home)})
+    dry_payload = json.loads(dry_run.stdout)
+    setup_dry_payload = json.loads(setup_dry_run.stdout)
+
+    assert dry_payload["dry_run"] is True
+    assert setup_dry_payload["dry_run"] is True
+    assert dry_payload["would_create_root"] is True
+    assert setup_dry_payload["would_create_root"] is True
+    assert not (repo / ".agentdir").exists()
+    assert "agentdir-managed-generic:start" not in agents.read_text(encoding="utf-8")
+
+    adopted = run_cli("adopt", "--json", cwd=repo, env_extra={"HOME": str(home)})
+    adopt_payload = json.loads(adopted.stdout)
+    run_cli("work", "start", "unadopt keeps evidence", cwd=repo, env_extra={"HOME": str(home)})
+    plan = run_cli("unadopt", "--json", cwd=repo, env_extra={"HOME": str(home)})
+    plan_payload = json.loads(plan.stdout)
+    assert "agentdir-managed-generic:start" in agents.read_text(encoding="utf-8")
+    applied = run_cli("unadopt", "--apply", "--json", cwd=repo, env_extra={"HOME": str(home)})
+    applied_payload = json.loads(applied.stdout)
+    agents_text = agents.read_text(encoding="utf-8")
+    hook_text = original_hook.read_text(encoding="utf-8")
+
+    assert adopt_payload["integrations"]
+    assert plan_payload["applied"] is False
+    assert applied_payload["applied"] is True
+    assert (repo / ".agentdir").is_dir()
+    assert (repo / ".agentdir" / "sessions").is_dir()
+    assert "Keep this note." in agents_text
+    assert "agentdir-managed-generic:start" not in agents_text
+    assert "AgentDir managed hook" not in hook_text
+    assert "echo original" in hook_text
+    assert not (repo / "CLAUDE.md").exists()
+    assert not (repo / ".github" / "copilot-instructions.md").exists()
+    assert not (repo / ".cursor" / "rules" / "agentdir.mdc").exists()
+    assert not (repo / ".windsurf" / "rules" / "agentdir.md").exists()
+
+
+def test_integrations_install_all_project_preserves_unmanaged_content(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    agents = repo / "AGENTS.md"
+    claude = repo / "CLAUDE.md"
+    agents.write_text("# Existing Agents\n\nKeep AGENTS content.\n", encoding="utf-8")
+    claude.write_text("# Existing Claude\n\nKeep CLAUDE content.\n", encoding="utf-8")
+
+    installed = run_cli("integrations", "install", "all", "--target", "project", "--json", cwd=repo)
+    rerun = run_cli("integrations", "install", "all", "--target", "project", "--json", cwd=repo)
+    doctor = run_cli("integrations", "doctor", "--json", cwd=repo)
+
+    installed_payload = json.loads(installed.stdout)
+    rerun_payload = json.loads(rerun.stdout)
+    doctor_payload = json.loads(doctor.stdout)
+    agents_text = agents.read_text(encoding="utf-8")
+    claude_text = claude.read_text(encoding="utf-8")
+
+    assert {item["name"] for item in installed_payload} == {"generic", "codex", "claude", "copilot", "cursor", "windsurf"}
+    assert {item["name"] for item in rerun_payload} == {"generic", "codex", "claude", "copilot", "cursor", "windsurf"}
+    assert doctor_payload["ok"] is True
+    assert "Keep AGENTS content." in agents_text
+    assert "Keep CLAUDE content." in claude_text
+    assert agents_text.count("agentdir-managed-generic:start") == 1
+    assert claude_text.count("agentdir-managed-claude:start") == 1
+    assert (repo / ".agents" / "skills" / "agentdir" / "SKILL.md").is_file()
+    assert (repo / ".github" / "copilot-instructions.md").is_file()
+    assert (repo / ".cursor" / "rules" / "agentdir.mdc").is_file()
+    assert (repo / ".windsurf" / "rules" / "agentdir.md").is_file()
+
+
+def test_integrations_install_all_store_target(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    installed = run_cli("integrations", "install", "all", "--target", "store", "--json", cwd=repo)
+    doctor = run_cli("integrations", "doctor", "--target", "store", "--json", cwd=repo)
+
+    installed_payload = json.loads(installed.stdout)
+    doctor_payload = json.loads(doctor.stdout)
+
+    assert {item["name"] for item in installed_payload} == {"generic", "codex", "claude", "copilot", "cursor", "windsurf"}
+    assert doctor_payload["ok"] is True
+    assert (repo / ".agentdir" / "integrations" / "generic" / "AGENTS.md").is_file()
+    assert (repo / ".agentdir" / "integrations" / "codex" / "skills" / "agentdir" / "SKILL.md").is_file()
+    assert (repo / ".agentdir" / "integrations" / "claude" / "CLAUDE.md").is_file()
+    assert (repo / ".agentdir" / "integrations" / "copilot" / "copilot-instructions.md").is_file()
+    assert (repo / ".agentdir" / "integrations" / "cursor" / "agentdir.mdc").is_file()
+    assert (repo / ".agentdir" / "integrations" / "windsurf" / "agentdir.md").is_file()
 
 
 def test_work_start_status_report_and_finish_are_agent_owned_flow(tmp_path: Path) -> None:

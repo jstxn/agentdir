@@ -49,7 +49,8 @@ from .federation import format_root_diagnostics, format_root_groups, format_root
 from .federation import list_registered_roots, list_root_groups, rebuild_registered_roots, register_root, remove_registered_root
 from .federation import remove_root_from_group, suggest_roots
 from .federation import search_federated_memory
-from .hooks import hook_status, install_hooks, record_hook_event, uninstall_hooks
+from .git import git_output
+from .hooks import DEFAULT_HOOKS, MANAGED_MARKER, hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_MODES, explain_memory_match, memory_backend_status
 from .memory import configure_embeddings, configure_team_backend, configure_vector_backend
@@ -61,7 +62,18 @@ from .retention import (
     format_retention_result,
     prune_sessions,
 )
-from .review import evidence_rows, format_evidence, format_summary, summarize_session
+from .review import (
+    EVIDENCE_FAMILIES,
+    evidence_brief,
+    evidence_rows,
+    filter_evidence,
+    format_evidence,
+    format_evidence_brief,
+    format_summary,
+    format_timeline,
+    summarize_session,
+    timeline_rows,
+)
 from .sessions import end_session, ensure_session, read_current_session, start_session
 from .rendering import rich_doctor
 from .secrets import (
@@ -70,7 +82,18 @@ from .secrets import (
     redact_secret_records,
     scan_secret_records,
 )
-from .skills import install_codex_skill, install_generic_guidance
+from .skills import (
+    BROAD_PROJECT_INTEGRATIONS,
+    INTEGRATION_NAMES,
+    codex_skill_path_no_create,
+    generic_guidance_path_no_create,
+    install_codex_skill,
+    install_generic_guidance,
+    install_integrations,
+    integration_doctor,
+    integration_plan,
+    uninstall_integrations,
+)
 from .store import AgentDirError, init_root, resolve_root
 from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, upgrade_exit_code
 
@@ -94,6 +117,151 @@ def read_body_or_literal(value: str | None) -> str | None:
 
 def print_json(data: object) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
+    root = command_root(args, create=False)
+    skill_target = getattr(args, "codex_skill", getattr(args, "install_skill", "none"))
+    codex_skill = None
+    if skill_target != "none":
+        path = codex_skill_path_no_create(root, target=skill_target)
+        codex_skill = {
+            "target": skill_target,
+            "path": str(path),
+            "action": "update" if path.exists() else "create",
+            "exists": path.exists(),
+            "would_write": True,
+        }
+    generic = None
+    if should_install_legacy_generic(args):
+        path = generic_guidance_path_no_create(root, target=args.install_generic)
+        generic = {
+            "target": args.install_generic,
+            "path": str(path),
+            "action": "update" if path.exists() else "create",
+            "exists": path.exists(),
+            "would_write": True,
+        }
+    names = setup_integration_names(args)
+    return {
+        "mode": mode,
+        "dry_run": True,
+        "root": str(root),
+        "would_create_root": not (root / "VERSION").is_file(),
+        "hooks": [] if args.no_hooks else hooks_install_plan(force=args.force),
+        "codex_skill": codex_skill,
+        "generic_guidance": generic,
+        "integrations": integration_plan(
+            root,
+            names,
+            target=args.integration_target,
+            force=args.force,
+        ) if names else [],
+    }
+
+
+def print_setup_plan(plan: dict[str, object]) -> None:
+    print(f"mode={plan['mode']}")
+    print(f"root={plan['root']}")
+    print(f"dry_run={str(plan['dry_run']).lower()}")
+    print(f"would_create_root={str(plan['would_create_root']).lower()}")
+    print(f"hooks={len(plan['hooks'])}")  # type: ignore[arg-type]
+    integrations = plan.get("integrations") or []
+    print(f"integrations={len(integrations)}")
+
+
+def setup_integration_names(args: argparse.Namespace) -> list[str]:
+    if getattr(args, "install_integrations", "all") == "none":
+        return []
+    names = list(BROAD_PROJECT_INTEGRATIONS)
+    install_generic = getattr(args, "install_generic", "project")
+    integration_target = getattr(args, "integration_target", "project")
+    if install_generic != integration_target and "generic" in names:
+        names.remove("generic")
+    return names
+
+
+def should_install_legacy_generic(args: argparse.Namespace) -> bool:
+    install_generic = getattr(args, "install_generic", "none")
+    if install_generic == "none":
+        return False
+    return not (
+        install_generic == getattr(args, "integration_target", "project")
+        and "generic" in setup_integration_names(args)
+    )
+
+
+def hooks_install_plan(*, force: bool = False, hooks: list[str] | None = None) -> list[dict[str, object]]:
+    hooks_dir = git_hooks_dir_no_create()
+    plan: list[dict[str, object]] = []
+    for name in hooks or list(DEFAULT_HOOKS):
+        path = hooks_dir / name
+        original = hooks_dir / f"{name}.agentdir-original"
+        existing = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+        managed = MANAGED_MARKER in existing
+        if not path.exists():
+            action = "create"
+        elif managed:
+            action = "update"
+        elif original.exists() and not force:
+            action = "refuse"
+        else:
+            action = "backup-and-install"
+        plan.append(
+            {
+                "hook": name,
+                "path": str(path),
+                "action": action,
+                "installed": path.exists(),
+                "managed": managed,
+                "original": str(original) if original.exists() else None,
+                "would_write": action != "refuse",
+                "would_refuse": action == "refuse",
+            }
+        )
+    return plan
+
+
+def hooks_uninstall_plan(hooks: list[str] | None = None) -> list[dict[str, object]]:
+    hooks_dir = git_hooks_dir_no_create()
+    plan: list[dict[str, object]] = []
+    for name in hooks or list(DEFAULT_HOOKS):
+        path = hooks_dir / name
+        original = hooks_dir / f"{name}.agentdir-original"
+        existing = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+        managed = MANAGED_MARKER in existing
+        if managed and original.exists():
+            action = "restore-original"
+        elif managed:
+            action = "remove"
+        elif path.exists():
+            action = "preserve-unmanaged"
+        else:
+            action = "none"
+        plan.append(
+            {
+                "hook": name,
+                "path": str(path),
+                "action": action,
+                "installed": path.exists(),
+                "managed": managed,
+                "original": str(original) if original.exists() else None,
+                "would_write": action in {"restore-original", "remove"},
+            }
+        )
+    return plan
+
+
+def git_hooks_dir_no_create() -> Path:
+    git_dir = git_output(["rev-parse", "--git-dir"])
+    if not git_dir:
+        raise AgentDirError("AgentDir hooks require a git repository")
+    path = Path(git_dir)
+    if not path.is_absolute():
+        root = git_output(["rev-parse", "--show-toplevel"])
+        base = Path(root) if root else Path.cwd()
+        path = base / path
+    return path.resolve() / "hooks"
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -588,19 +756,31 @@ def cmd_skills_install_generic(args: argparse.Namespace) -> int:
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        result = setup_plan(args, mode="setup")
+        if args.json:
+            print_json(result)
+        else:
+            print_setup_plan(result)
+        return 0
     root = command_root(args, create=True)
     hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
     skill = None
     if args.codex_skill != "none":
         skill = install_codex_skill(root, target=args.codex_skill, force=args.force)
     generic = None
-    if args.install_generic != "none":
+    if should_install_legacy_generic(args):
         generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
+    integrations = []
+    names = setup_integration_names(args)
+    if names:
+        integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
     result = {
         "root": str(root),
         "hooks": [asdict(info) for info in hooks],
         "codex_skill": str(skill.path) if skill else None,
         "generic_guidance": str(generic.path) if generic else None,
+        "integrations": integrations,
     }
     if args.json:
         print_json(result)
@@ -612,23 +792,37 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print(f"codex_skill={skill.path}")
         if generic:
             print(f"generic_guidance={generic.path}")
+        if integrations:
+            print(f"integrations={len(integrations)}")
     return 0
 
 
 def cmd_adopt(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        result = setup_plan(args, mode="adopt")
+        if args.json:
+            print_json(result)
+        else:
+            print_setup_plan(result)
+        return 0
     root = command_root(args, create=True)
     hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
     skill = None
     if args.install_skill != "none":
         skill = install_codex_skill(root, target=args.install_skill, force=args.force)
     generic = None
-    if args.install_generic != "none":
+    if should_install_legacy_generic(args):
         generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
+    integrations = []
+    names = setup_integration_names(args)
+    if names:
+        integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
     result = adopt_repo(
         root,
         install_hooks_result=[asdict(info) for info in hooks],
         codex_skill_path=str(skill.path) if skill else None,
         generic_guidance_path=str(generic.path) if generic else None,
+        integrations=integrations,
     )
     if args.json:
         print_json(result)
@@ -641,7 +835,36 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             print(f"codex_skill={skill.path}")
         if generic:
             print(f"generic_guidance={generic.path}")
+        if integrations:
+            print(f"integrations={len(integrations)}")
         print(f"next={result['next']}")
+    return 0
+
+
+def cmd_unadopt(args: argparse.Namespace) -> int:
+    root = command_root(args, create=False)
+    hooks = [] if args.no_hooks else uninstall_hooks() if args.apply else hooks_uninstall_plan()
+    project_integrations = uninstall_integrations(root, ["all"], target="project", apply=args.apply)
+    store_integrations = uninstall_integrations(root, ["all"], target="store", apply=args.apply)
+    result = {
+        "root": str(root),
+        "applied": args.apply,
+        "hooks": [asdict(info) if hasattr(info, "__dataclass_fields__") else info for info in hooks],
+        "integrations": {
+            "project": project_integrations,
+            "store": store_integrations,
+        },
+        "preserved": [str(root)],
+    }
+    if args.json:
+        print_json(result)
+    else:
+        print(f"root={root}")
+        print(f"applied={str(args.apply).lower()}")
+        print(f"hooks={len(result['hooks'])}")
+        print(f"project_integrations={len(project_integrations)}")
+        print(f"store_integrations={len(store_integrations)}")
+        print(f"preserved={root}")
     return 0
 
 
@@ -718,10 +941,50 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 def cmd_evidence(args: argparse.Namespace) -> int:
     rows = evidence_rows(command_root(args), args.session)
+    if args.family or args.failed:
+        rows = filter_evidence(rows, family=args.family, failed=args.failed)
+    if args.brief:
+        brief = evidence_brief(rows, family=None, failed=False)
+        if args.json:
+            print_json(brief)
+        else:
+            print(format_evidence_brief(brief))
+        return 0
     if args.json:
         print_json(rows)
     else:
         print(format_evidence(rows))
+    return 0
+
+
+def cmd_timeline(args: argparse.Namespace) -> int:
+    rows = timeline_rows(command_root(args), args.session, limit=args.limit)
+    if args.json:
+        print_json(rows)
+    else:
+        print(format_timeline(rows))
+    return 0
+
+
+def cmd_integrations_install(args: argparse.Namespace) -> int:
+    root = command_root(args, create=args.target == "store")
+    result = install_integrations(root, [args.name], target=args.target, force=args.force)
+    if args.json:
+        print_json(result)
+    else:
+        for item in result:
+            print(f"{item['name']}: {item['path']}")
+    return 0
+
+
+def cmd_integrations_doctor(args: argparse.Namespace) -> int:
+    result = integration_doctor(command_root(args, create=False), ["all"], target=args.target)
+    if args.json:
+        print_json(result)
+    else:
+        print(f"ok={str(result['ok']).lower()}")
+        for check in result["checks"]:
+            print(f"{check['name']}: {check['state']} {check['path']}")
     return 0
 
 
@@ -1323,7 +1586,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(setup)
     setup.add_argument("--no-hooks", action="store_true")
     setup.add_argument("--codex-skill", choices=("user", "project", "store", "none"), default="user")
-    setup.add_argument("--install-generic", choices=("project", "store", "none"), default="store")
+    setup.add_argument("--install-generic", choices=("project", "store", "none"), default="project")
+    setup.add_argument("--install-integrations", choices=("all", "none"), default="all")
+    setup.add_argument("--integration-target", choices=("project", "store"), default="project")
+    setup.add_argument("--dry-run", action="store_true")
     setup.add_argument("--force", action="store_true")
     setup.add_argument("--json", action="store_true")
     setup.set_defaults(func=cmd_setup)
@@ -1331,11 +1597,36 @@ def build_parser() -> argparse.ArgumentParser:
     adopt = sub.add_parser("adopt")
     add_scope_args(adopt)
     adopt.add_argument("--install-skill", choices=("user", "project", "store", "none"), default="user")
-    adopt.add_argument("--install-generic", choices=("project", "store", "none"), default="store")
+    adopt.add_argument("--install-generic", choices=("project", "store", "none"), default="project")
+    adopt.add_argument("--install-integrations", choices=("all", "none"), default="all")
+    adopt.add_argument("--integration-target", choices=("project", "store"), default="project")
     adopt.add_argument("--no-hooks", action="store_true")
+    adopt.add_argument("--dry-run", action="store_true")
     adopt.add_argument("--force", action="store_true")
     adopt.add_argument("--json", action="store_true")
     adopt.set_defaults(func=cmd_adopt)
+
+    unadopt = sub.add_parser("unadopt")
+    add_scope_args(unadopt)
+    unadopt.add_argument("--apply", action="store_true")
+    unadopt.add_argument("--no-hooks", action="store_true")
+    unadopt.add_argument("--json", action="store_true")
+    unadopt.set_defaults(func=cmd_unadopt)
+
+    integrations = sub.add_parser("integrations")
+    integrations_sub = integrations.add_subparsers(dest="integrations_command", required=True)
+    integrations_install = integrations_sub.add_parser("install")
+    add_scope_args(integrations_install)
+    integrations_install.add_argument("name", choices=(*INTEGRATION_NAMES, "all"))
+    integrations_install.add_argument("--target", choices=("project", "store"), required=True)
+    integrations_install.add_argument("--force", action="store_true")
+    integrations_install.add_argument("--json", action="store_true")
+    integrations_install.set_defaults(func=cmd_integrations_install)
+    integrations_doctor = integrations_sub.add_parser("doctor")
+    add_scope_args(integrations_doctor)
+    integrations_doctor.add_argument("--target", choices=("project", "store"), default="project")
+    integrations_doctor.add_argument("--json", action="store_true")
+    integrations_doctor.set_defaults(func=cmd_integrations_doctor)
 
     work = sub.add_parser("work")
     work_sub = work.add_subparsers(dest="work_command", required=True)
@@ -1382,8 +1673,18 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = sub.add_parser("evidence")
     add_scope_args(evidence)
     evidence.add_argument("--session")
+    evidence.add_argument("--brief", action="store_true")
+    evidence.add_argument("--family", choices=EVIDENCE_FAMILIES)
+    evidence.add_argument("--failed", action="store_true")
     evidence.add_argument("--json", action="store_true")
     evidence.set_defaults(func=cmd_evidence)
+
+    timeline = sub.add_parser("timeline")
+    add_scope_args(timeline)
+    timeline.add_argument("--session")
+    timeline.add_argument("--limit", type=int, default=100)
+    timeline.add_argument("--json", action="store_true")
+    timeline.set_defaults(func=cmd_timeline)
 
     memory = sub.add_parser("memory")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

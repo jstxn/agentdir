@@ -73,7 +73,7 @@ The agent handles the recording surface:
 agentdir work start "fix checkout failure" --emit-context
 agentdir run -- pytest -q
 agentdir audit session
-agentdir work finish
+agentdir work finish --json
 ```
 
 ## Install
@@ -89,7 +89,7 @@ Install the latest release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.6.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained
@@ -111,22 +111,55 @@ Run once from a git repository:
 agentdir adopt
 ```
 
-This prepares the repository for agent-owned recording:
+This is intentionally boring setup. It prepares the repository once, then agents
+operate AgentDir during normal coding work:
 
 - creates the repo-local `.agentdir` store
 - installs AgentDir-managed git hook shims
 - installs the Codex skill into the user skill directory
-- writes generic agent guidance under `.agentdir/integrations/generic/AGENTS.md`
+- writes managed project guidance for common agent tools
 - runs `doctor` to confirm the store is healthy
 
 After that, agents have the guidance they need to use AgentDir without the
 engineer manually operating it during normal work.
 
-If you want generated integration files to stay inside the repository store:
+Preview setup without writing anything:
 
 ```bash
-agentdir adopt --install-skill store --install-generic store
+agentdir adopt --dry-run --json
 ```
+
+If you want generated integration files to stay inside the AgentDir store
+instead of project instruction files:
+
+```bash
+agentdir adopt --install-skill store --install-generic store --integration-target store
+```
+
+Undo managed setup while keeping the `.agentdir` evidence store:
+
+```bash
+agentdir unadopt          # dry-run
+agentdir unadopt --apply  # remove managed hooks and guidance
+```
+
+## What Gets Written
+
+Default adoption writes only local files:
+
+```text
+<repo>/.agentdir/                         # evidence, artifacts, indexes, state
+<repo>/.git/hooks/*                       # managed hook shims with backups
+<repo>/AGENTS.md                          # generic / Codex-readable guidance
+<repo>/CLAUDE.md                          # Claude Code guidance
+<repo>/.github/copilot-instructions.md    # Copilot guidance
+<repo>/.cursor/rules/agentdir.mdc         # Cursor guidance
+<repo>/.windsurf/rules/agentdir.md        # Windsurf guidance
+~/.codex/skills/agentdir/SKILL.md         # Codex skill, by default
+```
+
+Managed guidance is wrapped in AgentDir markers. Existing unmanaged content is
+preserved where the target format supports managed blocks.
 
 ## Inspect A Session
 
@@ -135,8 +168,9 @@ AgentDir exists.
 
 ```bash
 agentdir status
-agentdir evidence
-agentdir report final
+agentdir evidence --brief
+agentdir timeline
+agentdir report final --format json
 agentdir replay
 agentdir memory search "checkout failure"
 ```
@@ -153,9 +187,16 @@ claims should fail a check.
 
 ## How AgentDir Works
 
-AgentDir has two layers:
+AgentDir has one source of truth and several rebuildable views:
 
-1. **Raw event envelopes**
+```text
+raw envelopes -> SQLite index -> memory/search/audit/report
+                    ^
+                    |
+             rebuilt from envelopes
+```
+
+1. **Raw envelopes**
    Each meaningful event is stored as an immutable file in a Maildir-inspired
    directory layout. These files are the source of truth.
 2. **Derived indexes**
@@ -177,6 +218,11 @@ Default project layout:
 
 The important property is recoverability: deleting the derived index does not
 destroy the session. AgentDir can rebuild from the envelope store.
+
+The agent-facing report surface is JSON. `agentdir report final --format json`
+and `agentdir work finish --json` include an `agent_handoff` object with
+verification evidence, failed evidence, claim support, context lineage, known
+gaps, and recommended next agent actions.
 
 ## Unique Capabilities
 
@@ -267,7 +313,7 @@ Rollback to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.6.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.0' | bash
 ```
 
 ## Learn More

@@ -7,7 +7,7 @@ from typing import Any
 from .context import audit_context_pack
 from .doctor import run_doctor
 from .git import git_status_short
-from .review import evidence_rows, summarize_session
+from .review import EVIDENCE_FAMILIES, evidence_rows, summarize_session
 from .sessions import read_current_session
 from .store import AgentDirError
 
@@ -22,7 +22,7 @@ CLAIM_UNSUPPORTED = "unsupported"
 CLAIM_CONTRADICTED = "contradicted"
 CLAIM_STATUSES = (CLAIM_SUPPORTED, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED)
 
-CLAIM_FAMILIES = ("test", "lint", "typecheck", "build", "doctor", "release")
+CLAIM_FAMILIES = tuple(family for family in EVIDENCE_FAMILIES if family != "diagnostic")
 
 CLAIM_KEYWORDS = {
     "test": ("test", "tests", "pytest", "vitest", "jest", "mocha", "unittest"),
@@ -277,6 +277,9 @@ def _detect_claim_families(text: str) -> list[str]:
 
 
 def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
+    for row in reversed(rows):
+        if row.get("family") == family:
+            return row
     keywords = CLAIM_KEYWORDS[family]
     for row in reversed(rows):
         haystack = _tool_result_search_text(row)

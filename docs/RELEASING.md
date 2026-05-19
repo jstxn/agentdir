@@ -26,8 +26,8 @@ chmod +x dist/rollback-agentdir.sh
 Expected assets:
 
 ```text
-dist/agentdir-0.6.0-py3-none-any.whl
-dist/agentdir-0.6.0.tar.gz
+dist/agentdir-0.7.0-py3-none-any.whl
+dist/agentdir-0.7.0.tar.gz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -35,18 +35,18 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.6.0 -m "Release AgentDir v0.6.0"
+git tag -a v0.7.0 -m "Release AgentDir v0.7.0"
 git push origin main
-git push origin v0.6.0
+git push origin v0.7.0
 
-gh release create v0.6.0 \
-  dist/agentdir-0.6.0-py3-none-any.whl \
-  dist/agentdir-0.6.0.tar.gz \
+gh release create v0.7.0 \
+  dist/agentdir-0.7.0-py3-none-any.whl \
+  dist/agentdir-0.7.0.tar.gz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.6.0" \
-  --notes-file docs/releases/v0.6.0.md
+  --title "AgentDir v0.7.0" \
+  --notes-file docs/releases/v0.7.0.md
 ```
 
 ## Release Verification
@@ -55,7 +55,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.6.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.7.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -75,8 +75,10 @@ cd "$repo"
 "$tmp/prefix/bin/agentdir" context build "release smoke"
 "$tmp/prefix/bin/agentdir" memory search "release smoke"
 "$tmp/prefix/bin/agentdir" status
-"$tmp/prefix/bin/agentdir" report final
-"$tmp/prefix/bin/agentdir" work finish
+"$tmp/prefix/bin/agentdir" evidence --brief
+"$tmp/prefix/bin/agentdir" timeline
+"$tmp/prefix/bin/agentdir" report final --format json
+"$tmp/prefix/bin/agentdir" work finish --json
 ```
 
 ## Rollback Verification
@@ -89,13 +91,13 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir-0.6.0-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir-0.7.0-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.5.3
+  bash dist/rollback-agentdir.sh v0.6.0
 
 "$tmp/prefix/bin/agentdir" --help
 ```

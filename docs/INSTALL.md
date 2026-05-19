@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.6.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.0' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -48,14 +48,14 @@ agentdir --upgrade
 
 The upgrade command resolves the latest GitHub Release, reinstalls AgentDir,
 then re-runs adoption for the current git repository. It refreshes hooks, the
-Codex skill, and generic agent guidance by default, then runs `doctor`.
+Codex skill, and broad project guidance by default, then runs `doctor`.
 
 Useful variants:
 
 ```bash
 agentdir --upgrade --upgrade-install-skill none
 agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.6.0
+agentdir --upgrade --upgrade-version v0.7.0
 agentdir --upgrade --upgrade-dry-run
 ```
 
@@ -72,11 +72,13 @@ cd "$repo"
 agentdir adopt --install-skill store
 agentdir work start "install smoke" --emit-context
 agentdir run -- python3 -c "print('agentdir install smoke')"
+agentdir evidence --brief
+agentdir timeline
 agentdir context build "install smoke"
 agentdir memory search "install smoke"
 agentdir status
-agentdir report final
-agentdir work finish
+agentdir report final --format json
+agentdir work finish --json
 ```
 
 ## Install From A Downloaded Wheel
@@ -84,13 +86,13 @@ agentdir work finish
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.6.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.7.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.6.0-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -102,21 +104,21 @@ To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.6.0' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.0' | bash
 ```
 
 To choose a specific release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.6.0' | bash -s -- v0.5.3
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.0' | bash -s -- v0.6.0
 ```
 
 The equivalent manual rollback is:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.3' | AGENTDIR_VERSION=v0.5.3 bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.6.0' | AGENTDIR_VERSION=v0.6.0 bash
 ```
 
 ## Optional Extras
@@ -175,16 +177,30 @@ agentdir adopt
 ```
 
 It initializes the default project store, installs AgentDir-managed Git hook
-shims, installs the Codex skill in the user skill directory, writes generic
-agent guidance under `.agentdir/integrations/generic`, runs doctor, and prints
-the next workbench command. After that, daily use should be handled by the
-coding agent. The user should not need to start sessions, wrap commands,
-summarize, or gather evidence manually.
+shims, installs the Codex skill in the user skill directory, writes broad
+project guidance for common agent tools, runs doctor, and prints the next
+workbench command. After that, daily use should be handled by the coding agent.
+The user should not need to start sessions, wrap commands, summarize, or gather
+evidence manually.
+
+Preview adoption without creating `.agentdir`, hooks, or guidance files:
+
+```bash
+agentdir adopt --dry-run --json
+agentdir setup --dry-run --json
+```
 
 To keep generated integration files inside the project store instead:
 
 ```bash
-agentdir adopt --install-skill store --install-generic store
+agentdir adopt --install-skill store --install-generic store --integration-target store
+```
+
+To undo managed setup while keeping `.agentdir` evidence:
+
+```bash
+agentdir unadopt          # dry-run
+agentdir unadopt --apply  # restore hooks and remove managed guidance
 ```
 
 To install only the Codex skill or generic guidance:
@@ -192,6 +208,13 @@ To install only the Codex skill or generic guidance:
 ```bash
 agentdir skills install codex --target user
 agentdir skills install generic --target project
+```
+
+To install broad agent guidance explicitly:
+
+```bash
+agentdir integrations install all --target project
+agentdir integrations doctor --json
 ```
 
 ## Install From Source
@@ -224,7 +247,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.6.0-py3-none-any.whl`
-- `agentdir-0.6.0.tar.gz`
+- `agentdir-0.7.0-py3-none-any.whl`
+- `agentdir-0.7.0.tar.gz`
 - `install-agentdir.sh`
 - `rollback-agentdir.sh`

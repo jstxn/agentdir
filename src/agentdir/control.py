@@ -18,7 +18,7 @@ from .git import git_branch, git_head, git_status_short, workspace_name
 from .index import rebuild_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_HYBRID, memory_stats
 from .query import query_messages
-from .review import evidence_rows, format_evidence, format_summary, summarize_session
+from .review import evidence_brief, evidence_rows, format_evidence, format_summary, summarize_session
 from .rendering import rich_status
 from .sessions import SessionState, end_session, ensure_session, read_current_session, require_current_session
 from .store import AgentDirError, init_root, paths_for, require_root
@@ -34,6 +34,7 @@ def adopt_repo(
     install_hooks_result: list[dict[str, Any]],
     codex_skill_path: str | None,
     generic_guidance_path: str | None = None,
+    integrations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     paths = init_root(root)
     doctor = run_doctor(paths.root)
@@ -43,6 +44,7 @@ def adopt_repo(
         "hooks": install_hooks_result,
         "codex_skill": codex_skill_path,
         "generic_guidance": generic_guidance_path,
+        "integrations": integrations or [],
         "doctor": doctor.as_dict(),
         "next": "agentdir work start \"<task>\"",
     }
@@ -337,17 +339,29 @@ def build_final_report(
     )
     claims_audit = audit_claims(paths.root, claims_text, session.session_id) if claims_text is not None else None
     gaps = _known_gaps(summary, evidence, context_audit, doctor, session_audit, claims_audit)
+    brief = evidence_brief(evidence)
+    handoff = _agent_handoff(
+        summary=summary,
+        evidence_brief_payload=brief,
+        context_audit=context_audit,
+        doctor=doctor,
+        session_audit=session_audit,
+        claims_audit=claims_audit,
+        known_gaps=gaps,
+    )
     return {
         "task": session.title,
         "session": asdict(session),
         "summary": summary,
         "evidence": evidence,
+        "evidence_brief": brief,
         "context": {
             "latest_pack": latest_pack,
             "audit": context_audit,
         },
         "session_audit": session_audit,
         "claim_support": claims_audit,
+        "agent_handoff": handoff,
         "git": {
             "workspace": session.workspace,
             "branch": git_branch(),
@@ -365,6 +379,7 @@ def format_final_report(report: dict[str, Any]) -> str:
     health = report.get("health")
     session_audit = report.get("session_audit") or {}
     claim_support = report.get("claim_support")
+    handoff = report.get("agent_handoff") or {}
     lines = [
         "# AgentDir Final Report",
         "",
@@ -416,6 +431,17 @@ def format_final_report(report: dict[str, Any]) -> str:
                 lines.append(f"- {claim['family']}: {claim['status']} - {claim['message']}")
         else:
             lines.append("- claims: none detected")
+    lines.extend(["", "## Agent Handoff", ""])
+    if handoff:
+        lines.append(f"- status: {handoff.get('status')}")
+        actions = handoff.get("recommended_agent_actions") or []
+        if actions:
+            for action in actions:
+                lines.append(f"- action: {action}")
+        else:
+            lines.append("- action: none")
+    else:
+        lines.append("- handoff: not available")
     lines.extend(["", "## Health", ""])
     if health:
         lines.append(f"- doctor_ok: {str(health['ok']).lower()}")
@@ -432,6 +458,148 @@ def format_final_report(report: dict[str, Any]) -> str:
     else:
         lines.append("- none")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _agent_handoff(
+    *,
+    summary: dict[str, Any],
+    evidence_brief_payload: dict[str, Any],
+    context_audit: dict[str, Any] | None,
+    doctor: dict[str, Any] | None,
+    session_audit: dict[str, Any] | None,
+    claims_audit: dict[str, Any] | None,
+    known_gaps: list[str],
+) -> dict[str, Any]:
+    failed_evidence = evidence_brief_payload.get("failed_evidence") or []
+    fail_checks = [
+        check
+        for check in (session_audit or {}).get("checks", [])
+        if check.get("status") == "fail"
+    ]
+    unsupported_claims = []
+    contradicted_claims = []
+    if claims_audit:
+        unsupported_claims = [
+            claim
+            for claim in claims_audit.get("claims", [])
+            if claim.get("status") == "unsupported"
+        ]
+        contradicted_claims = [
+            claim
+            for claim in claims_audit.get("claims", [])
+            if claim.get("status") == "contradicted"
+        ]
+    doctor_errors = (doctor or {}).get("errors") or []
+    needs_attention = bool(failed_evidence or fail_checks or unsupported_claims or contradicted_claims or doctor_errors)
+    return {
+        "status": "needs_attention" if needs_attention else "ok",
+        "verification": evidence_brief_payload.get("families") or [],
+        "failed_evidence": failed_evidence,
+        "claim_support": claims_audit,
+        "context_lineage": _context_lineage(context_audit),
+        "known_gaps": known_gaps,
+        "recommended_agent_actions": _recommended_agent_actions(
+            summary=summary,
+            failed_evidence=failed_evidence,
+            unsupported_claims=unsupported_claims,
+            contradicted_claims=contradicted_claims,
+            doctor_errors=doctor_errors,
+            session_audit=session_audit,
+        ),
+        "final_response_guidance": _final_response_guidance(
+            failed_evidence=failed_evidence,
+            unsupported_claims=unsupported_claims,
+            contradicted_claims=contradicted_claims,
+            doctor_errors=doctor_errors,
+        ),
+    }
+
+
+def _context_lineage(context_audit: dict[str, Any] | None) -> dict[str, Any]:
+    if context_audit is None:
+        return {
+            "pack_id": None,
+            "retrieved": 0,
+            "consumed": 0,
+            "cited": 0,
+            "evidence_backed": 0,
+            "ok": False,
+        }
+    if context_audit.get("error"):
+        return {
+            "pack_id": context_audit.get("pack_id"),
+            "retrieved": 0,
+            "consumed": 0,
+            "cited": 0,
+            "evidence_backed": 0,
+            "ok": False,
+            "error": context_audit.get("error"),
+        }
+    retrieved = context_audit.get("retrieved_count", 0)
+    consumed = context_audit.get("consumed_count", 0)
+    cited = context_audit.get("cited_count", 0)
+    return {
+        "pack_id": context_audit.get("pack_id"),
+        "retrieved": retrieved,
+        "consumed": consumed,
+        "cited": cited,
+        "evidence_backed": context_audit.get("evidence_backed_count", 0),
+        "ok": not ((retrieved and not consumed) or (consumed and not cited)),
+    }
+
+
+def _recommended_agent_actions(
+    *,
+    summary: dict[str, Any],
+    failed_evidence: list[dict[str, Any]],
+    unsupported_claims: list[dict[str, Any]],
+    contradicted_claims: list[dict[str, Any]],
+    doctor_errors: list[str],
+    session_audit: dict[str, Any] | None,
+) -> list[str]:
+    actions: list[str] = []
+    if failed_evidence:
+        actions.append("Inspect failed evidence and rerun the relevant check after fixing it.")
+    if contradicted_claims:
+        actions.append("Do not claim contradicted checks passed until newer successful evidence exists.")
+    if unsupported_claims:
+        families = ", ".join(sorted({str(claim.get("family")) for claim in unsupported_claims}))
+        actions.append(f"Capture evidence or remove unsupported final-response claims for: {families}.")
+    if doctor_errors:
+        actions.append("Run `agentdir doctor` and resolve health errors before treating the session as clean.")
+    if summary.get("tool_results", 0) == 0:
+        actions.append("Run evidence-bearing verification through `agentdir run -- <command>` when final claims need support.")
+    if session_audit:
+        failing_ids = [
+            check.get("id")
+            for check in session_audit.get("checks", [])
+            if check.get("status") == "fail" and check.get("id") != "failed_tool_results"
+        ]
+        for check_id in failing_ids:
+            actions.append(f"Resolve failing session audit check: {check_id}.")
+    return actions
+
+
+def _final_response_guidance(
+    *,
+    failed_evidence: list[dict[str, Any]],
+    unsupported_claims: list[dict[str, Any]],
+    contradicted_claims: list[dict[str, Any]],
+    doctor_errors: list[str],
+) -> list[str]:
+    guidance = [
+        "Base final verification claims only on supported AgentDir evidence.",
+        "Mention AgentDir only when it clarifies evidence, blockers, or setup problems.",
+    ]
+    if failed_evidence:
+        guidance.append("Call out failed checks plainly instead of summarizing the session as clean.")
+    if unsupported_claims:
+        guidance.append("Avoid unsupported test, lint, typecheck, build, doctor, or release claims.")
+    if contradicted_claims:
+        guidance.append("Treat contradicted claims as blockers until newer passing evidence exists.")
+    if doctor_errors:
+        guidance.append("Surface doctor errors as setup or health blockers.")
+    return guidance
 
 
 def latest_context_pack(

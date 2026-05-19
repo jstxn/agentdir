@@ -176,6 +176,76 @@ def test_report_final_can_include_claim_support(tmp_path: Path) -> None:
     assert payload["session_audit"]["summary"]["session_id"] == payload["summary"]["session_id"]
     assert payload["claim_support"]["claims"][0]["family"] == "test"
     assert payload["claim_support"]["claims"][0]["status"] == "supported"
+    assert payload["agent_handoff"]["status"] == "ok"
+    assert payload["agent_handoff"]["claim_support"]["claims"][0]["status"] == "supported"
+    assert payload["agent_handoff"]["verification"][0]["family"] == "test"
+
+
+def test_agent_handoff_surfaces_failed_evidence_and_claim_gaps(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    claims = tmp_path / "claims.txt"
+    claims.write_text("Build passed. Typecheck passed.", encoding="utf-8")
+    run_cli("work", "start", "handoff failed evidence", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "build",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(4)",
+        cwd=repo,
+        expected_returncode=4,
+    )
+
+    report = run_cli("report", "final", "--format", "json", "--claims", str(claims), cwd=repo)
+    payload = json.loads(report.stdout)
+    handoff = payload["agent_handoff"]
+
+    assert handoff["status"] == "needs_attention"
+    assert handoff["failed_evidence"][0]["family"] == "build"
+    assert any(claim["status"] == "contradicted" for claim in handoff["claim_support"]["claims"])
+    assert any(claim["status"] == "unsupported" for claim in handoff["claim_support"]["claims"])
+    assert handoff["recommended_agent_actions"]
+
+
+def test_evidence_brief_filters_and_timeline_json(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "evidence skim", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('tests passed')",
+        cwd=repo,
+    )
+    run_cli(
+        "run",
+        "--name",
+        "build",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(2)",
+        cwd=repo,
+        expected_returncode=2,
+    )
+
+    brief = json.loads(run_cli("evidence", "--brief", "--json", cwd=repo).stdout)
+    failed = json.loads(run_cli("evidence", "--failed", "--json", cwd=repo).stdout)
+    tests = json.loads(run_cli("evidence", "--family", "test", "--json", cwd=repo).stdout)
+    timeline = json.loads(run_cli("timeline", "--json", "--limit", "10", cwd=repo).stdout)
+
+    assert brief["latest_by_family"]["test"]["exit_code"] == 0
+    assert brief["latest_by_family"]["build"]["exit_code"] == 2
+    assert brief["failed_evidence"][0]["family"] == "build"
+    assert {row["family"] for row in failed} == {"build"}
+    assert {row["family"] for row in tests} == {"test"}
+    assert timeline[0]["event_type"] == "session.started"
+    assert any(row["event_type"] == "tool.result" and row.get("family") == "build" for row in timeline)
 
 
 def test_index_rebuild_json_flag_and_replay_recover_deleted_index(tmp_path: Path) -> None:

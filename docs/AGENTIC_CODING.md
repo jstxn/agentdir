@@ -28,10 +28,20 @@ agentdir adopt
 ```
 
 This initializes `.agentdir`, installs managed Git hook shims, installs the
-Codex skill in the user skill directory, writes generic agent guidance under
-`.agentdir/integrations/generic`, runs doctor, and prints the next command.
-Use `agentdir adopt --install-skill store --install-generic store` when you
-want generated integration files to stay under `.agentdir`.
+Codex skill in the user skill directory, writes broad project guidance for
+common agent tools, runs doctor, and prints the next command.
+
+Preview or undo setup safely:
+
+```bash
+agentdir adopt --dry-run --json
+agentdir setup --dry-run --json
+agentdir unadopt
+agentdir unadopt --apply
+```
+
+Use `agentdir adopt --install-skill store --install-generic store --integration-target store`
+when you want generated integration files to stay under `.agentdir`.
 
 ## Daily Workflow
 
@@ -47,8 +57,9 @@ Agent responsibilities:
 - wrap evidence-bearing commands with `agentdir run`
 - use plain shell commands for routine exploration and file reads
 - record important blockers, decisions, and handoffs
-- use `agentdir report final` to preview a handoff report
-- use `agentdir work finish` before final claims when practical
+- use `agentdir evidence --brief` and `agentdir timeline` to skim the trail
+- use `agentdir report final --format json` to preview the agent handoff object
+- use `agentdir work finish --json` before final claims when practical
 
 Human responsibilities:
 
@@ -178,9 +189,10 @@ These commands are mainly for agents and for humans who want to inspect the reco
 
 ```bash
 agentdir status
-agentdir report final
+agentdir report final --format json
 agentdir summarize
-agentdir evidence
+agentdir evidence --brief
+agentdir timeline
 agentdir memory search "similar failing verification"
 agentdir memory search --federated "similar failing verification"
 agentdir memory search --group product-work "similar failing verification"
@@ -201,7 +213,7 @@ agentdir replay --session "$(agentdir session current)"
 Agents should end the session when the task is done:
 
 ```bash
-agentdir work finish
+agentdir work finish --json
 ```
 
 ## Store Hygiene
@@ -231,9 +243,11 @@ Hook records use the active session when one exists. If no session is active, Ag
 
 ## Agent Guidance
 
-The generated Codex skill and generic `AGENTS.md` guidance tell coding agents that AgentDir is their responsibility, not a user checklist. They instruct agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, audit session quality and final claims when useful, and close with `work finish` when practical.
+The generated Codex skill and project guidance tell coding agents that AgentDir is their responsibility, not a user checklist. They instruct agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, audit session quality and final claims when useful, and close with `work finish` when practical.
 
 ```bash
+agentdir integrations install all --target project
+agentdir integrations doctor --json
 agentdir skills install codex --target user
 agentdir skills install codex --target project
 agentdir skills install codex --target store
