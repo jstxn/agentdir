@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .events import emit_event
 from .git import git_branch, git_head, git_output, git_status_short
-from .sessions import ensure_session
+from .sessions import end_session, read_current_session, start_session
 from .store import AgentDirError, init_root
 
 DEFAULT_HOOKS = ("pre-commit", "post-commit", "pre-push", "post-checkout", "post-merge")
@@ -129,7 +129,16 @@ def record_hook_event(
     hook_args: list[str] | None = None,
     cwd: str | Path | None = None,
 ) -> None:
-    session = ensure_session(root, title=f"Git hook {hook}")
+    session = read_current_session(root)
+    created_hook_session = session is None or session.status != "active"
+    if created_hook_session:
+        session = start_session(
+            root,
+            title=f"Git hook {hook}",
+            actor="git",
+            note="AgentDir background git hook session.",
+            cwd=cwd,
+        )
     stdin_text = ""
     if stdin_file:
         path = Path(stdin_file)
@@ -162,6 +171,13 @@ def record_hook_event(
         tool="git",
         tool_exit_code=original_exit_code,
     )
+    if created_hook_session:
+        end_session(
+            root,
+            status="completed",
+            summary=f"Recorded git hook {hook} exit {original_exit_code}.",
+            actor="git",
+        )
 
 
 def _hook_script(name: str, original: Path) -> str:

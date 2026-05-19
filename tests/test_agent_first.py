@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.0"
+    assert result.stdout.strip() == "agentdir 0.7.1"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -224,6 +224,35 @@ def test_hooks_install_record_and_uninstall_preserve_original_hook(tmp_path: Pat
     assert "original-ran" in restored
 
 
+def test_hook_record_without_active_session_auto_closes_background_session(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    run_cli("hooks", "record", "--hook", "pre-commit", "--original-exit-code", "0", cwd=repo)
+    run_cli("session", "current", cwd=repo, expected_returncode=2)
+    run_cli("index", "rebuild", cwd=repo)
+
+    rows = query_rows(repo / ".agentdir")
+    event_types = [row["event_type"] for row in rows]
+
+    assert event_types == ["session.started", "git.hook.pre-commit", "session.ended"]
+    assert all(row["session_id"] == rows[0]["session_id"] for row in rows)
+
+
+def test_hook_record_uses_existing_active_session_without_ending_it(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    started = run_cli("work", "start", "active hook session", "--json", cwd=repo)
+    session_id = json.loads(started.stdout)["session"]["session_id"]
+
+    run_cli("hooks", "record", "--hook", "pre-commit", "--original-exit-code", "0", cwd=repo)
+    current = run_cli("session", "current", "--json", cwd=repo)
+    run_cli("index", "rebuild", cwd=repo)
+
+    rows = query_rows(repo / ".agentdir", "git.hook.pre-commit")
+
+    assert json.loads(current.stdout)["session_id"] == session_id
+    assert rows[0]["session_id"] == session_id
+
+
 def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     home = tmp_path / "home"
@@ -307,6 +336,10 @@ def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) 
     assert (repo / ".github" / "copilot-instructions.md").is_file()
     assert (repo / ".cursor" / "rules" / "agentdir.mdc").is_file()
     assert (repo / ".windsurf" / "rules" / "agentdir.md").is_file()
+    doctor = json.loads(run_cli("integrations", "doctor", "--json", cwd=repo, env_extra={"HOME": str(home)}).stdout)
+    codex_check = next(check for check in doctor["checks"] if check["name"] == "codex")
+    assert codex_check["state"] == "installed"
+    assert codex_check["effective_target"] == "user"
 
 
 def test_adopt_dry_run_does_not_write_and_unadopt_preserves_evidence(tmp_path: Path) -> None:

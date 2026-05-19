@@ -386,6 +386,20 @@ def integration_state(
     existing = destination.read_text(encoding="utf-8", errors="ignore") if exists else ""
     managed = _integration_managed(name, existing)
     if not exists:
+        if name == "codex" and target == "project":
+            effective = _effective_codex_install(root, cwd=cwd)
+            if effective:
+                return {
+                    "name": name,
+                    "target": target,
+                    "path": str(destination),
+                    "state": effective["state"],
+                    "installed": effective["state"] == "installed",
+                    "managed": effective["managed"],
+                    "effective_target": effective["target"],
+                    "effective_path": str(effective["path"]),
+                    "message": f"Codex skill is installed at {effective['target']} target",
+                }
         state = "missing"
     elif name == "codex":
         state = "installed" if existing == CODEX_SKILL else "stale" if managed else "conflict"
@@ -402,6 +416,31 @@ def integration_state(
         "installed": state == "installed",
         "managed": managed,
     }
+
+
+def _effective_codex_install(
+    root: str | Path,
+    *,
+    cwd: str | Path | None = None,
+) -> dict[str, Any] | None:
+    for effective_target in ("user", "store"):
+        path = codex_skill_path_no_create(root, target=effective_target, cwd=cwd, create=False)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if text == CODEX_SKILL:
+            state = "installed"
+        elif is_agentdir_managed_skill(text):
+            state = "stale"
+        else:
+            state = "conflict"
+        return {
+            "target": effective_target,
+            "path": path,
+            "state": state,
+            "managed": is_agentdir_managed_skill(text),
+        }
+    return None
 
 
 def integration_path(
