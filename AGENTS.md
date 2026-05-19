@@ -1,0 +1,27 @@
+<!-- agentdir-managed-generic:start -->
+# AgentDir
+
+Use AgentDir as the local flight recorder for coding-agent work in this repository.
+
+The engineer should not have to run AgentDir commands during normal coding work.
+The agent owns the background recording flow:
+
+- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
+- If `.agentdir` is missing, run `agentdir adopt` once before work begins.
+- Run evidence-bearing commands through `agentdir run -- <command>`.
+- Evidence-bearing commands include tests, lint, typecheck, build, release checks,
+  reproduced failures, and diagnostics that support final claims.
+- Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`,
+  `find`, or quick read-only `git status` checks.
+- Use `agentdir status` for a single view of session, evidence, memory, context,
+  registered roots, and doctor health.
+- Use `agentdir evidence --brief` and `agentdir timeline` to skim recorded work.
+- Use `agentdir audit session` and `agentdir audit claims --text <path|->` before
+  final claims when evidence support matters.
+- Before the final response, run `agentdir work finish --json` when practical.
+  Use `agentdir report final --format json` to preview the same agent handoff
+  without ending the session.
+- Read the `agent_handoff` object before making final verification claims.
+- Do not record secrets, private keys, raw environment dumps, or credential-bearing
+  command output.
+<!-- agentdir-managed-generic:end -->
