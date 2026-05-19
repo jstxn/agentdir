@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.3' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -55,7 +55,7 @@ Useful variants:
 ```bash
 agentdir --upgrade --upgrade-install-skill none
 agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.7.2
+agentdir --upgrade --upgrade-version v0.7.3
 agentdir --upgrade --upgrade-dry-run
 ```
 
@@ -86,13 +86,13 @@ agentdir work finish --json
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.7.2-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.7.3-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.2-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.3-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -104,21 +104,21 @@ To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.3' | bash
 ```
 
 To choose a specific release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.2' | bash -s -- v0.7.1
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.3' | bash -s -- v0.7.2
 ```
 
 The equivalent manual rollback is:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.1' | AGENTDIR_VERSION=v0.7.1 bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.2' | AGENTDIR_VERSION=v0.7.2 bash
 ```
 
 ## Optional Extras
@@ -178,10 +178,11 @@ agentdir adopt
 
 It initializes the default project store, installs AgentDir-managed Git hook
 shims, installs the Codex skill in the user skill directory, writes broad
-project guidance for common agent tools, runs doctor, and prints the next
-workbench command. After that, daily use should be handled by the coding agent.
-The user should not need to start sessions, wrap commands, summarize, or gather
-evidence manually.
+project guidance for common agent tools, asks interactive users whether
+`.agentdir/` should be added to a project or user-level Git ignore file, runs
+doctor, and prints the next workbench command. After that, daily use should be
+handled by the coding agent. The user should not need to start sessions, wrap
+commands, summarize, or gather evidence manually.
 
 Preview adoption without creating `.agentdir`, hooks, or guidance files:
 
@@ -194,6 +195,14 @@ To keep generated integration files inside the project store instead:
 
 ```bash
 agentdir adopt --install-skill store --install-generic store --integration-target store
+```
+
+For non-interactive installs, choose the ignore destination explicitly:
+
+```bash
+agentdir adopt --gitignore project  # write <repo>/.gitignore
+agentdir adopt --gitignore user     # write the user-level Git excludes file
+agentdir adopt --gitignore none     # leave ignore files unchanged
 ```
 
 To undo managed setup while keeping `.agentdir` evidence:
@@ -247,7 +256,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.7.2-py3-none-any.whl`
-- `agentdir-0.7.2.tar.gz`
+- `agentdir-0.7.3-py3-none-any.whl`
+- `agentdir-0.7.3.tar.gz`
 - `install-agentdir.sh`
 - `rollback-agentdir.sh`

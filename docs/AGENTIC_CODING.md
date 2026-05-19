@@ -29,7 +29,8 @@ agentdir adopt
 
 This initializes `.agentdir`, installs managed Git hook shims, installs the
 Codex skill in the user skill directory, writes broad project guidance for
-common agent tools, runs doctor, and prints the next command.
+common agent tools, asks interactive users where to ignore `.agentdir/`, runs
+doctor, and prints the next command.
 
 Preview or undo setup safely:
 
@@ -42,6 +43,9 @@ agentdir unadopt --apply
 
 Use `agentdir adopt --install-skill store --install-generic store --integration-target store`
 when you want generated integration files to stay under `.agentdir`.
+Use `agentdir adopt --gitignore project`, `--gitignore user`, or
+`--gitignore none` to make the ignore destination explicit in non-interactive
+setup.
 
 ## Daily Workflow
 

@@ -89,7 +89,7 @@ Install the latest release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.3' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained
@@ -118,6 +118,8 @@ operate AgentDir during normal coding work:
 - installs AgentDir-managed git hook shims
 - installs the Codex skill into the user skill directory
 - writes managed project guidance for common agent tools
+- asks interactive users whether `.agentdir/` should be added to the project or
+  user-level Git ignore file
 - runs `doctor` to confirm the store is healthy
 
 After that, agents have the guidance they need to use AgentDir without the
@@ -134,6 +136,14 @@ instead of project instruction files:
 
 ```bash
 agentdir adopt --install-skill store --install-generic store --integration-target store
+```
+
+For non-interactive installs, choose the ignore destination explicitly:
+
+```bash
+agentdir adopt --gitignore project  # write <repo>/.gitignore
+agentdir adopt --gitignore user     # write the user-level Git excludes file
+agentdir adopt --gitignore none     # leave ignore files unchanged
 ```
 
 Undo managed setup while keeping the `.agentdir` evidence store:
@@ -313,7 +323,7 @@ Rollback to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.2' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.3' | bash
 ```
 
 ## Learn More

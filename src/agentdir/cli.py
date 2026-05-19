@@ -50,6 +50,7 @@ from .federation import list_registered_roots, list_root_groups, rebuild_registe
 from .federation import remove_root_from_group, suggest_roots
 from .federation import search_federated_memory
 from .git import git_output
+from .gitignore import GITIGNORE_CHOICES, ensure_agentdir_ignored, gitignore_plan
 from .hooks import DEFAULT_HOOKS, MANAGED_MARKER, hook_status, install_hooks, record_hook_event, uninstall_hooks
 from .index import rebuild_index, update_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_MODES, explain_memory_match, memory_backend_status
@@ -157,6 +158,7 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
             target=args.integration_target,
             force=args.force,
         ) if names else [],
+        "gitignore": gitignore_plan(target=getattr(args, "gitignore", "none"), cwd=Path.cwd()),
     }
 
 
@@ -168,6 +170,9 @@ def print_setup_plan(plan: dict[str, object]) -> None:
     print(f"hooks={len(plan['hooks'])}")  # type: ignore[arg-type]
     integrations = plan.get("integrations") or []
     print(f"integrations={len(integrations)}")
+    gitignore = plan.get("gitignore") or {}
+    if isinstance(gitignore, dict):
+        print(f"gitignore={gitignore.get('target')}:{gitignore.get('action')}")
 
 
 def setup_integration_names(args: argparse.Namespace) -> list[str]:
@@ -189,6 +194,40 @@ def should_install_legacy_generic(args: argparse.Namespace) -> bool:
         install_generic == getattr(args, "integration_target", "project")
         and "generic" in setup_integration_names(args)
     )
+
+
+def selected_gitignore_target(args: argparse.Namespace) -> str:
+    target = getattr(args, "gitignore", "none")
+    if target != "ask":
+        return target
+    if getattr(args, "json", False) or not sys.stdin.isatty() or not sys.stderr.isatty():
+        return "none"
+
+    sys.stderr.write(
+        "Ignore .agentdir? [P]roject .gitignore / [U]ser Git ignore / [N]one "
+        "(default: project): "
+    )
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    if answer in ("", "p", "project"):
+        return "project"
+    if answer in ("u", "user"):
+        return "user"
+    if answer in ("n", "none", "no"):
+        return "none"
+    raise AgentDirError("Invalid gitignore choice; use project, user, or none")
+
+
+def format_gitignore_result(result: dict[str, object] | None) -> str:
+    if not result:
+        return "none"
+    target = result.get("target")
+    action = result.get("action")
+    path = result.get("path")
+    changed = result.get("changed")
+    suffix = f":{path}" if path else ""
+    changed_text = "changed" if changed else "unchanged"
+    return f"{target}:{action}:{changed_text}{suffix}"
 
 
 def hooks_install_plan(*, force: bool = False, hooks: list[str] | None = None) -> list[dict[str, object]]:
@@ -775,12 +814,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
     names = setup_integration_names(args)
     if names:
         integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
+    gitignore = ensure_agentdir_ignored(target=selected_gitignore_target(args), cwd=Path.cwd())
     result = {
         "root": str(root),
         "hooks": [asdict(info) for info in hooks],
         "codex_skill": str(skill.path) if skill else None,
         "generic_guidance": str(generic.path) if generic else None,
         "integrations": integrations,
+        "gitignore": gitignore,
     }
     if args.json:
         print_json(result)
@@ -794,6 +835,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print(f"generic_guidance={generic.path}")
         if integrations:
             print(f"integrations={len(integrations)}")
+        print(f"gitignore={format_gitignore_result(gitignore)}")
     return 0
 
 
@@ -817,12 +859,14 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     names = setup_integration_names(args)
     if names:
         integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
+    gitignore = ensure_agentdir_ignored(target=selected_gitignore_target(args), cwd=Path.cwd())
     result = adopt_repo(
         root,
         install_hooks_result=[asdict(info) for info in hooks],
         codex_skill_path=str(skill.path) if skill else None,
         generic_guidance_path=str(generic.path) if generic else None,
         integrations=integrations,
+        gitignore=gitignore,
     )
     if args.json:
         print_json(result)
@@ -837,6 +881,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             print(f"generic_guidance={generic.path}")
         if integrations:
             print(f"integrations={len(integrations)}")
+        print(f"gitignore={format_gitignore_result(gitignore)}")
         print(f"next={result['next']}")
     return 0
 
@@ -1589,6 +1634,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--install-generic", choices=("project", "store", "none"), default="project")
     setup.add_argument("--install-integrations", choices=("all", "none"), default="all")
     setup.add_argument("--integration-target", choices=("project", "store"), default="project")
+    setup.add_argument("--gitignore", choices=GITIGNORE_CHOICES, default="ask")
     setup.add_argument("--dry-run", action="store_true")
     setup.add_argument("--force", action="store_true")
     setup.add_argument("--json", action="store_true")
@@ -1600,6 +1646,7 @@ def build_parser() -> argparse.ArgumentParser:
     adopt.add_argument("--install-generic", choices=("project", "store", "none"), default="project")
     adopt.add_argument("--install-integrations", choices=("all", "none"), default="all")
     adopt.add_argument("--integration-target", choices=("project", "store"), default="project")
+    adopt.add_argument("--gitignore", choices=GITIGNORE_CHOICES, default="ask")
     adopt.add_argument("--no-hooks", action="store_true")
     adopt.add_argument("--dry-run", action="store_true")
     adopt.add_argument("--force", action="store_true")

@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.2"
+    assert result.stdout.strip() == "agentdir 0.7.3"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -328,6 +328,8 @@ def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) 
 
     assert payload["root"] == str(repo / ".agentdir")
     assert payload["doctor"]["ok"] is True
+    assert payload["gitignore"]["target"] == "none"
+    assert payload["gitignore"]["reason"] == "selected_none"
     assert payload["next"] == 'agentdir work start "<task>"'
     assert (home / ".codex" / "skills" / "agentdir" / "SKILL.md").is_file()
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
@@ -340,6 +342,81 @@ def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) 
     codex_check = next(check for check in doctor["checks"] if check["name"] == "codex")
     assert codex_check["state"] == "installed"
     assert codex_check["effective_target"] == "user"
+
+
+def test_adopt_can_add_agentdir_to_project_gitignore(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = run_cli(
+        "adopt",
+        "--install-skill",
+        "none",
+        "--install-generic",
+        "none",
+        "--install-integrations",
+        "none",
+        "--no-hooks",
+        "--gitignore",
+        "project",
+        "--json",
+        cwd=repo,
+        env_extra={"HOME": str(home)},
+    )
+    rerun = run_cli(
+        "adopt",
+        "--install-skill",
+        "none",
+        "--install-generic",
+        "none",
+        "--install-integrations",
+        "none",
+        "--no-hooks",
+        "--gitignore",
+        "project",
+        "--json",
+        cwd=repo,
+        env_extra={"HOME": str(home)},
+    )
+    payload = json.loads(result.stdout)
+    rerun_payload = json.loads(rerun.stdout)
+
+    assert payload["gitignore"]["target"] == "project"
+    assert payload["gitignore"]["action"] == "create"
+    assert payload["gitignore"]["changed"] is True
+    assert rerun_payload["gitignore"]["changed"] is False
+    assert (repo / ".gitignore").read_text(encoding="utf-8").splitlines() == [".agentdir/"]
+
+
+def test_adopt_can_add_agentdir_to_user_gitignore(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg"
+    home.mkdir()
+
+    result = run_cli(
+        "adopt",
+        "--install-skill",
+        "none",
+        "--install-generic",
+        "none",
+        "--install-integrations",
+        "none",
+        "--no-hooks",
+        "--gitignore",
+        "user",
+        "--json",
+        cwd=repo,
+        env_extra={"HOME": str(home), "XDG_CONFIG_HOME": str(xdg_config)},
+    )
+    payload = json.loads(result.stdout)
+    ignore_path = xdg_config / "git" / "ignore"
+
+    assert payload["gitignore"]["target"] == "user"
+    assert payload["gitignore"]["path"] == str(ignore_path.resolve())
+    assert payload["gitignore"]["changed"] is True
+    assert ignore_path.read_text(encoding="utf-8").splitlines() == [".agentdir/"]
 
 
 def test_adopt_dry_run_does_not_write_and_unadopt_preserves_evidence(tmp_path: Path) -> None:
@@ -359,6 +436,8 @@ def test_adopt_dry_run_does_not_write_and_unadopt_preserves_evidence(tmp_path: P
 
     assert dry_payload["dry_run"] is True
     assert setup_dry_payload["dry_run"] is True
+    assert dry_payload["gitignore"]["action"] == "prompt"
+    assert setup_dry_payload["gitignore"]["action"] == "prompt"
     assert dry_payload["would_create_root"] is True
     assert setup_dry_payload["would_create_root"] is True
     assert not (repo / ".agentdir").exists()

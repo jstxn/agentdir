@@ -35,6 +35,7 @@ def adopt_repo(
     codex_skill_path: str | None,
     generic_guidance_path: str | None = None,
     integrations: list[dict[str, Any]] | None = None,
+    gitignore: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     paths = init_root(root)
     doctor = run_doctor(paths.root)
@@ -45,6 +46,7 @@ def adopt_repo(
         "codex_skill": codex_skill_path,
         "generic_guidance": generic_guidance_path,
         "integrations": integrations or [],
+        "gitignore": gitignore,
         "doctor": doctor.as_dict(),
         "next": "agentdir work start \"<task>\"",
     }
