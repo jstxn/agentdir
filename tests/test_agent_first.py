@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.1"
+    assert result.stdout.strip() == "agentdir 0.7.2"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -418,6 +418,24 @@ def test_integrations_install_all_project_preserves_unmanaged_content(tmp_path: 
     assert (repo / ".github" / "copilot-instructions.md").is_file()
     assert (repo / ".cursor" / "rules" / "agentdir.mdc").is_file()
     assert (repo / ".windsurf" / "rules" / "agentdir.md").is_file()
+
+
+def test_integrations_project_rerun_is_byte_stable_for_managed_only_files(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    run_cli("integrations", "install", "all", "--target", "project", "--json", cwd=repo)
+    tracked = [
+        repo / "AGENTS.md",
+        repo / "CLAUDE.md",
+        repo / ".github" / "copilot-instructions.md",
+    ]
+    before = {path: path.read_text(encoding="utf-8") for path in tracked}
+    rerun = run_cli("integrations", "install", "all", "--target", "project", "--json", cwd=repo)
+    after = {path: path.read_text(encoding="utf-8") for path in tracked}
+
+    assert before == after
+    assert all(not text.startswith("\n") for text in after.values())
+    assert all(item["updated"] is False for item in json.loads(rerun.stdout))
 
 
 def test_integrations_install_all_store_target(tmp_path: Path) -> None:

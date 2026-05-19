@@ -204,15 +204,7 @@ def is_agentdir_managed_generic(text: str) -> bool:
 
 
 def merge_generic_guidance(existing: str) -> str:
-    block = GENERIC_GUIDANCE_BLOCK.rstrip() + "\n"
-    if not existing.strip():
-        return block
-    start = existing.find(GENERIC_GUIDANCE_START)
-    end = existing.find(GENERIC_GUIDANCE_END)
-    if start != -1 and end != -1 and end >= start:
-        end += len(GENERIC_GUIDANCE_END)
-        return existing[:start].rstrip() + "\n\n" + block + existing[end:].lstrip()
-    return existing.rstrip() + "\n\n" + block
+    return merge_managed_block(existing, GENERIC_GUIDANCE_BLOCK, GENERIC_GUIDANCE_START, GENERIC_GUIDANCE_END)
 
 
 def codex_skill_path(root: str | Path, *, target: str, cwd: str | Path | None = None) -> Path:
@@ -506,8 +498,13 @@ def merge_managed_block(existing: str, block: str, start: str, end: str) -> str:
     end_index = existing.find(end)
     if start_index != -1 and end_index != -1 and end_index >= start_index:
         end_index += len(end)
-        return existing[:start_index].rstrip() + "\n\n" + block + existing[end_index:].lstrip()
-    return existing.rstrip() + "\n\n" + block
+        return _join_guidance_sections(existing[:start_index], block, existing[end_index:])
+    return _join_guidance_sections(existing, block, "")
+
+
+def _join_guidance_sections(*sections: str) -> str:
+    normalized = [section.strip() for section in sections if section.strip()]
+    return "\n\n".join(normalized) + "\n"
 
 
 def remove_managed_block(existing: str, start: str, end: str) -> str:

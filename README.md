@@ -89,7 +89,7 @@ Install the latest release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.2' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained
@@ -313,7 +313,7 @@ Rollback to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.1' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.2' | bash
 ```
 
 ## Learn More
