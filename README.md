@@ -78,7 +78,7 @@ Install the latest release with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.5.3' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.6.0' | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained virtual environment under `~/.local/share/agentdir` and links `agentdir` into `~/.local/bin`.
@@ -94,7 +94,7 @@ binary. To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.5.3' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.6.0' | bash
 ```
 
 ## Agent-First Setup
@@ -105,9 +105,9 @@ Run this once from a git repository:
 agentdir adopt
 ```
 
-That creates the repo-local `.agentdir` store, installs AgentDir-managed Git hook shims, and installs the Codex skill into the user skill directory. The default is intentionally hands-off for coding agents. Use `agentdir setup --codex-skill store` if you want the generated skill artifact to stay inside `.agentdir` instead of the user profile.
+That creates the repo-local `.agentdir` store, installs AgentDir-managed Git hook shims, installs the Codex skill into the user skill directory, and writes generic `AGENTS.md` guidance under `.agentdir/integrations/generic`. The default is intentionally hands-off for coding agents. Use `agentdir setup --codex-skill store` if you want the generated Codex skill artifact to stay inside `.agentdir` instead of the user profile.
 
-After setup, the human workflow is just normal coding-agent work. The installed Codex skill tells the agent to use AgentDir in the background.
+After setup, the human workflow is just normal coding-agent work. The installed Codex skill and generic guidance tell agents to use AgentDir in the background.
 
 What the agent handles:
 
@@ -117,6 +117,8 @@ What the agent handles:
 - wraps evidence-bearing commands with `agentdir run`
 - leaves routine exploration and file reads as plain shell commands
 - records important blockers, decisions, and handoffs
+- audits session quality and final claims with `agentdir audit session` and
+  `agentdir audit claims --text <path|->`
 - finishes with `agentdir work finish`, which emits a final report and closes the session
 
 The CLI remains available for inspection and debugging, but daily users should not have to start sessions or run evidence commands by hand.
@@ -210,35 +212,43 @@ Retention is explicit only. `agentdir archive` moves selected inactive sessions 
 
 ## Quick Start
 
-Run from a checkout without installing:
+Prefer the installed CLI:
 
 ```bash
-PYTHONPATH=src python3 -m agentdir --help
+agentdir --help
 ```
 
 Create the repo-local `.agentdir` store and capture a command:
 
 ```bash
-PYTHONPATH=src python3 -m agentdir adopt --install-skill store
-PYTHONPATH=src python3 -m agentdir work start "demo session" --emit-context
-PYTHONPATH=src python3 -m agentdir run -- python3 -c "print('hello from an agent session')"
-PYTHONPATH=src python3 -m agentdir status
-PYTHONPATH=src python3 -m agentdir memory search "python agent session"
-PYTHONPATH=src python3 -m agentdir memory backend list
-PYTHONPATH=src python3 -m agentdir memory daemon run --once
-PYTHONPATH=src python3 -m agentdir context build "python agent session"
-PYTHONPATH=src python3 -m agentdir context build "python agent session" --emit
-PYTHONPATH=src python3 -m agentdir report final
-PYTHONPATH=src python3 -m agentdir work finish
+agentdir adopt --install-skill store
+agentdir work start "demo session" --emit-context
+agentdir run -- python3 -c "print('hello from an agent session')"
+agentdir status
+agentdir memory search "python agent session"
+agentdir memory backend list
+agentdir memory daemon run --once
+agentdir context build "python agent session"
+agentdir context build "python agent session" --emit
+agentdir report final
+agentdir work finish
+```
+
+When running from a source checkout without installing, use Python 3.11 or
+newer explicitly:
+
+```bash
+AGENTDIR_PYTHON="${AGENTDIR_PYTHON:-python3.11}"
+PYTHONPATH=src "$AGENTDIR_PYTHON" -m agentdir --help
 ```
 
 After another repo has its own AgentDir store, register it explicitly before
 using federated search:
 
 ```bash
-PYTHONPATH=src python3 -m agentdir roots register /path/to/other-repo --name other-repo
-PYTHONPATH=src python3 -m agentdir roots doctor
-PYTHONPATH=src python3 -m agentdir memory search --federated "python agent session"
+agentdir roots register /path/to/other-repo --name other-repo
+agentdir roots doctor
+agentdir memory search --federated "python agent session"
 ```
 
 Run the dogfood demo:

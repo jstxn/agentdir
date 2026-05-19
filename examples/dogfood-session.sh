@@ -1,11 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+AGENTDIR_MIN_PYTHON_MAJOR=3
+AGENTDIR_MIN_PYTHON_MINOR=11
+
+python_is_supported() {
+  local python_cmd="$1"
+  "$python_cmd" - "$AGENTDIR_MIN_PYTHON_MAJOR" "$AGENTDIR_MIN_PYTHON_MINOR" <<'PY'
+import sys
+
+required = (int(sys.argv[1]), int(sys.argv[2]))
+raise SystemExit(0 if sys.version_info[:2] >= required else 1)
+PY
+}
+
+find_python() {
+  if [ -n "${AGENTDIR_PYTHON:-}" ]; then
+    if ! command -v "$AGENTDIR_PYTHON" >/dev/null 2>&1; then
+      printf 'agentdir dogfood error: AGENTDIR_PYTHON not found: %s\n' "$AGENTDIR_PYTHON" >&2
+      exit 1
+    fi
+    if ! python_is_supported "$AGENTDIR_PYTHON"; then
+      printf 'agentdir dogfood error: AGENTDIR_PYTHON must be Python 3.11 or newer\n' >&2
+      exit 1
+    fi
+    command -v "$AGENTDIR_PYTHON"
+    return
+  fi
+
+  local candidate
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
+      command -v "$candidate"
+      return
+    fi
+  done
+
+  printf 'agentdir dogfood error: missing Python 3.11 or newer; set AGENTDIR_PYTHON=/path/to/python3.11+\n' >&2
+  exit 1
+}
+
 if command -v agentdir >/dev/null 2>&1; then
   AGENTDIR=(agentdir)
 else
+  PYTHON_CMD="$(find_python)"
   export PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}"
-  AGENTDIR=(python3 -m agentdir)
+  AGENTDIR=("$PYTHON_CMD" -m agentdir)
 fi
 
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"

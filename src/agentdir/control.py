@@ -4,6 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .audit import audit_claims, audit_session, claims_audit_gaps, session_audit_gaps
 from .context import (
     audit_context_pack,
     build_context_pack,
@@ -32,6 +33,7 @@ def adopt_repo(
     *,
     install_hooks_result: list[dict[str, Any]],
     codex_skill_path: str | None,
+    generic_guidance_path: str | None = None,
 ) -> dict[str, Any]:
     paths = init_root(root)
     doctor = run_doctor(paths.root)
@@ -40,6 +42,7 @@ def adopt_repo(
         "version": _store_version(paths.root),
         "hooks": install_hooks_result,
         "codex_skill": codex_skill_path,
+        "generic_guidance": generic_guidance_path,
         "doctor": doctor.as_dict(),
         "next": "agentdir work start \"<task>\"",
     }
@@ -200,6 +203,7 @@ def start_work(
         federated=federated or bool(federation_group),
         federation_group=federation_group,
         retrieval_mode=retrieval_mode,
+        exclude_session_from_memory=True,
     )
     emitted = None
     if emit_context:
@@ -258,6 +262,7 @@ def finish_work(
     actor: str = "agent",
     run_health_check: bool = True,
     end: bool = True,
+    claims_text: str | None = None,
 ) -> dict[str, Any]:
     paths = require_root(root)
     session = _resolve_session(paths.root, session_id)
@@ -265,6 +270,8 @@ def finish_work(
         paths.root,
         session_id=session.session_id,
         run_health_check=run_health_check,
+        claims_text=claims_text,
+        finishing=True,
     )
     rendered = format_final_report(report)
     event = emit_event(
@@ -307,6 +314,8 @@ def build_final_report(
     *,
     session_id: str | None = None,
     run_health_check: bool = True,
+    claims_text: str | None = None,
+    finishing: bool = False,
 ) -> dict[str, Any]:
     paths = require_root(root)
     session = _resolve_session(paths.root, session_id)
@@ -320,7 +329,14 @@ def build_final_report(
         except AgentDirError as exc:
             context_audit = {"error": str(exc), "pack_id": latest_pack["pack_id"]}
     doctor = run_doctor(paths.root).as_dict() if run_health_check else None
-    gaps = _known_gaps(summary, evidence, context_audit, doctor)
+    session_audit = audit_session(
+        paths.root,
+        session.session_id,
+        finishing=finishing,
+        run_health_check=run_health_check,
+    )
+    claims_audit = audit_claims(paths.root, claims_text, session.session_id) if claims_text is not None else None
+    gaps = _known_gaps(summary, evidence, context_audit, doctor, session_audit, claims_audit)
     return {
         "task": session.title,
         "session": asdict(session),
@@ -330,6 +346,8 @@ def build_final_report(
             "latest_pack": latest_pack,
             "audit": context_audit,
         },
+        "session_audit": session_audit,
+        "claim_support": claims_audit,
         "git": {
             "workspace": session.workspace,
             "branch": git_branch(),
@@ -345,6 +363,8 @@ def format_final_report(report: dict[str, Any]) -> str:
     summary = report["summary"]
     context = report["context"]
     health = report.get("health")
+    session_audit = report.get("session_audit") or {}
+    claim_support = report.get("claim_support")
     lines = [
         "# AgentDir Final Report",
         "",
@@ -355,7 +375,7 @@ def format_final_report(report: dict[str, Any]) -> str:
         "## Session",
         "",
         f"- session: `{summary['session_id']}`",
-        f"- events: {summary['events']}",
+        f"- events_before_final_report: {summary['events']}",
         f"- tool_results: {summary['tool_results']}",
         f"- failed_tools: {summary['failed_tools']}",
         "",
@@ -382,6 +402,20 @@ def format_final_report(report: dict[str, Any]) -> str:
         lines.append(f"- evidence_backed: {audit['evidence_backed_count']}")
     elif audit and audit.get("error"):
         lines.append(f"- audit_error: {audit['error']}")
+    lines.extend(["", "## Session Audit", ""])
+    if session_audit:
+        lines.append(f"- ok: {str(session_audit.get('ok', False)).lower()}")
+        for check in session_audit.get("checks") or []:
+            lines.append(f"- {check['id']}: {check['status']} - {check['message']}")
+    else:
+        lines.append("- audit: not run")
+    if claim_support is not None:
+        lines.extend(["", "## Claim Support", ""])
+        if claim_support.get("claims"):
+            for claim in claim_support["claims"]:
+                lines.append(f"- {claim['family']}: {claim['status']} - {claim['message']}")
+        else:
+            lines.append("- claims: none detected")
     lines.extend(["", "## Health", ""])
     if health:
         lines.append(f"- doctor_ok: {str(health['ok']).lower()}")
@@ -473,8 +507,16 @@ def _known_gaps(
     evidence: list[dict[str, Any]],
     context_audit: dict[str, Any] | None,
     doctor: dict[str, Any] | None,
+    session_audit: dict[str, Any] | None = None,
+    claims_audit: dict[str, Any] | None = None,
 ) -> list[str]:
     gaps: list[str] = []
+    if session_audit:
+        gaps.extend(session_audit_gaps(session_audit))
+    if claims_audit:
+        gaps.extend(claims_audit_gaps(claims_audit))
+    if session_audit:
+        return gaps
     if summary.get("failed_tools"):
         gaps.append(f"{summary['failed_tools']} captured tool result(s) failed")
     if not evidence:

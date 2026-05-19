@@ -7,6 +7,8 @@ from .git import git_root
 from .store import AgentDirError, init_root, paths_for
 
 MANAGED_SKILL_MARKER = "<!-- agentdir-managed-skill -->"
+GENERIC_GUIDANCE_START = "<!-- agentdir-managed-generic:start -->"
+GENERIC_GUIDANCE_END = "<!-- agentdir-managed-generic:end -->"
 
 CODEX_SKILL = f"""---
 name: agentdir
@@ -80,6 +82,32 @@ user when reporting evidence, blockers, or setup problems.
   and `agentdir session end` only when the workbench command is not appropriate.
 """
 
+GENERIC_GUIDANCE_BLOCK = f"""{GENERIC_GUIDANCE_START}
+# AgentDir
+
+Use AgentDir as the local flight recorder for coding-agent work in this repository.
+
+The engineer should not have to run AgentDir commands during normal coding work.
+The agent owns the background recording flow:
+
+- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
+- If `.agentdir` is missing, run `agentdir adopt` once before work begins.
+- Run evidence-bearing commands through `agentdir run -- <command>`.
+- Evidence-bearing commands include tests, lint, typecheck, build, release checks,
+  reproduced failures, and diagnostics that support final claims.
+- Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`,
+  `find`, or quick read-only `git status` checks.
+- Use `agentdir status` for a single view of session, evidence, memory, context,
+  registered roots, and doctor health.
+- Use `agentdir audit session` and `agentdir audit claims --text <path|->` before
+  final claims when evidence support matters.
+- Before the final response, run `agentdir work finish` when practical. Use
+  `agentdir report final` to preview the same report without ending the session.
+- Do not record secrets, private keys, raw environment dumps, or credential-bearing
+  command output.
+{GENERIC_GUIDANCE_END}
+"""
+
 
 @dataclass(frozen=True)
 class InstalledSkill:
@@ -117,10 +145,63 @@ def install_codex_skill(
     return InstalledSkill(path=destination, target=target, updated=updated, backup_path=backup_path)
 
 
+def install_generic_guidance(
+    root: str | Path,
+    *,
+    target: str = "store",
+    force: bool = False,
+    cwd: str | Path | None = None,
+) -> InstalledSkill:
+    destination = generic_guidance_path(root, target=target, cwd=cwd)
+    updated = False
+    backup_path: Path | None = None
+    if target == "project":
+        existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
+        updated_text = merge_generic_guidance(existing)
+        updated = existing != updated_text
+        if destination.exists() and updated and force:
+            backup_path = destination.with_suffix(destination.suffix + ".bak")
+            backup_path.write_text(existing, encoding="utf-8")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(updated_text, encoding="utf-8")
+        return InstalledSkill(path=destination, target=target, updated=updated, backup_path=backup_path)
+
+    if target == "store":
+        existing = destination.read_text(encoding="utf-8", errors="ignore") if destination.exists() else ""
+        if destination.exists() and existing != GENERIC_GUIDANCE_BLOCK:
+            if not force and not is_agentdir_managed_generic(existing):
+                raise AgentDirError(f"Refusing to overwrite existing generic guidance: {destination}")
+            updated = True
+            if force:
+                backup_path = destination.with_suffix(destination.suffix + ".bak")
+                backup_path.write_text(existing, encoding="utf-8")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(GENERIC_GUIDANCE_BLOCK, encoding="utf-8")
+        return InstalledSkill(path=destination, target=target, updated=updated, backup_path=backup_path)
+
+    raise AgentDirError("Unknown generic guidance target; expected project or store")
+
+
 def is_agentdir_managed_skill(text: str) -> bool:
     if MANAGED_SKILL_MARKER in text:
         return True
     return "name: agentdir" in text and "# AgentDir" in text
+
+
+def is_agentdir_managed_generic(text: str) -> bool:
+    return GENERIC_GUIDANCE_START in text and GENERIC_GUIDANCE_END in text
+
+
+def merge_generic_guidance(existing: str) -> str:
+    block = GENERIC_GUIDANCE_BLOCK.rstrip() + "\n"
+    if not existing.strip():
+        return block
+    start = existing.find(GENERIC_GUIDANCE_START)
+    end = existing.find(GENERIC_GUIDANCE_END)
+    if start != -1 and end != -1 and end >= start:
+        end += len(GENERIC_GUIDANCE_END)
+        return existing[:start].rstrip() + "\n\n" + block + existing[end:].lstrip()
+    return existing.rstrip() + "\n\n" + block
 
 
 def codex_skill_path(root: str | Path, *, target: str, cwd: str | Path | None = None) -> Path:
@@ -135,3 +216,15 @@ def codex_skill_path(root: str | Path, *, target: str, cwd: str | Path | None = 
             raise AgentDirError("Project skill target requires a git repository")
         return project / ".agents" / "skills" / "agentdir" / "SKILL.md"
     raise AgentDirError("Unknown Codex skill target; expected user, project, or store")
+
+
+def generic_guidance_path(root: str | Path, *, target: str, cwd: str | Path | None = None) -> Path:
+    if target == "store":
+        init_root(root)
+        return paths_for(root).integrations / "generic" / "AGENTS.md"
+    if target == "project":
+        project = git_root(cwd)
+        if project is None:
+            raise AgentDirError("Project generic guidance target requires a git repository")
+        return project / "AGENTS.md"
+    raise AgentDirError("Unknown generic guidance target; expected project or store")

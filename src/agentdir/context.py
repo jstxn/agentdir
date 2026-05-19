@@ -54,6 +54,7 @@ def build_context_pack(
     federated: bool = False,
     federation_group: str | None = None,
     retrieval_mode: str = RETRIEVAL_HYBRID,
+    exclude_session_from_memory: bool = False,
 ) -> dict[str, Any]:
     rebuild_index(root)
     resolved_session = session_id
@@ -61,11 +62,12 @@ def build_context_pack(
         current = read_current_session(root)
         resolved_session = current.session_id if current else None
 
+    search_limit = memory_limit if not (resolved_session and exclude_session_from_memory) else max(memory_limit * 3, memory_limit + 5)
     memory_hits = (
         search_federated_memory(
             root,
             task,
-            limit=memory_limit,
+            limit=search_limit,
             min_score=min_score,
             retrieval_mode=retrieval_mode,
             group=federation_group,
@@ -74,12 +76,21 @@ def build_context_pack(
         else search_memory(
             root,
             task,
-            limit=memory_limit,
+            limit=search_limit,
             min_score=min_score,
             retrieval_mode=retrieval_mode,
         )
     )
-    recent = recent_session_summaries(root, limit=recent_limit)
+    if resolved_session and exclude_session_from_memory:
+        memory_hits = [row for row in memory_hits if row.get("session_id") != resolved_session][:memory_limit]
+        recent = [
+            row
+            for row in recent_session_summaries(root, limit=recent_limit + 5)
+            if row.get("session_id") != resolved_session
+        ][:recent_limit]
+    else:
+        memory_hits = memory_hits[:memory_limit]
+        recent = recent_session_summaries(root, limit=recent_limit)
     evidence = evidence_rows(root, resolved_session)[:evidence_limit] if resolved_session else []
     current_summary = summarize_session(root, resolved_session) if resolved_session else None
 

@@ -9,6 +9,14 @@ from pathlib import Path
 from . import __version__
 from .actors import create_actor, send_message
 from .artifacts import add_artifact
+from .audit import (
+    audit_claims,
+    audit_session,
+    format_claims_audit,
+    format_session_audit,
+    strict_claims_exit_code,
+    strict_session_exit_code,
+)
 from .context import (
     CONSUMPTION_PURPOSES,
     audit_context_pack,
@@ -62,7 +70,7 @@ from .secrets import (
     redact_secret_records,
     scan_secret_records,
 )
-from .skills import install_codex_skill
+from .skills import install_codex_skill, install_generic_guidance
 from .store import AgentDirError, init_root, resolve_root
 from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, upgrade_exit_code
 
@@ -566,16 +574,33 @@ def cmd_skills_install_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skills_install_generic(args: argparse.Namespace) -> int:
+    installed = install_generic_guidance(
+        command_root(args, create=True),
+        target=args.target,
+        force=args.force,
+    )
+    if args.json:
+        print_json({"target": installed.target, "path": str(installed.path)})
+    else:
+        print(installed.path)
+    return 0
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
     hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
     skill = None
     if args.codex_skill != "none":
         skill = install_codex_skill(root, target=args.codex_skill, force=args.force)
+    generic = None
+    if args.install_generic != "none":
+        generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
     result = {
         "root": str(root),
         "hooks": [asdict(info) for info in hooks],
         "codex_skill": str(skill.path) if skill else None,
+        "generic_guidance": str(generic.path) if generic else None,
     }
     if args.json:
         print_json(result)
@@ -585,6 +610,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print(f"hooks={len(hooks)}")
         if skill:
             print(f"codex_skill={skill.path}")
+        if generic:
+            print(f"generic_guidance={generic.path}")
     return 0
 
 
@@ -594,10 +621,14 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     skill = None
     if args.install_skill != "none":
         skill = install_codex_skill(root, target=args.install_skill, force=args.force)
+    generic = None
+    if args.install_generic != "none":
+        generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
     result = adopt_repo(
         root,
         install_hooks_result=[asdict(info) for info in hooks],
         codex_skill_path=str(skill.path) if skill else None,
+        generic_guidance_path=str(generic.path) if generic else None,
     )
     if args.json:
         print_json(result)
@@ -608,6 +639,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             print(f"hooks={len(hooks)}")
         if skill:
             print(f"codex_skill={skill.path}")
+        if generic:
+            print(f"generic_guidance={generic.path}")
         print(f"next={result['next']}")
     return 0
 
@@ -643,12 +676,14 @@ def cmd_work_start(args: argparse.Namespace) -> int:
 
 
 def cmd_work_finish(args: argparse.Namespace) -> int:
+    claims_text = read_body(args.claims) if args.claims else None
     result = finish_work(
         command_root(args),
         session_id=args.session,
         actor=args.actor,
         run_health_check=not args.no_doctor,
         end=not args.keep_session,
+        claims_text=claims_text,
     )
     if args.json:
         print_json({key: value for key, value in result.items() if key != "rendered"})
@@ -658,10 +693,12 @@ def cmd_work_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_report_final(args: argparse.Namespace) -> int:
+    claims_text = read_body(args.claims) if args.claims else None
     report = build_final_report(
         command_root(args),
         session_id=args.session,
         run_health_check=not args.no_doctor,
+        claims_text=claims_text,
     )
     if args.format == "json":
         print_json(report)
@@ -970,6 +1007,29 @@ def cmd_audit_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_session(args: argparse.Namespace) -> int:
+    audit = audit_session(command_root(args), args.session, strict=args.strict)
+    if args.json:
+        print_json(audit)
+    else:
+        print(format_session_audit(audit))
+    return strict_session_exit_code(audit) if args.strict else 0
+
+
+def cmd_audit_claims(args: argparse.Namespace) -> int:
+    audit = audit_claims(
+        command_root(args),
+        read_body(args.text),
+        args.session,
+        strict=args.strict,
+    )
+    if args.json:
+        print_json(audit)
+    else:
+        print(format_claims_audit(audit))
+    return strict_claims_exit_code(audit) if args.strict else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
     parser.add_argument("--version", action="version", version=f"agentdir {__version__}")
@@ -1081,9 +1141,11 @@ def build_parser() -> argparse.ArgumentParser:
     index_sub = index.add_subparsers(dest="index_command", required=True)
     rebuild = index_sub.add_parser("rebuild")
     add_scope_args(rebuild)
+    rebuild.add_argument("--json", action="store_true")
     rebuild.set_defaults(func=cmd_index_rebuild)
     update = index_sub.add_parser("update")
     add_scope_args(update)
+    update.add_argument("--json", action="store_true")
     update.set_defaults(func=cmd_index_update)
 
     roots = sub.add_parser("roots")
@@ -1250,11 +1312,18 @@ def build_parser() -> argparse.ArgumentParser:
     codex_skill.add_argument("--force", action="store_true")
     codex_skill.add_argument("--json", action="store_true")
     codex_skill.set_defaults(func=cmd_skills_install_codex)
+    generic_guidance = skills_install_sub.add_parser("generic")
+    add_scope_args(generic_guidance)
+    generic_guidance.add_argument("--target", choices=("project", "store"), default="store")
+    generic_guidance.add_argument("--force", action="store_true")
+    generic_guidance.add_argument("--json", action="store_true")
+    generic_guidance.set_defaults(func=cmd_skills_install_generic)
 
     setup = sub.add_parser("setup")
     add_scope_args(setup)
     setup.add_argument("--no-hooks", action="store_true")
     setup.add_argument("--codex-skill", choices=("user", "project", "store", "none"), default="user")
+    setup.add_argument("--install-generic", choices=("project", "store", "none"), default="store")
     setup.add_argument("--force", action="store_true")
     setup.add_argument("--json", action="store_true")
     setup.set_defaults(func=cmd_setup)
@@ -1262,6 +1331,7 @@ def build_parser() -> argparse.ArgumentParser:
     adopt = sub.add_parser("adopt")
     add_scope_args(adopt)
     adopt.add_argument("--install-skill", choices=("user", "project", "store", "none"), default="user")
+    adopt.add_argument("--install-generic", choices=("project", "store", "none"), default="store")
     adopt.add_argument("--no-hooks", action="store_true")
     adopt.add_argument("--force", action="store_true")
     adopt.add_argument("--json", action="store_true")
@@ -1289,6 +1359,7 @@ def build_parser() -> argparse.ArgumentParser:
     work_finish.add_argument("--actor", default="agent")
     work_finish.add_argument("--keep-session", action="store_true")
     work_finish.add_argument("--no-doctor", action="store_true")
+    work_finish.add_argument("--claims")
     work_finish.add_argument("--json", action="store_true")
     work_finish.set_defaults(func=cmd_work_finish)
 
@@ -1299,6 +1370,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_final.add_argument("--session")
     report_final.add_argument("--format", choices=("md", "json"), default="md")
     report_final.add_argument("--no-doctor", action="store_true")
+    report_final.add_argument("--claims")
     report_final.set_defaults(func=cmd_report_final)
 
     summarize = sub.add_parser("summarize")
@@ -1443,6 +1515,19 @@ def build_parser() -> argparse.ArgumentParser:
     audit_context.add_argument("--pack", required=True)
     audit_context.add_argument("--json", action="store_true")
     audit_context.set_defaults(func=cmd_audit_context)
+    audit_session_parser = audit_sub.add_parser("session")
+    add_scope_args(audit_session_parser)
+    audit_session_parser.add_argument("--session")
+    audit_session_parser.add_argument("--strict", action="store_true")
+    audit_session_parser.add_argument("--json", action="store_true")
+    audit_session_parser.set_defaults(func=cmd_audit_session)
+    audit_claims_parser = audit_sub.add_parser("claims")
+    add_scope_args(audit_claims_parser)
+    audit_claims_parser.add_argument("--text", required=True)
+    audit_claims_parser.add_argument("--session")
+    audit_claims_parser.add_argument("--strict", action="store_true")
+    audit_claims_parser.add_argument("--json", action="store_true")
+    audit_claims_parser.set_defaults(func=cmd_audit_claims)
 
     return parser
 

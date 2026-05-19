@@ -28,9 +28,10 @@ agentdir adopt
 ```
 
 This initializes `.agentdir`, installs managed Git hook shims, installs the
-Codex skill in the user skill directory, runs doctor, and prints the next
-command. Use `agentdir adopt --install-skill store` when you want generated
-integration files to stay under `.agentdir`.
+Codex skill in the user skill directory, writes generic agent guidance under
+`.agentdir/integrations/generic`, runs doctor, and prints the next command.
+Use `agentdir adopt --install-skill store --install-generic store` when you
+want generated integration files to stay under `.agentdir`.
 
 ## Daily Workflow
 
@@ -228,14 +229,16 @@ agentdir hooks uninstall --hook pre-commit
 
 Hook records use the active session when one exists. If no session is active, AgentDir starts a small automatic hook session.
 
-## Codex Skill
+## Agent Guidance
 
-The generated Codex skill tells coding agents that AgentDir is their responsibility, not a user checklist. It instructs agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, and close with `work finish` when practical.
+The generated Codex skill and generic `AGENTS.md` guidance tell coding agents that AgentDir is their responsibility, not a user checklist. They instruct agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, audit session quality and final claims when useful, and close with `work finish` when practical.
 
 ```bash
 agentdir skills install codex --target user
 agentdir skills install codex --target project
 agentdir skills install codex --target store
+agentdir skills install generic --target project
+agentdir skills install generic --target store
 ```
 
 ## Choosing The Storage Scope
