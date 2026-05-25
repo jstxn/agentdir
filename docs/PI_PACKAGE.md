@@ -34,7 +34,7 @@ pi install git:github.com/jstxn/agentdir@<tag-or-commit>
 If the npm package has been published:
 
 ```bash
-pi install npm:@jstxn/agentdir@0.7.3
+pi install npm:@jstxn/agentdir-pi@0.7.3
 ```
 
 Use `pi config` to enable or disable the bundled skill after installation.

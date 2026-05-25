@@ -109,7 +109,7 @@ Pi users can install this repository as a Pi package so the AgentDir skill is
 available automatically during coding tasks:
 
 ```bash
-pi install npm:@jstxn/agentdir@0.7.3
+pi install npm:@jstxn/agentdir-pi@0.7.3
 # or install directly from a local checkout / release tag:
 pi install /absolute/path/to/agentdir
 pi install git:github.com/jstxn/agentdir@<tag-or-commit>
