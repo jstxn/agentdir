@@ -1,0 +1,33 @@
+{
+  "name": "agentdir-pi",
+  "version": "0.7.3",
+  "description": "Pi package for AgentDir local-first coding-agent memory and evidence capture.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "agentdir",
+    "agent-skills",
+    "coding-agent",
+    "evidence",
+    "local-first"
+  ],
+  "homepage": "https://github.com/jstxn/agentdir#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jstxn/agentdir.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jstxn/agentdir/issues"
+  },
+  "files": [
+    "skills",
+    "docs/PI_PACKAGE.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}

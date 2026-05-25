@@ -17,6 +17,7 @@ KEEP_WORKDIR=1 bash examples/dogfood-session.sh
 ```bash
 rm -rf dist
 uv run --with build python -m build
+npm pack --pack-destination dist
 cp scripts/install.sh dist/install-agentdir.sh
 cp scripts/rollback.sh dist/rollback-agentdir.sh
 chmod +x dist/install-agentdir.sh
@@ -28,6 +29,7 @@ Expected assets:
 ```text
 dist/agentdir-0.7.3-py3-none-any.whl
 dist/agentdir-0.7.3.tar.gz
+dist/agentdir-pi-0.7.3.tgz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -42,6 +44,7 @@ git push origin v0.7.3
 gh release create v0.7.3 \
   dist/agentdir-0.7.3-py3-none-any.whl \
   dist/agentdir-0.7.3.tar.gz \
+  dist/agentdir-pi-0.7.3.tgz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \

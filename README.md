@@ -103,6 +103,22 @@ agentdir --version
 agentdir --help
 ```
 
+## Pi Package
+
+Pi users can install this repository as a Pi package so the AgentDir skill is
+available automatically during coding tasks:
+
+```bash
+pi install /absolute/path/to/agentdir
+# or, after a release/tag contains the package files:
+pi install git:github.com/jstxn/agentdir@<tag-or-commit>
+```
+
+The package exposes `skills/agentdir/SKILL.md`; it teaches Pi to start AgentDir
+sessions, wrap evidence-bearing commands, use local memory/context packs, and
+produce evidence-aware handoffs. See [AgentDir Pi Package](docs/PI_PACKAGE.md)
+for details.
+
 ## Adopt A Repository
 
 Run once from a git repository:
