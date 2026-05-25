@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_pi_package_manifest_points_to_agentdir_skill() -> None:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 
-    assert package["name"] == "agentdir-pi"
+    assert package["name"] == "@jstxn/agentdir"
     assert package["version"] == "0.7.3"
     assert "pi-package" in package["keywords"]
     assert package["pi"] == {

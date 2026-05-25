@@ -1,5 +1,5 @@
 {
-  "name": "agentdir-pi",
+  "name": "@jstxn/agentdir",
   "version": "0.7.3",
   "description": "Pi package for AgentDir local-first coding-agent memory and evidence capture.",
   "license": "MIT",
