@@ -14,7 +14,10 @@ def test_pi_package_manifest_points_to_agentdir_skill() -> None:
     assert package["name"] == "agentdir-pi"
     assert package["version"] == "0.7.3"
     assert "pi-package" in package["keywords"]
-    assert package["pi"] == {"skills": ["./skills"]}
+    assert package["pi"] == {
+        "skills": ["./skills"],
+        "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.3/docs/assets/agentdir-overview.png",
+    }
     assert "skills" in package["files"]
     assert "docs/PI_PACKAGE.md" in package["files"]
     assert (ROOT / "skills" / "agentdir" / "SKILL.md").is_file()

@@ -28,6 +28,7 @@
   "pi": {
     "skills": [
       "./skills"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.3/docs/assets/agentdir-overview.png"
   }
 }

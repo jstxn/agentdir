@@ -47,13 +47,15 @@ The root `package.json` declares the Pi resources:
 {
   "keywords": ["pi-package"],
   "pi": {
-    "skills": ["./skills"]
+    "skills": ["./skills"],
+    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.3/docs/assets/agentdir-overview.png"
   }
 }
 ```
 
 The `pi-package` keyword makes the package discoverable by the Pi package
-gallery, and `pi.skills` points Pi at the skill directory.
+gallery, `pi.skills` points Pi at the skill directory, and `pi.image` gives the
+gallery a preview image from this repository.
 
 ## Release Notes
 
