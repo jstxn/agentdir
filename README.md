@@ -78,18 +78,10 @@ agentdir work finish --json
 
 ## Install
 
-AgentDir is distributed through GitHub Releases. For the private
-`jstxn/agentdir` repo, authenticate GitHub CLI first:
+AgentDir is distributed through GitHub Releases. Install the latest release:
 
 ```bash
-gh auth login
-```
-
-Install the latest release:
-
-```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.4' | bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | bash
 ```
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained

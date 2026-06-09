@@ -4,19 +4,15 @@ AgentDir is distributed as GitHub Release assets. The project does not require P
 
 ## Recommended Install
 
-For the private `jstxn/agentdir` repository, engineers need GitHub CLI access to the repo:
-
-```bash
-gh auth login
-gh auth status
-```
-
 Install with one command:
 
 ```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.4' | bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | bash
 ```
+
+The installer downloads release assets anonymously with `curl`. If `curl` is
+unavailable or the download fails, it falls back to authenticated GitHub CLI
+(`gh auth login`).
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
 
@@ -103,22 +99,19 @@ installer from the target GitHub Release tag and reinstalls that wheel.
 To return to the previous stable release:
 
 ```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.4' | bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash
 ```
 
 To choose a specific release:
 
 ```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.4' | bash -s -- v0.7.3
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.3
 ```
 
 The equivalent manual rollback is:
 
 ```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.3' | AGENTDIR_VERSION=v0.7.3 bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.3 bash
 ```
 
 ## Optional Extras

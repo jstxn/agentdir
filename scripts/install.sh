@@ -61,6 +61,16 @@ download_wheel() {
     return
   fi
 
+  local asset_url="https://github.com/$AGENTDIR_REPO/releases/download/$AGENTDIR_VERSION/$AGENTDIR_WHEEL_NAME"
+  if command -v curl >/dev/null 2>&1; then
+    log "downloading $AGENTDIR_WHEEL_NAME from $asset_url"
+    if curl -fsSL -o "$target_dir/$AGENTDIR_WHEEL_NAME" "$asset_url"; then
+      printf '%s\n' "$target_dir/$AGENTDIR_WHEEL_NAME"
+      return
+    fi
+    log "curl download failed; falling back to gh"
+  fi
+
   need_cmd gh
   gh auth status >/dev/null 2>&1 || fail "gh is not authenticated; run: gh auth login"
   log "downloading $AGENTDIR_WHEEL_NAME from $AGENTDIR_REPO@$AGENTDIR_VERSION"
