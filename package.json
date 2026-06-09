@@ -1,6 +1,6 @@
 {
   "name": "@jstxn/agentdir-pi",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "Pi package for AgentDir local-first coding-agent memory and evidence capture.",
   "license": "MIT",
   "keywords": [
@@ -29,6 +29,6 @@
     "skills": [
       "./skills"
     ],
-    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.5/docs/assets/agentdir-overview.png"
+    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.6/docs/assets/agentdir-overview.png"
   }
 }
