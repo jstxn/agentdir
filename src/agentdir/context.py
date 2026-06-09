@@ -204,8 +204,8 @@ def emit_context_pack(
     )
 
 
-def read_context_manifest(root: str | Path, pack_id: str) -> dict[str, Any]:
-    event = _context_event(root, pack_id, EVENT_CONTEXT_PACK_CREATED)
+def read_context_manifest(root: str | Path, pack_id: str, *, rebuild: bool = True) -> dict[str, Any]:
+    event = _context_event(root, pack_id, EVENT_CONTEXT_PACK_CREATED, rebuild=rebuild)
     sha = event["headers"].get("X-AgentDir-Blob-SHA256")
     if not sha:
         raise AgentDirError(f"Context pack has no manifest artifact: {pack_id}")
@@ -301,9 +301,11 @@ def cite_context_sources(
     return citation
 
 
-def audit_context_pack(root: str | Path, pack_id: str) -> dict[str, Any]:
-    manifest = read_context_manifest(root, pack_id)
-    events = _context_events(root, pack_id)
+def audit_context_pack(root: str | Path, pack_id: str, *, rebuild: bool = True) -> dict[str, Any]:
+    if rebuild:
+        rebuild_index(root)
+    manifest = read_context_manifest(root, pack_id, rebuild=False)
+    events = _context_events(root, pack_id, rebuild=False)
     consumed = _unique_source_ids(
         source_id
         for event in events
@@ -548,8 +550,8 @@ def _write_manifest_temp(manifest: dict[str, Any]) -> Path:
     return Path(handle.name)
 
 
-def _context_event(root: str | Path, pack_id: str, event_type: str) -> dict[str, Any]:
-    events = _context_events(root, pack_id, event_type=event_type)
+def _context_event(root: str | Path, pack_id: str, event_type: str, *, rebuild: bool = True) -> dict[str, Any]:
+    events = _context_events(root, pack_id, event_type=event_type, rebuild=rebuild)
     if not events:
         raise AgentDirError(f"Unknown context pack: {pack_id}")
     return events[-1]
@@ -560,8 +562,10 @@ def _context_events(
     pack_id: str,
     *,
     event_type: str | None = None,
+    rebuild: bool = True,
 ) -> list[dict[str, Any]]:
-    rebuild_index(root)
+    if rebuild:
+        rebuild_index(root)
     clauses = ["hp.name = ?", "hp.value = ?"]
     params: list[Any] = [HEADER_PACK_ID, pack_id]
     if event_type:

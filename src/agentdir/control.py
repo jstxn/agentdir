@@ -323,13 +323,14 @@ def build_final_report(
 ) -> dict[str, Any]:
     paths = require_root(root)
     session = _resolve_session(paths.root, session_id)
-    summary = summarize_session(paths.root, session.session_id)
-    evidence = evidence_rows(paths.root, session.session_id)
-    latest_pack = latest_context_pack(paths.root, session.session_id)
+    rebuild_index(paths.root)
+    summary = summarize_session(paths.root, session.session_id, rebuild=False)
+    evidence = evidence_rows(paths.root, session.session_id, rebuild=False)
+    latest_pack = latest_context_pack(paths.root, session.session_id, rebuild=False)
     context_audit = None
     if latest_pack:
         try:
-            context_audit = audit_context_pack(paths.root, latest_pack["pack_id"])
+            context_audit = audit_context_pack(paths.root, latest_pack["pack_id"], rebuild=False)
         except AgentDirError as exc:
             context_audit = {"error": str(exc), "pack_id": latest_pack["pack_id"]}
     doctor = run_doctor(paths.root).as_dict() if run_health_check else None
@@ -338,8 +339,25 @@ def build_final_report(
         session.session_id,
         finishing=finishing,
         run_health_check=run_health_check,
+        rebuild=False,
+        summary=summary,
+        evidence=evidence,
+        latest_pack=latest_pack,
+        context_audit=context_audit,
+        doctor=doctor,
     )
-    claims_audit = audit_claims(paths.root, claims_text, session.session_id) if claims_text is not None else None
+    claims_audit = (
+        audit_claims(
+            paths.root,
+            claims_text,
+            session.session_id,
+            rebuild=False,
+            summary=summary,
+            evidence=evidence,
+        )
+        if claims_text is not None
+        else None
+    )
     gaps = _known_gaps(summary, evidence, context_audit, doctor, session_audit, claims_audit)
     brief = evidence_brief(evidence)
     handoff = _agent_handoff(
@@ -609,8 +627,10 @@ def latest_context_pack(
     session_id: str | None = None,
     *,
     fallback_any: bool = False,
+    rebuild: bool = True,
 ) -> dict[str, Any] | None:
-    rebuild_index(root)
+    if rebuild:
+        rebuild_index(root)
     rows = query_messages(
         root,
         session_id=session_id,
