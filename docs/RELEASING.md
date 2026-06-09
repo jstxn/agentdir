@@ -27,9 +27,9 @@ chmod +x dist/rollback-agentdir.sh
 Expected assets:
 
 ```text
-dist/agentdir-0.7.3-py3-none-any.whl
-dist/agentdir-0.7.3.tar.gz
-dist/jstxn-agentdir-pi-0.7.3.tgz
+dist/agentdir-0.7.4-py3-none-any.whl
+dist/agentdir-0.7.4.tar.gz
+dist/jstxn-agentdir-pi-0.7.4.tgz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -37,19 +37,19 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.7.3 -m "Release AgentDir v0.7.3"
+git tag -a v0.7.4 -m "Release AgentDir v0.7.4"
 git push origin main
-git push origin v0.7.3
+git push origin v0.7.4
 
-gh release create v0.7.3 \
-  dist/agentdir-0.7.3-py3-none-any.whl \
-  dist/agentdir-0.7.3.tar.gz \
-  dist/jstxn-agentdir-pi-0.7.3.tgz \
+gh release create v0.7.4 \
+  dist/agentdir-0.7.4-py3-none-any.whl \
+  dist/agentdir-0.7.4.tar.gz \
+  dist/jstxn-agentdir-pi-0.7.4.tgz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.7.3" \
-  --notes-file docs/releases/v0.7.3.md
+  --title "AgentDir v0.7.4" \
+  --notes-file docs/releases/v0.7.4.md
 ```
 
 ## Release Verification
@@ -58,7 +58,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.7.3 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.7.4 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -94,13 +94,13 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir-0.7.3-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir-0.7.4-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.7.2
+  bash dist/rollback-agentdir.sh v0.7.3
 
 "$tmp/prefix/bin/agentdir" --help
 ```

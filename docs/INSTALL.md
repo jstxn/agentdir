@@ -15,7 +15,7 @@ Install with one command:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.3' | bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.4' | bash
 ```
 
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
@@ -55,7 +55,7 @@ Useful variants:
 ```bash
 agentdir --upgrade --upgrade-install-skill none
 agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.7.3
+agentdir --upgrade --upgrade-version v0.7.4
 agentdir --upgrade --upgrade-dry-run
 ```
 
@@ -86,13 +86,13 @@ agentdir work finish --json
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.7.3-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir-0.7.4-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.3-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.4-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -104,21 +104,21 @@ To return to the previous stable release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.3' | bash
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.4' | bash
 ```
 
 To choose a specific release:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.3' | bash -s -- v0.7.2
+  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.4' | bash -s -- v0.7.3
 ```
 
 The equivalent manual rollback is:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.2' | AGENTDIR_VERSION=v0.7.2 bash
+  'repos/jstxn/agentdir/contents/scripts/install.sh?ref=v0.7.3' | AGENTDIR_VERSION=v0.7.3 bash
 ```
 
 ## Optional Extras
@@ -256,7 +256,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.7.3-py3-none-any.whl`
-- `agentdir-0.7.3.tar.gz`
+- `agentdir-0.7.4-py3-none-any.whl`
+- `agentdir-0.7.4.tar.gz`
 - `install-agentdir.sh`
 - `rollback-agentdir.sh`
