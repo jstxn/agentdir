@@ -85,9 +85,49 @@ def test_index_rebuild_creates_builtin_vector_memory_documents(tmp_path: Path) -
             "select vector_dim, token_count, length(vector_json) from memory_documents"
         ).fetchone()
 
-    assert row[0] == 256
+    assert row[0] == 1024
     assert row[1] > 0
     assert row[2] > 0
+
+
+def test_index_rebuild_preserves_semantic_embedding_cache(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    body = write_body(tmp_path / "body.txt", "semantic embedding cache survival marker")
+
+    run_cli("emit", "--root", str(root), "--session", "cache-session", "--type", "agent.message", "--body", str(body))
+    run_cli("index", "rebuild", "--root", str(root))
+
+    with sqlite3.connect(index_path(root)) as conn:
+        source_id, text_sha256 = conn.execute(
+            "select source_id, text_sha256 from memory_documents where source_kind = 'message'"
+        ).fetchone()
+        conn.execute(
+            """
+            insert into semantic_embeddings(
+              source_id, model, text_sha256, dimensions, vector_json, indexed_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (source_id, "test-model", text_sha256, 3, "[0.1, 0.2, 0.3]", "2026-06-09T00:00:00+00:00"),
+        )
+        conn.execute(
+            """
+            insert into semantic_embeddings(
+              source_id, model, text_sha256, dimensions, vector_json, indexed_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            ("message:gone/stale", "test-model", "0" * 64, 3, "[0.0, 0.0, 0.0]", "2026-06-09T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    run_cli("index", "rebuild", "--root", str(root))
+
+    with sqlite3.connect(index_path(root)) as conn:
+        rows = conn.execute(
+            "select source_id, text_sha256, vector_json from semantic_embeddings"
+        ).fetchall()
+
+    assert rows == [(source_id, text_sha256, "[0.1, 0.2, 0.3]")]
 
 
 def test_hybrid_memory_search_returns_best_passage_for_long_records(tmp_path: Path) -> None:

@@ -12,8 +12,9 @@ from typing import Any
 
 from .store import AgentDirError, require_root
 
-DEFAULT_VECTOR_DIM = 256
+DEFAULT_VECTOR_DIM = 1024
 DEFAULT_MIN_SCORE = 0.05
+SESSION_SUMMARY_PENALTY = 0.75
 DEFAULT_PASSAGE_TOKEN_LIMIT = 160
 DEFAULT_PASSAGE_TOKEN_OVERLAP = 32
 SOURCE_MESSAGE = "message"
@@ -531,6 +532,8 @@ def _search_memory_documents(
         conn.row_factory = sqlite3.Row
         for row in conn.execute(sql, params).fetchall():
             score = cosine_similarity(query_vector, deserialize_vector(row["vector_json"]))
+            if row["source_kind"] == SOURCE_SESSION_SUMMARY:
+                score *= SESSION_SUMMARY_PENALTY
             if score < min_score:
                 continue
             payload = _public_memory_row(dict(row))
@@ -597,7 +600,7 @@ def _search_memory_semantic(
     for row, vector in zip(rows, document_vectors, strict=True):
         score = dense_cosine_similarity(query_vector, vector)
         if row.get("source_kind") == SOURCE_SESSION_SUMMARY:
-            score *= 0.75
+            score *= SESSION_SUMMARY_PENALTY
         if score < min_score:
             continue
         payload = _public_memory_row(row)
@@ -676,7 +679,7 @@ def _search_memory_hybrid(
             lexical_ratio = min(1.0, lexical_score / max(len(query_terms), 1))
             score = (0.82 * max(vector_score, 0.0)) + (0.18 * lexical_ratio)
             if row["source_kind"] == SOURCE_SESSION_SUMMARY:
-                score *= 0.75
+                score *= SESSION_SUMMARY_PENALTY
             if score < min_score:
                 continue
             payload = _public_memory_row(dict(row))
@@ -1033,10 +1036,16 @@ def _semantic_vectors_for_rows(
     return [vector for vector in vectors if vector is not None]
 
 
-def _fastembed_vectors(model_name: str, texts: list[str]) -> list[list[float]]:
-    from fastembed import TextEmbedding
+_FASTEMBED_MODELS: dict[str, Any] = {}
 
-    model = TextEmbedding(model_name=model_name)
+
+def _fastembed_vectors(model_name: str, texts: list[str]) -> list[list[float]]:
+    model = _FASTEMBED_MODELS.get(model_name)
+    if model is None:
+        from fastembed import TextEmbedding
+
+        model = TextEmbedding(model_name=model_name)
+        _FASTEMBED_MODELS[model_name] = model
     return [[float(value) for value in vector] for vector in model.embed(texts)]
 
 
@@ -1207,11 +1216,9 @@ def _best_passage_for_document(
 
 
 def _hit_sort_key(row: dict[str, Any]) -> tuple[float, str, str]:
-    score = float(row["memory_score"])
-    if row.get("source_kind") == SOURCE_SESSION_SUMMARY:
-        score -= 0.12
+    # memory_score already includes SESSION_SUMMARY_PENALTY; sort on it as-is.
     return (
-        -score,
+        -float(row["memory_score"]),
         row.get("date_utc") or row.get("indexed_at") or "",
         row.get("source_id") or "",
     )
