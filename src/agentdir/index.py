@@ -138,6 +138,7 @@ def rebuild_index(root: str | Path) -> IndexResult:
             initialize_schema(conn)
             result = _index_into(conn, root)
             conn.commit()
+            _carry_forward_semantic_embeddings(conn, paths.index_path)
             conn.close()
             os.replace(temp_path, paths.index_path)
             replaced = True
@@ -151,6 +152,38 @@ def rebuild_index(root: str | Path) -> IndexResult:
 
 def update_index(root: str | Path) -> IndexResult:
     return rebuild_index(root)
+
+
+def _carry_forward_semantic_embeddings(conn: sqlite3.Connection, previous_index: Path) -> None:
+    # Rebuilds start from an empty temp database, which would discard the
+    # semantic embedding cache and force a full re-embed on the next semantic
+    # query. Embeddings are content-addressed by (source_id, model,
+    # text_sha256), so rows whose document text is unchanged stay valid; the
+    # join drops rows for documents that no longer exist.
+    if not previous_index.exists():
+        return
+    try:
+        conn.execute("attach database ? as previous", (str(previous_index),))
+    except sqlite3.DatabaseError:
+        return
+    try:
+        conn.execute(
+            """
+            insert or replace into semantic_embeddings(
+              source_id, model, text_sha256, dimensions, vector_json, indexed_at
+            )
+            select prev.source_id, prev.model, prev.text_sha256,
+                   prev.dimensions, prev.vector_json, prev.indexed_at
+            from previous.semantic_embeddings prev
+            join memory_documents md
+              on md.source_id = prev.source_id and md.text_sha256 = prev.text_sha256
+            """
+        )
+        conn.commit()
+    except sqlite3.DatabaseError:
+        conn.rollback()
+    finally:
+        conn.execute("detach database previous")
 
 
 def _index_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
