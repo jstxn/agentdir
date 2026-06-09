@@ -112,7 +112,7 @@ available automatically during coding tasks:
 Package page: [@jstxn/agentdir-pi](https://pi.dev/packages/@jstxn/agentdir-pi)
 
 ```bash
-pi install npm:@jstxn/agentdir-pi@0.7.5
+pi install npm:@jstxn/agentdir-pi@0.7.6
 # or install directly from a local checkout / release tag:
 pi install /absolute/path/to/agentdir
 pi install git:github.com/jstxn/agentdir@<tag-or-commit>
