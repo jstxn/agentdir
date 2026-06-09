@@ -1,6 +1,10 @@
 # Releasing AgentDir
 
-AgentDir releases are GitHub-only. Do not publish to PyPI unless that becomes an explicit project decision.
+AgentDir releases go to GitHub Releases and PyPI. The PyPI distribution is
+`agentdir-cli` (the plain `agentdir` name is held by an unrelated project);
+the importable package and CLI remain `agentdir`. PyPI publishing happens
+automatically: the `publish.yml` workflow builds and uploads to PyPI via
+trusted publishing whenever a GitHub Release is published.
 
 ## Preflight
 
@@ -24,12 +28,12 @@ chmod +x dist/install-agentdir.sh
 chmod +x dist/rollback-agentdir.sh
 ```
 
-Expected assets:
+Expected assets (substitute the release version):
 
 ```text
-dist/agentdir-0.7.4-py3-none-any.whl
-dist/agentdir-0.7.4.tar.gz
-dist/jstxn-agentdir-pi-0.7.4.tgz
+dist/agentdir_cli-0.7.5-py3-none-any.whl
+dist/agentdir_cli-0.7.5.tar.gz
+dist/jstxn-agentdir-pi-0.7.5.tgz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -37,20 +41,23 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.7.4 -m "Release AgentDir v0.7.4"
+git tag -a v0.7.5 -m "Release AgentDir v0.7.5"
 git push origin main
-git push origin v0.7.4
+git push origin v0.7.5
 
-gh release create v0.7.4 \
-  dist/agentdir-0.7.4-py3-none-any.whl \
-  dist/agentdir-0.7.4.tar.gz \
-  dist/jstxn-agentdir-pi-0.7.4.tgz \
+gh release create v0.7.5 \
+  dist/agentdir_cli-0.7.5-py3-none-any.whl \
+  dist/agentdir_cli-0.7.5.tar.gz \
+  dist/jstxn-agentdir-pi-0.7.5.tgz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.7.4" \
-  --notes-file docs/releases/v0.7.4.md
+  --title "AgentDir v0.7.5" \
+  --notes-file docs/releases/v0.7.5.md
 ```
+
+Publishing the release triggers `publish.yml`, which rebuilds the sdist and
+wheel from the tag and uploads them to PyPI as `agentdir-cli`.
 
 ## Release Verification
 
@@ -94,7 +101,7 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir-0.7.4-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.7.5-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \

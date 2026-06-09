@@ -1,10 +1,24 @@
 # Installing AgentDir
 
-AgentDir is distributed as GitHub Release assets. The project does not require PyPI, npm, GitHub Packages, Redis, Dovecot, or a background service.
+AgentDir is distributed on PyPI as `agentdir-cli` and as GitHub Release
+assets. Either path installs the same `agentdir` command. No background
+service, Redis, or Dovecot is required.
+
+The PyPI distribution is named `agentdir-cli` because the plain `agentdir`
+name is held by an unrelated project; the importable package and the CLI are
+still `agentdir`.
 
 ## Recommended Install
 
-Install with one command:
+Install from PyPI:
+
+```bash
+uv tool install agentdir-cli
+# or
+pipx install agentdir-cli
+```
+
+Or install with the release installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | bash
@@ -82,13 +96,13 @@ agentdir work finish --json
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir-0.7.4-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.5-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir-0.7.4-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.5-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -120,9 +134,9 @@ The default install includes the core control-plane dependencies for platform
 paths and richer terminal output. Heavier lanes are explicit extras:
 
 ```bash
-pipx inject agentdir 'agentdir[watch]'
-pipx inject agentdir 'agentdir[semantic]'
-pipx inject agentdir 'agentdir[team]'
+pipx inject agentdir-cli 'agentdir-cli[watch]'
+pipx inject agentdir-cli 'agentdir-cli[semantic]'
+pipx inject agentdir-cli 'agentdir-cli[team]'
 ```
 
 `watch` enables the warm index daemon to use file events when available.
@@ -235,6 +249,8 @@ agentdir --help
 If installed through `pipx`:
 
 ```bash
+pipx uninstall agentdir-cli
+# installs from v0.7.4 or earlier used the old distribution name:
 pipx uninstall agentdir
 ```
 
@@ -249,7 +265,7 @@ rm -rf "$HOME/.local/share/agentdir"
 
 The GitHub Release should contain:
 
-- `agentdir-0.7.4-py3-none-any.whl`
-- `agentdir-0.7.4.tar.gz`
+- `agentdir_cli-<version>-py3-none-any.whl`
+- `agentdir_cli-<version>.tar.gz`
 - `install-agentdir.sh`
 - `rollback-agentdir.sh`

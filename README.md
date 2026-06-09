@@ -78,7 +78,16 @@ agentdir work finish --json
 
 ## Install
 
-AgentDir is distributed through GitHub Releases. Install the latest release:
+Install from PyPI (the package is `agentdir-cli`; the command it installs is
+`agentdir`):
+
+```bash
+uv tool install agentdir-cli
+# or
+pipx install agentdir-cli
+```
+
+Or use the GitHub Release installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | bash
