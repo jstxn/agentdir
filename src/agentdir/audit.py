@@ -49,6 +49,7 @@ CLAIM_PATTERNS = {
 }
 
 NEGATED_CLAIM_RE = re.compile(r"\b(not run|did not run|didn't run|was not run|wasn't run|without running)\b", re.I)
+_MISSING = object()
 
 
 def audit_session(
@@ -58,14 +59,25 @@ def audit_session(
     strict: bool = False,
     finishing: bool = False,
     run_health_check: bool = True,
+    rebuild: bool = True,
+    summary: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+    latest_pack: dict[str, Any] | None | object = _MISSING,
+    context_audit: dict[str, Any] | None | object = _MISSING,
+    doctor: dict[str, Any] | None | object = _MISSING,
 ) -> dict[str, Any]:
-    summary = summarize_session(root, session_id)
+    if summary is None:
+        summary = summarize_session(root, session_id, rebuild=rebuild)
     resolved = summary["session_id"]
-    evidence = evidence_rows(root, resolved)
+    if evidence is None:
+        evidence = evidence_rows(root, resolved, rebuild=rebuild)
     event_counts = summary.get("event_counts") or {}
-    latest_pack = _latest_context_pack(root, resolved)
-    context_audit = _safe_context_audit(root, latest_pack)
-    doctor = run_doctor(root).as_dict() if run_health_check else None
+    if latest_pack is _MISSING:
+        latest_pack = _latest_context_pack(root, resolved, rebuild=rebuild)
+    if context_audit is _MISSING:
+        context_audit = _safe_context_audit(root, latest_pack, rebuild=rebuild)
+    if doctor is _MISSING:
+        doctor = run_doctor(root).as_dict() if run_health_check else None
     current = read_current_session(root)
     is_current = bool(current and current.session_id == resolved and current.status == "active")
     failed_evidence = [row for row in evidence if row.get("event_type") == "tool.result" and row.get("tool_exit_code") not in (None, 0)]
@@ -122,10 +134,16 @@ def audit_claims(
     session_id: str | None = None,
     *,
     strict: bool = False,
+    rebuild: bool = True,
+    summary: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    summary = summarize_session(root, session_id)
+    if summary is None:
+        summary = summarize_session(root, session_id, rebuild=rebuild)
     resolved = summary["session_id"]
-    tool_results = [row for row in evidence_rows(root, resolved) if row.get("event_type") == "tool.result"]
+    if evidence is None:
+        evidence = evidence_rows(root, resolved, rebuild=rebuild)
+    tool_results = [row for row in evidence if row.get("event_type") == "tool.result"]
     claims = []
     for family in _detect_claim_families(text):
         evidence = _latest_relevant_tool_result(tool_results, family)
@@ -248,19 +266,20 @@ def _doctor_check(doctor: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
-def _latest_context_pack(root: str | Path, session_id: str) -> dict[str, Any] | None:
+def _latest_context_pack(root: str | Path, session_id: str, *, rebuild: bool = True) -> dict[str, Any] | None:
     from .control import latest_context_pack
 
-    return latest_context_pack(root, session_id)
+    return latest_context_pack(root, session_id, rebuild=rebuild)
 
 
-def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None) -> dict[str, Any] | None:
-    if latest_pack is None:
+def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None | object, *, rebuild: bool = True) -> dict[str, Any] | None:
+    if latest_pack is _MISSING or latest_pack is None:
         return None
+    pack_id = latest_pack["pack_id"]
     try:
-        return audit_context_pack(root, latest_pack["pack_id"])
+        return audit_context_pack(root, pack_id, rebuild=rebuild)
     except AgentDirError as exc:
-        return {"error": str(exc), "pack_id": latest_pack["pack_id"]}
+        return {"error": str(exc), "pack_id": pack_id}
 
 
 def _detect_claim_families(text: str) -> list[str]:

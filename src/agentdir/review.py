@@ -43,9 +43,10 @@ def ensure_index(root: str | Path) -> None:
     rebuild_index(root)
 
 
-def summarize_session(root: str | Path, session_id: str | None = None) -> dict[str, Any]:
+def summarize_session(root: str | Path, session_id: str | None = None, *, rebuild: bool = True) -> dict[str, Any]:
     resolved = resolve_review_session(root, session_id)
-    ensure_index(root)
+    if rebuild:
+        ensure_index(root)
     rows = query_messages(root, session_id=resolved, limit=10_000)
     counts = Counter(row.get("event_type") or "unknown" for row in rows)
     tool_results = [row for row in rows if row.get("event_type") == "tool.result"]
@@ -73,9 +74,10 @@ def format_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def evidence_rows(root: str | Path, session_id: str | None = None) -> list[dict[str, Any]]:
+def evidence_rows(root: str | Path, session_id: str | None = None, *, rebuild: bool = True) -> list[dict[str, Any]]:
     resolved = resolve_review_session(root, session_id)
-    ensure_index(root)
+    if rebuild:
+        ensure_index(root)
     rows = query_messages(root, session_id=resolved, limit=10_000)
     wanted = {"tool.call", "tool.result", "file.diff"}
     evidence = [

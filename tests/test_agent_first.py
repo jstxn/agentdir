@@ -579,6 +579,53 @@ def test_work_start_status_report_and_finish_are_agent_owned_flow(tmp_path: Path
     assert "session.ended" in event_types
 
 
+def test_build_final_report_rebuilds_index_once(tmp_path: Path, monkeypatch) -> None:
+    import agentdir.context as context
+    import agentdir.control as control
+    import agentdir.review as review
+
+    repo = init_repo(tmp_path / "repo")
+
+    started = run_cli("work", "start", "single rebuild final report", "--emit-context", "--json", cwd=repo)
+    session_id = json.loads(started.stdout)["session"]["session_id"]
+    run_cli(
+        "run",
+        "--name",
+        "python",
+        "--",
+        sys.executable,
+        "-c",
+        "print('tests passed')",
+        cwd=repo,
+    )
+
+    calls = 0
+    real_rebuild = control.rebuild_index
+
+    def counted_rebuild(root: str | Path) -> None:
+        nonlocal calls
+        calls += 1
+        real_rebuild(root)
+
+    monkeypatch.setattr(control, "rebuild_index", counted_rebuild)
+    monkeypatch.setattr(context, "rebuild_index", counted_rebuild)
+    monkeypatch.setattr(review, "rebuild_index", counted_rebuild)
+
+    report = control.build_final_report(repo / ".agentdir")
+
+    assert calls == 1
+    assert report["summary"]["session_id"] == session_id
+    assert report["context"]["latest_pack"]
+    assert any(row["tool"] == "python" and row["tool_exit_code"] == 0 for row in report["evidence"])
+
+    calls = 0
+    claims_report = control.build_final_report(repo / ".agentdir", claims_text="Tests passed.")
+
+    assert calls == 1
+    assert claims_report["claim_support"]["claims"][0]["family"] == "test"
+    assert claims_report["claim_support"]["claims"][0]["status"] == "supported"
+
+
 def test_summarize_and_evidence_use_current_session(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     run_cli("session", "start", "--id", "summary-session", cwd=repo)
