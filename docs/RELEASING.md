@@ -65,7 +65,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.7.4 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.7.5 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -107,7 +107,7 @@ AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.7.5-py3-none-any.whl" \
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.7.3
+  bash dist/rollback-agentdir.sh v0.7.4
 
 "$tmp/prefix/bin/agentdir" --help
 ```

@@ -65,7 +65,7 @@ Useful variants:
 ```bash
 agentdir --upgrade --upgrade-install-skill none
 agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.7.4
+agentdir --upgrade --upgrade-version v0.7.5
 agentdir --upgrade --upgrade-dry-run
 ```
 
@@ -119,13 +119,13 @@ curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollbac
 To choose a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.3
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.4
 ```
 
 The equivalent manual rollback is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.3 bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.4 bash
 ```
 
 ## Optional Extras
