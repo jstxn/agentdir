@@ -95,13 +95,14 @@ def build_status(
     summary: dict[str, Any] | None = None
     evidence_count = 0
     if current:
-        summary = summarize_session(paths.root, current.session_id)
-        evidence_count = len(evidence_rows(paths.root, current.session_id))
+        summary = summarize_session(paths.root, current.session_id, rebuild=False)
+        evidence_count = len(evidence_rows(paths.root, current.session_id, rebuild=False))
 
     latest_pack = latest_context_pack(
         paths.root,
         current.session_id if current else None,
         fallback_any=True,
+        rebuild=False,
     )
     memory = _safe_memory_stats(paths.root)
     memory["daemon"] = memory_daemon_status(paths.root)

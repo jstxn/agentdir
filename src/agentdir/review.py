@@ -203,9 +203,16 @@ def format_evidence_brief(brief: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def timeline_rows(root: str | Path, session_id: str | None = None, *, limit: int = 100) -> list[dict[str, Any]]:
+def timeline_rows(
+    root: str | Path,
+    session_id: str | None = None,
+    *,
+    limit: int = 100,
+    rebuild: bool = True,
+) -> list[dict[str, Any]]:
     resolved = resolve_review_session(root, session_id)
-    ensure_index(root)
+    if rebuild:
+        ensure_index(root)
     rows = query_messages(root, session_id=resolved, limit=limit)
     return [timeline_ref(row) for row in rows]
 
