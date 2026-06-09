@@ -112,7 +112,7 @@ available automatically during coding tasks:
 Package page: [@jstxn/agentdir-pi](https://pi.dev/packages/@jstxn/agentdir-pi)
 
 ```bash
-pi install npm:@jstxn/agentdir-pi@0.7.4
+pi install npm:@jstxn/agentdir-pi@0.7.5
 # or install directly from a local checkout / release tag:
 pi install /absolute/path/to/agentdir
 pi install git:github.com/jstxn/agentdir@<tag-or-commit>
@@ -342,8 +342,7 @@ agentdir --upgrade
 Rollback to the previous stable release:
 
 ```bash
-gh api -H "Accept: application/vnd.github.raw" \
-  'repos/jstxn/agentdir/contents/scripts/rollback.sh?ref=v0.7.4' | bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash
 ```
 
 ## Learn More
