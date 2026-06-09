@@ -24,21 +24,23 @@ main() {
     *) fail "rollback version must be a tag like v0.4.0" ;;
   esac
 
-  need_cmd gh
-  gh auth status >/dev/null 2>&1 || fail "gh is not authenticated; run: gh auth login"
-  gh release view "$AGENTDIR_ROLLBACK_VERSION" --repo "$AGENTDIR_REPO" >/dev/null ||
-    fail "release not found: $AGENTDIR_REPO@$AGENTDIR_ROLLBACK_VERSION"
-
   local tmp_dir
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdir-rollback.XXXXXX")"
   AGENTDIR_TMP_DIR="$tmp_dir"
   trap 'rm -rf "$AGENTDIR_TMP_DIR"' EXIT
 
   local install_script="$tmp_dir/install-agentdir.sh"
+  local raw_url="https://raw.githubusercontent.com/$AGENTDIR_REPO/$AGENTDIR_ROLLBACK_VERSION/scripts/install.sh"
   log "fetching installer from $AGENTDIR_REPO@$AGENTDIR_ROLLBACK_VERSION"
-  gh api -H "Accept: application/vnd.github.raw" \
-    "repos/$AGENTDIR_REPO/contents/scripts/install.sh?ref=$AGENTDIR_ROLLBACK_VERSION" \
-    > "$install_script"
+  if ! { command -v curl >/dev/null 2>&1 && curl -fsSL -o "$install_script" "$raw_url"; }; then
+    need_cmd gh
+    gh auth status >/dev/null 2>&1 || fail "gh is not authenticated; run: gh auth login"
+    gh release view "$AGENTDIR_ROLLBACK_VERSION" --repo "$AGENTDIR_REPO" >/dev/null ||
+      fail "release not found: $AGENTDIR_REPO@$AGENTDIR_ROLLBACK_VERSION"
+    gh api -H "Accept: application/vnd.github.raw" \
+      "repos/$AGENTDIR_REPO/contents/scripts/install.sh?ref=$AGENTDIR_ROLLBACK_VERSION" \
+      > "$install_script"
+  fi
   chmod +x "$install_script"
 
   log "reinstalling AgentDir $AGENTDIR_ROLLBACK_VERSION"
