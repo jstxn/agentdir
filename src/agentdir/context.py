@@ -91,8 +91,8 @@ def build_context_pack(
     else:
         memory_hits = memory_hits[:memory_limit]
         recent = recent_session_summaries(root, limit=recent_limit)
-    evidence = evidence_rows(root, resolved_session)[:evidence_limit] if resolved_session else []
-    current_summary = summarize_session(root, resolved_session) if resolved_session else None
+    evidence = evidence_rows(root, resolved_session, rebuild=False)[:evidence_limit] if resolved_session else []
+    current_summary = summarize_session(root, resolved_session, rebuild=False) if resolved_session else None
 
     return {
         "task": task,

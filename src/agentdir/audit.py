@@ -68,12 +68,15 @@ def audit_session(
 ) -> dict[str, Any]:
     if summary is None:
         summary = summarize_session(root, session_id, rebuild=rebuild)
+        rebuild = False
     resolved = summary["session_id"]
     if evidence is None:
         evidence = evidence_rows(root, resolved, rebuild=rebuild)
+        rebuild = False
     event_counts = summary.get("event_counts") or {}
     if latest_pack is _MISSING:
         latest_pack = _latest_context_pack(root, resolved, rebuild=rebuild)
+        rebuild = False
     if context_audit is _MISSING:
         context_audit = _safe_context_audit(root, latest_pack, rebuild=rebuild)
     if doctor is _MISSING:
@@ -140,6 +143,7 @@ def audit_claims(
 ) -> dict[str, Any]:
     if summary is None:
         summary = summarize_session(root, session_id, rebuild=rebuild)
+        rebuild = False
     resolved = summary["session_id"]
     if evidence is None:
         evidence = evidence_rows(root, resolved, rebuild=rebuild)
