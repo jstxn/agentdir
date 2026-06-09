@@ -1,7 +1,7 @@
 # AgentDir
 
 <p align="center">
-  <img src="docs/assets/agentdir-overview.png" alt="AgentDir turns agent work into a saved trail, searchable memory, and proof for engineers." />
+  <img src="https://raw.githubusercontent.com/jstxn/agentdir/main/docs/assets/agentdir-overview.png" alt="AgentDir turns agent work into a saved trail, searchable memory, and proof for engineers." />
 </p>
 
 <p align="center">
