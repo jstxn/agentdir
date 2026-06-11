@@ -412,7 +412,12 @@ agentdir session start [--id <id>] [--title <title>]
 agentdir session current
 agentdir session end [--summary <file-or-text>]
 agentdir run [--session <id>] [--name <tool>] -- <command> [args...]
-agentdir capsule run --image <image> [--mode copy|readonly|write-through] [--dry-run] -- <command> [args...]
+agentdir capsule run --image <image> [--mode copy|readonly|write-through] [--no-pin] [--dry-run] -- <command> [args...]
+agentdir capsule verify <event-id> [--force] [--json]
+agentdir capsule attest <event-id> [--out <file>]
+agentdir capsule infer [--source <path>] [--write <file>] [--json]
+agentdir capsule flake --image <image> [--runs <n>] -- <command> [args...]
+agentdir capsule chain [--check] [--json]
 agentdir emit [--root <root>] [--scope <scope>] [--session <id>] --type <type> --body <file>
 agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
 agentdir send [--root <root>] [--scope <scope>] --from <actor> --to <actor> --type <type> --body <file>

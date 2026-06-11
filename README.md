@@ -239,6 +239,77 @@ agentdir capsule run --image node:22 --dry-run --json -- pnpm test
 Use `--mode readonly` for read-only inspection in place, or `--mode write-through`
 when the command must intentionally write back to the host checkout.
 
+### Verifiable Receipts
+
+Every capsule run is pinned and replayable. AgentDir records the image digest,
+a source tree hash that covers uncommitted changes, the exact container argv,
+and sha256 hashes of the captured output in a `runtime.capsule.result` receipt
+event. Because all inputs are pinned, the receipt is falsifiable — anyone can
+re-derive the result instead of trusting the agent's claim:
+
+```bash
+agentdir capsule verify <receipt-event-id>
+```
+
+`verify` re-executes the recorded plan and reports a verdict: `exact` (exit code
+and output hashes match), `verified` (exit code matches, output differs — common
+when output contains timings), `diverged` (exit code differs), or
+`cannot-verify` (the source tree or image digest changed since the receipt;
+override with `--force`). Verification runs are themselves recorded as
+`runtime.capsule.verify` evidence.
+
+### Tamper-Evident Evidence Chain
+
+Capsule events are hash-chained: each event header carries the previous chain
+hash, and an append-only ledger in `state/capsule.chain` records the running
+chain. Editing or deleting any recorded capsule event breaks the chain:
+
+```bash
+agentdir capsule chain          # show chain length and head hash
+agentdir capsule chain --check  # re-derive the chain and detect tampering
+```
+
+Anchor the head hash externally (paste it into a PR comment, sign it) to make
+the history independently checkable.
+
+### Attestations for CI
+
+Turn a receipt into an in-toto v1 attestation statement:
+
+```bash
+agentdir capsule attest <receipt-event-id> --out capsule-attestation.json
+```
+
+The subject is the pinned source tree hash; the predicate carries the image
+digest, command, exit code, and output hashes. Sign it with
+`cosign attest-blob` (or any in-toto-compatible signer) and ship it with a PR —
+CI that trusts the attestation can skip re-running a suite that already passed
+in a pinned capsule for the exact tree being merged.
+
+### Habitat Inference
+
+AgentDir already watches every evidence-bearing command, so it can derive the
+repo's runtime environment from observed reality instead of a hand-written spec:
+
+```bash
+agentdir capsule infer            # print an inferred Containerfile
+agentdir capsule infer --json     # structured: image, tool counts, manifests
+agentdir capsule infer --write Containerfile.agentdir
+```
+
+### Evidence-Grade Flake Detection
+
+Run the same command N times in byte-identical capsules. With the environment
+pinned, any variance is proven flakiness rather than "works on my machine":
+
+```bash
+agentdir capsule flake --runs 5 --image node:22 -- pnpm test
+```
+
+The summary verdict is `stable-pass` (exit 0), `flaky` (exit 1), or
+`stable-fail` (exit 2), and every run is recorded as its own receipt under a
+shared plan, with a `runtime.capsule.flake` summary event.
+
 ## How AgentDir Works
 
 AgentDir has one source of truth and several rebuildable views:

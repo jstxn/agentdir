@@ -29,7 +29,22 @@ from .context import (
     write_context_pack,
 )
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
-from .capsule import CAPSULE_MODES, build_capsule_plan, format_capsule_plan, run_capsule
+from .capsule import (
+    CAPSULE_MODES,
+    CapsulePlan,
+    FLAKE_VERDICT_EXIT_CODES,
+    VERIFY_VERDICT_EXIT_CODES,
+    build_capsule_attestation,
+    build_capsule_plan,
+    chain_status,
+    format_capsule_plan,
+    infer_habitat,
+    pin_capsule_plan,
+    run_capsule_flake,
+    run_capsule_receipt,
+    verify_capsule,
+    verify_chain,
+)
 from .control import (
     adopt_repo,
     build_final_report,
@@ -720,7 +735,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_capsule_run(args: argparse.Namespace) -> int:
+def capsule_plan_from_args(args: argparse.Namespace) -> CapsulePlan:
     command = list(args.command or [])
     if command and command[0] == "--":
         command = command[1:]
@@ -734,19 +749,122 @@ def cmd_capsule_run(args: argparse.Namespace) -> int:
         memory=args.memory,
         platform=args.platform,
     )
+    if not args.no_pin:
+        plan = pin_capsule_plan(plan)
+    return plan
+
+
+def cmd_capsule_run(args: argparse.Namespace) -> int:
+    plan = capsule_plan_from_args(args)
     if args.dry_run:
         if args.json:
             print_json(plan.as_dict())
         else:
             print(format_capsule_plan(plan))
         return 0
-    return run_capsule(
+    receipt = run_capsule_receipt(
         command_root(args, create=True),
         plan=plan,
         session_id=args.session,
         max_capture_bytes=args.max_capture_bytes,
         redact=not args.no_redact,
     )
+    sys.stderr.write(f"agentdir: capsule receipt {receipt.receipt_event_id}\n")
+    sys.stderr.write(
+        f"agentdir: replay it anytime with: agentdir capsule verify '{receipt.receipt_event_id}'\n"
+    )
+    return receipt.exit_code
+
+
+def cmd_capsule_verify(args: argparse.Namespace) -> int:
+    report = verify_capsule(
+        command_root(args, create=True),
+        args.event_id,
+        force=args.force,
+        session_id=args.session,
+    )
+    if args.json:
+        print_json(report)
+    else:
+        print(f"verdict={report['verdict']}")
+        print(f"recorded_exit={report['recorded_exit_code']}", end="")
+        if "replayed_exit_code" in report:
+            print(f" replayed_exit={report['replayed_exit_code']}")
+            print(f"stdout_match={report['stdout_match']} stderr_match={report['stderr_match']}")
+        else:
+            print()
+        print(f"source_tree_match={report['source_tree_match']}")
+        print(f"image_digest_match={report['image_digest_match']}")
+        for blocker in report.get("blockers") or []:
+            print(f"blocker: {blocker}")
+        print(f"verify_event={report['verify_event_id']}")
+    return VERIFY_VERDICT_EXIT_CODES.get(str(report["verdict"]), 1)
+
+
+def cmd_capsule_attest(args: argparse.Namespace) -> int:
+    statement = build_capsule_attestation(command_root(args), args.event_id)
+    if args.out:
+        out_path = Path(args.out).expanduser()
+        out_path.write_text(json.dumps(statement, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(out_path)
+        return 0
+    print_json(statement)
+    return 0
+
+
+def cmd_capsule_infer(args: argparse.Namespace) -> int:
+    habitat = infer_habitat(command_root(args, create=True), args.source)
+    if args.json:
+        print_json(habitat)
+        return 0
+    if args.write:
+        out_path = Path(args.write).expanduser()
+        out_path.write_text(str(habitat["containerfile"]), encoding="utf-8")
+        print(out_path)
+        return 0
+    print(str(habitat["containerfile"]), end="")
+    print(f"# run: agentdir capsule run --image {habitat['image']} -- <command>")
+    return 0
+
+
+def cmd_capsule_flake(args: argparse.Namespace) -> int:
+    plan = capsule_plan_from_args(args)
+    summary = run_capsule_flake(
+        command_root(args, create=True),
+        plan=plan,
+        runs=args.runs,
+        session_id=args.session,
+        max_capture_bytes=args.max_capture_bytes,
+        redact=not args.no_redact,
+    )
+    if args.json:
+        print_json(summary)
+    else:
+        print(f"verdict={summary['verdict']}")
+        print(f"passes={summary['passes']}/{summary['runs']} exit_codes={summary['exit_codes']}")
+        print(f"distinct_stdout_hashes={summary['distinct_stdout_hashes']}")
+        print(f"flake_event={summary['flake_event_id']}")
+    return FLAKE_VERDICT_EXIT_CODES.get(str(summary["verdict"]), 1)
+
+
+def cmd_capsule_chain(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if args.check:
+        result = verify_chain(root)
+        if args.json:
+            print_json(result)
+        else:
+            print(f"ok={str(result['ok']).lower()} length={result['length']} head={result['head']}")
+            for problem in result["problems"]:
+                print(f"problem: {problem}")
+        return 0 if result["ok"] else 1
+    status = chain_status(root)
+    if args.json:
+        print_json(status)
+    else:
+        print(f"length={status['length']} head={status['head']}")
+        print(f"ledger={status['ledger']}")
+    return 0
 
 
 def cmd_hooks_install(args: argparse.Namespace) -> int:
@@ -1618,22 +1736,59 @@ def build_parser() -> argparse.ArgumentParser:
 
     capsule = sub.add_parser("capsule")
     capsule_sub = capsule.add_subparsers(dest="capsule_command", required=True)
+
+    def add_capsule_plan_args(parser: argparse.ArgumentParser) -> None:
+        add_scope_args(parser)
+        parser.add_argument("--image", required=True)
+        parser.add_argument("--mode", choices=CAPSULE_MODES, default="copy")
+        parser.add_argument("--source")
+        parser.add_argument("--session")
+        parser.add_argument("--container-bin", default="container")
+        parser.add_argument("--cpus")
+        parser.add_argument("--memory")
+        parser.add_argument("--platform")
+        parser.add_argument("--max-capture-bytes", type=int, default=DEFAULT_MAX_CAPTURE_BYTES)
+        parser.add_argument("--no-redact", action="store_true")
+        parser.add_argument("--no-pin", action="store_true")
+        parser.add_argument("--json", action="store_true")
+        parser.add_argument("command", nargs=argparse.REMAINDER)
+
     capsule_run = capsule_sub.add_parser("run")
-    add_scope_args(capsule_run)
-    capsule_run.add_argument("--image", required=True)
-    capsule_run.add_argument("--mode", choices=CAPSULE_MODES, default="copy")
-    capsule_run.add_argument("--source")
-    capsule_run.add_argument("--session")
-    capsule_run.add_argument("--container-bin", default="container")
-    capsule_run.add_argument("--cpus")
-    capsule_run.add_argument("--memory")
-    capsule_run.add_argument("--platform")
-    capsule_run.add_argument("--max-capture-bytes", type=int, default=DEFAULT_MAX_CAPTURE_BYTES)
-    capsule_run.add_argument("--no-redact", action="store_true")
+    add_capsule_plan_args(capsule_run)
     capsule_run.add_argument("--dry-run", action="store_true")
-    capsule_run.add_argument("--json", action="store_true")
-    capsule_run.add_argument("command", nargs=argparse.REMAINDER)
     capsule_run.set_defaults(func=cmd_capsule_run)
+
+    capsule_verify = capsule_sub.add_parser("verify")
+    add_scope_args(capsule_verify)
+    capsule_verify.add_argument("event_id")
+    capsule_verify.add_argument("--session")
+    capsule_verify.add_argument("--force", action="store_true")
+    capsule_verify.add_argument("--json", action="store_true")
+    capsule_verify.set_defaults(func=cmd_capsule_verify)
+
+    capsule_attest = capsule_sub.add_parser("attest")
+    add_scope_args(capsule_attest)
+    capsule_attest.add_argument("event_id")
+    capsule_attest.add_argument("--out")
+    capsule_attest.set_defaults(func=cmd_capsule_attest)
+
+    capsule_infer = capsule_sub.add_parser("infer")
+    add_scope_args(capsule_infer)
+    capsule_infer.add_argument("--source")
+    capsule_infer.add_argument("--write")
+    capsule_infer.add_argument("--json", action="store_true")
+    capsule_infer.set_defaults(func=cmd_capsule_infer)
+
+    capsule_flake = capsule_sub.add_parser("flake")
+    add_capsule_plan_args(capsule_flake)
+    capsule_flake.add_argument("--runs", type=int, default=5)
+    capsule_flake.set_defaults(func=cmd_capsule_flake)
+
+    capsule_chain = capsule_sub.add_parser("chain")
+    add_scope_args(capsule_chain)
+    capsule_chain.add_argument("--check", action="store_true")
+    capsule_chain.add_argument("--json", action="store_true")
+    capsule_chain.set_defaults(func=cmd_capsule_chain)
 
     hooks = sub.add_parser("hooks")
     hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)

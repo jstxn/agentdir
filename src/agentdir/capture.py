@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -22,6 +23,20 @@ DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024
 class CapturedText:
     text: str = ""
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class ToolRunOutcome:
+    exit_code: int
+    duration_ms: int
+    stdout_sha256: str
+    stderr_sha256: str
+    stdout_truncated: bool
+    stderr_truncated: bool
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _append_limited(capture: CapturedText, chunk: str, max_bytes: int) -> None:
@@ -59,6 +74,27 @@ def run_tool(
     max_capture_bytes: int = DEFAULT_MAX_CAPTURE_BYTES,
     redact: bool = True,
 ) -> int:
+    return run_tool_detailed(
+        root,
+        argv=argv,
+        session_id=session_id,
+        tool_name=tool_name,
+        cwd=cwd,
+        max_capture_bytes=max_capture_bytes,
+        redact=redact,
+    ).exit_code
+
+
+def run_tool_detailed(
+    root: str | Path,
+    *,
+    argv: list[str],
+    session_id: str | None = None,
+    tool_name: str | None = None,
+    cwd: str | Path | None = None,
+    max_capture_bytes: int = DEFAULT_MAX_CAPTURE_BYTES,
+    redact: bool = True,
+) -> ToolRunOutcome:
     if not argv:
         raise AgentDirError("argv is required")
     if max_capture_bytes < 0:
@@ -122,7 +158,14 @@ def run_tool(
             tool=tool,
             tool_exit_code=127,
         )
-        return 127
+        return ToolRunOutcome(
+            exit_code=127,
+            duration_ms=0,
+            stdout_sha256=sha256_text(""),
+            stderr_sha256=sha256_text(message),
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -184,4 +227,11 @@ def run_tool(
             "X-AgentDir-Redactions": str(redactions),
         },
     )
-    return int(exit_code)
+    return ToolRunOutcome(
+        exit_code=int(exit_code),
+        duration_ms=duration_ms,
+        stdout_sha256=sha256_text(stdout_text),
+        stderr_sha256=sha256_text(stderr_text),
+        stdout_truncated=stdout_capture.truncated,
+        stderr_truncated=stderr_capture.truncated,
+    )

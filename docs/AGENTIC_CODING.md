@@ -184,6 +184,23 @@ agentdir capsule run --image node:22 --dry-run --json -- pnpm test
 Use `--mode readonly` for in-place read-only inspection and `--mode write-through`
 only when the agent intentionally needs host writes.
 
+Capsule runs produce verifiable receipts. Each run pins the image digest and a
+source tree hash (covering uncommitted changes), hashes the captured output, and
+emits a `runtime.capsule.result` receipt chained into a tamper-evident ledger.
+Useful follow-ups:
+
+```bash
+agentdir capsule verify <receipt-event-id>   # re-execute the receipt and compare
+agentdir capsule attest <receipt-event-id>   # emit an in-toto attestation statement
+agentdir capsule chain --check               # detect tampering in recorded capsule evidence
+agentdir capsule infer                       # derive a Containerfile from recorded evidence
+agentdir capsule flake --runs 5 --image node:22 -- pnpm test  # prove or rule out flakiness
+```
+
+When a final claim rests on a capsule run, prefer quoting the receipt event id
+so a reviewer can replay it. If a test outcome looks intermittent, use
+`capsule flake` before claiming it passes or fails.
+
 ## Capturing Diffs As Artifacts
 
 ```bash

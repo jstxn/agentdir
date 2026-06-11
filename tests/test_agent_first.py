@@ -235,6 +235,244 @@ def test_capsule_run_records_runtime_metadata_and_tool_result(tmp_path: Path) ->
     assert result_rows[0]["tool_exit_code"] == 0
 
 
+def trailing_json(stdout: str) -> dict[str, object]:
+    # Commands that replay a capsule stream the container output before the
+    # JSON document, so parse from the last top-level opening brace.
+    lines = stdout.splitlines()
+    start = max(index for index, line in enumerate(lines) if line == "{")
+    return json.loads("\n".join(lines[start:]))
+
+
+def make_fake_container(path: Path, run_body: str = 'echo fake apple container "$@"\nexit 0\n') -> Path:
+    # Answers `image inspect` probes with empty JSON so only `run` invocations
+    # execute the test-specific body.
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" != "run" ]; then\n'
+        "  echo '[]'\n"
+        "  exit 0\n"
+        "fi\n" + run_body,
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def run_capsule_once(repo: Path, fake_container: Path, session: str = "capsule-session") -> str:
+    result = run_cli(
+        "capsule",
+        "run",
+        "--session",
+        session,
+        "--container-bin",
+        str(fake_container),
+        "--image",
+        "node:22",
+        "--",
+        "node",
+        "--version",
+        cwd=repo,
+    )
+    run_cli("index", "rebuild", cwd=repo)
+    receipt_rows = query_rows(repo / ".agentdir", "runtime.capsule.result")
+    assert "capsule receipt" in result.stderr
+    return str(receipt_rows[-1]["message_id"])
+
+
+def test_capsule_run_records_pinned_receipt_and_chain(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    (repo / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    fake_container = make_fake_container(tmp_path / "container")
+
+    run_capsule_once(repo, fake_container)
+
+    receipt_rows = query_rows(repo / ".agentdir", "runtime.capsule.result")
+    assert len(receipt_rows) == 1
+    body = json.loads(str(receipt_rows[0]["body_text"]))
+    assert str(body["plan"]["source_tree"]).startswith("git-tree:")
+    assert body["result"]["exit_code"] == 0
+    assert len(body["result"]["stdout_sha256"]) == 64
+    assert body["result"]["plan_event_id"]
+    ledger = (repo / ".agentdir" / "state" / "capsule.chain").read_text(encoding="utf-8")
+    assert len(ledger.strip().splitlines()) == 2
+
+
+def test_capsule_verify_replays_receipt_exactly(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    fake_container = make_fake_container(tmp_path / "container")
+    receipt_id = run_capsule_once(repo, fake_container)
+
+    verify = run_cli("capsule", "verify", receipt_id, "--json", cwd=repo)
+    report = trailing_json(verify.stdout)
+
+    assert report["verdict"] == "exact"
+    assert report["stdout_match"] is True
+    assert report["stderr_match"] is True
+    assert report["source_tree_match"] is True
+    run_cli("index", "rebuild", cwd=repo)
+    verify_rows = query_rows(repo / ".agentdir", "runtime.capsule.verify")
+    assert len(verify_rows) == 1
+
+
+def test_capsule_verify_blocks_on_source_drift_until_forced(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    fake_container = make_fake_container(tmp_path / "container")
+    receipt_id = run_capsule_once(repo, fake_container)
+    (repo / "drift.txt").write_text("changed after the receipt\n", encoding="utf-8")
+
+    blocked = run_cli("capsule", "verify", receipt_id, "--json", cwd=repo, expected_returncode=2)
+    blocked_report = trailing_json(blocked.stdout)
+    forced = run_cli("capsule", "verify", receipt_id, "--force", "--json", cwd=repo)
+    forced_report = trailing_json(forced.stdout)
+
+    assert blocked_report["verdict"] == "cannot-verify"
+    assert blocked_report["source_tree_match"] is False
+    assert forced_report["verdict"] == "exact"
+    assert forced_report["forced"] is True
+
+
+def test_capsule_verify_detects_diverged_exit_code(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    exit_file = tmp_path / "exit-code"
+    exit_file.write_text("0", encoding="utf-8")
+    fake_container = make_fake_container(
+        tmp_path / "container",
+        run_body='echo deterministic capsule output\nexit "$(cat "$CAPSULE_EXIT_FILE")"\n',
+    )
+    env = {"CAPSULE_EXIT_FILE": str(exit_file)}
+    run_cli(
+        "capsule",
+        "run",
+        "--session",
+        "diverge-session",
+        "--container-bin",
+        str(fake_container),
+        "--image",
+        "node:22",
+        "--",
+        "node",
+        "--version",
+        cwd=repo,
+        env_extra=env,
+    )
+    run_cli("index", "rebuild", cwd=repo)
+    receipt_id = str(query_rows(repo / ".agentdir", "runtime.capsule.result")[-1]["message_id"])
+    exit_file.write_text("3", encoding="utf-8")
+
+    verify = run_cli(
+        "capsule", "verify", receipt_id, "--json", cwd=repo, env_extra=env, expected_returncode=1
+    )
+    report = trailing_json(verify.stdout)
+
+    assert report["verdict"] == "diverged"
+    assert report["recorded_exit_code"] == 0
+    assert report["replayed_exit_code"] == 3
+
+
+def test_capsule_chain_check_detects_tampering(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    fake_container = make_fake_container(tmp_path / "container")
+    run_capsule_once(repo, fake_container)
+
+    clean = run_cli("capsule", "chain", "--check", "--json", cwd=repo)
+    clean_report = json.loads(clean.stdout)
+    assert clean_report["ok"] is True
+    assert clean_report["length"] == 2
+
+    event_files = sorted((repo / ".agentdir" / "sessions").glob("*/Maildir/*/*"))
+    receipt_file = next(
+        path for path in event_files if b"runtime.capsule.result" in path.read_bytes()
+    )
+    receipt_file.write_bytes(receipt_file.read_bytes() + b"tampered\n")
+
+    tampered = run_cli("capsule", "chain", "--check", cwd=repo, expected_returncode=1)
+    assert "content hash mismatch" in tampered.stdout
+
+
+def test_capsule_attest_builds_in_toto_statement(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    fake_container = make_fake_container(tmp_path / "container")
+    receipt_id = run_capsule_once(repo, fake_container)
+
+    result = run_cli("capsule", "attest", receipt_id, cwd=repo)
+    statement = json.loads(result.stdout)
+
+    assert statement["_type"] == "https://in-toto.io/Statement/v1"
+    assert statement["predicateType"] == "https://agentdir.dev/attestations/capsule-run/v1"
+    assert statement["subject"][0]["digest"]["gitTree"]
+    assert statement["predicate"]["exitCode"] == 0
+    assert statement["predicate"]["receiptEventId"]
+    assert statement["predicate"]["chain"]["seq"] == 2
+
+
+def test_capsule_infer_suggests_image_from_recorded_evidence(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli(
+        "run",
+        "--session",
+        "infer-session",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('ok')",
+        cwd=repo,
+    )
+
+    result = run_cli("capsule", "infer", "--json", cwd=repo)
+    habitat = json.loads(result.stdout)
+
+    assert habitat["image"] == "python:3.12"
+    assert habitat["family"] == "python"
+    assert habitat["observed_tools"]["pytest"] == 1
+    assert "FROM python:3.12" in habitat["containerfile"]
+
+
+def test_capsule_flake_detects_mixed_exit_codes(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    counter = tmp_path / "flake-count"
+    fake_container = make_fake_container(
+        tmp_path / "container",
+        run_body=(
+            'n=$(cat "$CAPSULE_FLAKE_COUNTER" 2>/dev/null || echo 0)\n'
+            "n=$((n + 1))\n"
+            'printf %s "$n" > "$CAPSULE_FLAKE_COUNTER"\n'
+            'echo "flake run $n"\n'
+            'if [ $((n % 2)) -eq 0 ]; then exit 1; fi\n'
+            "exit 0\n"
+        ),
+    )
+
+    result = run_cli(
+        "capsule",
+        "flake",
+        "--runs",
+        "2",
+        "--session",
+        "flake-session",
+        "--container-bin",
+        str(fake_container),
+        "--image",
+        "node:22",
+        "--json",
+        "--",
+        "node",
+        "--version",
+        cwd=repo,
+        env_extra={"CAPSULE_FLAKE_COUNTER": str(counter)},
+        expected_returncode=1,
+    )
+    summary = trailing_json(result.stdout)
+    run_cli("index", "rebuild", cwd=repo)
+
+    assert summary["verdict"] == "flaky"
+    assert summary["exit_codes"] == [0, 1]
+    assert summary["passes"] == 1
+    assert len(query_rows(repo / ".agentdir", "runtime.capsule.result")) == 2
+    assert len(query_rows(repo / ".agentdir", "runtime.capsule.flake")) == 1
+
+
 def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
 
