@@ -181,7 +181,7 @@ def resolve_image_digest(image: str, container_bin: str = "container") -> str | 
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, list) or not payload:
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         return None
     descriptor = payload[0].get("configuration", {}).get("descriptor", {})
     digest = descriptor.get("digest")
@@ -255,7 +255,7 @@ def _walk_tree_hash(source_path: Path) -> str | None:
         return None
     for path in files:
         rel = path.relative_to(source_path).as_posix()
-        if rel.startswith((".git/", ".agentdir/")):
+        if rel == ".git" or rel.startswith((".git/", ".agentdir/")):
             continue
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
@@ -313,11 +313,23 @@ def _chain_tail(root: str | Path) -> tuple[int, str]:
         raise AgentDirError(
             f"Malformed capsule chain ledger at {path}; inspect it with `agentdir capsule chain --check`"
         )
-    return int(parts[0]), parts[3]
+    try:
+        seq = int(parts[0])
+    except ValueError:
+        raise AgentDirError(
+            f"Malformed capsule chain ledger at {path}; inspect it with `agentdir capsule chain --check`"
+        )
+    return seq, parts[3]
 
 
-def _chain_append(root: str | Path, *, event_path: Path, message_id: str) -> tuple[int, str]:
-    seq, prev_hash = _chain_tail(root)
+def _chain_append(
+    root: str | Path,
+    *,
+    event_path: Path,
+    message_id: str,
+    position: tuple[int, str] | None = None,
+) -> tuple[int, str]:
+    seq, prev_hash = position if position is not None else _chain_tail(root)
     event_sha = hashlib.sha256(event_path.read_bytes()).hexdigest()
     chain_hash = hashlib.sha256(f"{prev_hash}{event_sha}".encode("utf-8")).hexdigest()
     path = _chain_path(root)
@@ -339,7 +351,8 @@ def _emit_chained(
 ) -> tuple[str, int, str]:
     message_id = make_msgid(domain="agentdir.local")
     cwd_path = Path.cwd().resolve()
-    seq, prev_hash = _chain_tail(root)
+    position = _chain_tail(root)
+    seq, prev_hash = position
     headers: dict[str, str] = dict(extra_headers or {})
     headers["X-AgentDir-Chain-Seq"] = str(seq + 1)
     headers["X-AgentDir-Chain-Prev"] = prev_hash
@@ -357,7 +370,9 @@ def _emit_chained(
         extra_headers=headers,
         message_id=message_id,
     )
-    chain_seq, chain_hash = _chain_append(root, event_path=emitted.path, message_id=message_id)
+    chain_seq, chain_hash = _chain_append(
+        root, event_path=emitted.path, message_id=message_id, position=position
+    )
     return message_id, chain_seq, chain_hash
 
 
