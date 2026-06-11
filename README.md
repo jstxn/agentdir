@@ -72,6 +72,7 @@ The agent handles the recording surface:
 ```bash
 agentdir work start "fix checkout failure" --emit-context
 agentdir run -- pytest -q
+agentdir capsule run --image node:22 -- pnpm test
 agentdir audit session
 agentdir work finish --json
 ```
@@ -214,6 +215,29 @@ agentdir audit claims --text final-response.md
 
 Audits are advisory by default. Use `--strict` when unsupported or contradicted
 claims should fail a check.
+
+## Container Capsules
+
+Agents can run evidence-bearing checks in an Apple `container` capsule when they
+need a clean Linux runtime without mutating the host checkout:
+
+```bash
+agentdir capsule run --image node:22 -- pnpm test
+```
+
+By default, AgentDir mounts the current directory read-only at `/src`, copies it
+inside the container to `/work`, runs the command there, and records both the
+runtime plan and the tool result in the active session. That gives later
+reviewers a clear answer to "what environment did this pass in?"
+
+Preview the exact runtime without executing it:
+
+```bash
+agentdir capsule run --image node:22 --dry-run --json -- pnpm test
+```
+
+Use `--mode readonly` for read-only inspection in place, or `--mode write-through`
+when the command must intentionally write back to the host checkout.
 
 ## How AgentDir Works
 

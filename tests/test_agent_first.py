@@ -166,6 +166,75 @@ def test_run_returns_wrapped_command_exit_code(tmp_path: Path) -> None:
     assert result_rows[0]["tool_exit_code"] == 7
 
 
+def test_capsule_run_dry_run_plans_safe_copy_mode(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    result = run_cli(
+        "capsule",
+        "run",
+        "--image",
+        "node:22",
+        "--dry-run",
+        "--json",
+        "--",
+        "pnpm",
+        "test",
+        cwd=repo,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["runtime"] == "apple-container"
+    assert payload["image"] == "node:22"
+    assert payload["mode"] == "copy"
+    assert payload["source"] == str(repo)
+    assert payload["command"] == ["pnpm", "test"]
+    assert payload["container_argv"][:4] == ["container", "run", "--rm", "--init"]
+    assert f"type=bind,source={repo},target=/src,readonly" in payload["container_argv"]
+    assert payload["container_argv"][-4:] == ["node:22", "sh", "-lc", payload["container_argv"][-1]]
+    assert "cp -a /src/. /work/" in payload["container_argv"][-1]
+    assert "exec pnpm test" in payload["container_argv"][-1]
+
+
+def test_capsule_run_records_runtime_metadata_and_tool_result(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    fake_container = tmp_path / "container"
+    fake_container.write_text(
+        "#!/bin/sh\n"
+        "echo fake apple container \"$@\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_container.chmod(0o755)
+
+    result = run_cli(
+        "capsule",
+        "run",
+        "--session",
+        "capsule-session",
+        "--container-bin",
+        str(fake_container),
+        "--image",
+        "node:22",
+        "--",
+        "node",
+        "--version",
+        cwd=repo,
+    )
+    run_cli("index", "rebuild", cwd=repo)
+
+    capsule_rows = query_rows(repo / ".agentdir", "runtime.capsule")
+    result_rows = query_rows(repo / ".agentdir", "tool.result")
+    assert "fake apple container run --rm --init" in result.stdout
+    assert len(capsule_rows) == 1
+    assert len(result_rows) == 1
+    assert capsule_rows[0]["session_id"] == "capsule-session"
+    assert '"runtime": "apple-container"' in str(capsule_rows[0]["body_text"])
+    assert '"image": "node:22"' in str(capsule_rows[0]["body_text"])
+    assert '"mode": "copy"' in str(capsule_rows[0]["body_text"])
+    assert result_rows[0]["tool"] == "capsule"
+    assert result_rows[0]["tool_exit_code"] == 0
+
+
 def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
 

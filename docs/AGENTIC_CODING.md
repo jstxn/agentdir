@@ -159,6 +159,31 @@ agentdir run -- git diff --check
 
 Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks. Use plain shell commands while reading files, mapping code, or gathering low-level context. The evidence trail should capture verification, reproduced failures, important diagnostics, and final support for claims, not every glance at a file.
 
+## Capturing Container Capsules
+
+When a verification step should run in a clean Linux runtime, use a capsule:
+
+```bash
+agentdir capsule run --image node:22 -- pnpm test
+agentdir capsule run --image python:3.12 -- pytest -q
+```
+
+Capsules use Apple `container` as the local runtime. In the default `copy` mode,
+AgentDir mounts the host source read-only, copies it to `/work` inside the
+container, runs the command there, and records a `runtime.capsule` event before
+the normal `tool.call` / `tool.result` evidence. This is useful for reviewer,
+scout, and verifier agents that should not mutate the working tree while
+collecting evidence.
+
+Preview a capsule before running it:
+
+```bash
+agentdir capsule run --image node:22 --dry-run --json -- pnpm test
+```
+
+Use `--mode readonly` for in-place read-only inspection and `--mode write-through`
+only when the agent intentionally needs host writes.
+
 ## Capturing Diffs As Artifacts
 
 ```bash

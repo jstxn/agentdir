@@ -29,6 +29,7 @@ from .context import (
     write_context_pack,
 )
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
+from .capsule import CAPSULE_MODES, build_capsule_plan, format_capsule_plan, run_capsule
 from .control import (
     adopt_repo,
     build_final_report,
@@ -714,6 +715,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         session_id=args.session,
         tool_name=args.name,
         cwd=args.cwd,
+        max_capture_bytes=args.max_capture_bytes,
+        redact=not args.no_redact,
+    )
+
+
+def cmd_capsule_run(args: argparse.Namespace) -> int:
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    plan = build_capsule_plan(
+        image=args.image,
+        command=command,
+        source=args.source,
+        mode=args.mode,
+        container_bin=args.container_bin,
+        cpus=args.cpus,
+        memory=args.memory,
+        platform=args.platform,
+    )
+    if args.dry_run:
+        if args.json:
+            print_json(plan.as_dict())
+        else:
+            print(format_capsule_plan(plan))
+        return 0
+    return run_capsule(
+        command_root(args, create=True),
+        plan=plan,
+        session_id=args.session,
         max_capture_bytes=args.max_capture_bytes,
         redact=not args.no_redact,
     )
@@ -1585,6 +1615,25 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-redact", action="store_true")
     run.add_argument("command", nargs=argparse.REMAINDER)
     run.set_defaults(func=cmd_run)
+
+    capsule = sub.add_parser("capsule")
+    capsule_sub = capsule.add_subparsers(dest="capsule_command", required=True)
+    capsule_run = capsule_sub.add_parser("run")
+    add_scope_args(capsule_run)
+    capsule_run.add_argument("--image", required=True)
+    capsule_run.add_argument("--mode", choices=CAPSULE_MODES, default="copy")
+    capsule_run.add_argument("--source")
+    capsule_run.add_argument("--session")
+    capsule_run.add_argument("--container-bin", default="container")
+    capsule_run.add_argument("--cpus")
+    capsule_run.add_argument("--memory")
+    capsule_run.add_argument("--platform")
+    capsule_run.add_argument("--max-capture-bytes", type=int, default=DEFAULT_MAX_CAPTURE_BYTES)
+    capsule_run.add_argument("--no-redact", action="store_true")
+    capsule_run.add_argument("--dry-run", action="store_true")
+    capsule_run.add_argument("--json", action="store_true")
+    capsule_run.add_argument("command", nargs=argparse.REMAINDER)
+    capsule_run.set_defaults(func=cmd_capsule_run)
 
     hooks = sub.add_parser("hooks")
     hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
