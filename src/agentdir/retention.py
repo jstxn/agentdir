@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from dataclasses import asdict, dataclass
@@ -202,10 +203,16 @@ def _validate_selectors(
 
 
 def _active_session_id(root: Path) -> str | None:
+    # This guards retention from deleting the live session, so fail closed:
+    # an unreadable state file aborts the retention run instead of silently
+    # dropping the protection.
     try:
         state = read_current_session(root)
-    except Exception:
-        return None
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise AgentDirError(
+            f"Cannot determine the active session (corrupt state/current-session.json?): {exc}. "
+            "Fix or remove the state file before archiving or pruning."
+        ) from exc
     if state and state.status == "active":
         return state.session_id
     return None

@@ -56,6 +56,14 @@ Use `agentdir evidence --brief` and `agentdir timeline` to skim what has been re
 
 Emit important plans, blockers, diffs, review decisions, and final handoffs as immutable events when they matter for future replay or audit.
 
+## Exit Codes And Structured Errors
+
+- 0 success; `agentdir run` passes through the wrapped command's exit code (124 = `--timeout` kill).
+- 2 user error, 3 state error (no root / no active session), 4 missing dependency, 5 configuration error.
+- State errors name the recovery command in the message (`agentdir adopt`, `agentdir work start`).
+- Add `--json` to get a `{"success": false, "exit_code": ..., "error_code": ...}` envelope on failure; add `--quiet` for exit-code-only checks.
+- `agentdir run --session require` fails fast instead of auto-creating a session; `--session create` forces a fresh one.
+
 ## Finish Work
 
 Before the final response, run `agentdir work finish --json` when practical. Read the `agent_handoff` object before making final verification claims.

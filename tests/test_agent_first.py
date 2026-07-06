@@ -600,16 +600,16 @@ def test_build_final_report_rebuilds_index_once(tmp_path: Path, monkeypatch) -> 
     )
 
     calls = 0
-    real_rebuild = control.rebuild_index
+    real_rebuild = control.update_index
 
     def counted_rebuild(root: str | Path) -> None:
         nonlocal calls
         calls += 1
         real_rebuild(root)
 
-    monkeypatch.setattr(control, "rebuild_index", counted_rebuild)
-    monkeypatch.setattr(context, "rebuild_index", counted_rebuild)
-    monkeypatch.setattr(review, "rebuild_index", counted_rebuild)
+    monkeypatch.setattr(control, "update_index", counted_rebuild)
+    monkeypatch.setattr(context, "update_index", counted_rebuild)
+    monkeypatch.setattr(review, "update_index", counted_rebuild)
 
     report = control.build_final_report(repo / ".agentdir")
 
@@ -647,16 +647,16 @@ def test_status_context_pack_and_audit_rebuild_index_once(tmp_path: Path, monkey
     )
 
     calls = 0
-    real_rebuild = control.rebuild_index
+    real_rebuild = control.update_index
 
     def counted_rebuild(root: str | Path) -> None:
         nonlocal calls
         calls += 1
         real_rebuild(root)
 
-    monkeypatch.setattr(control, "rebuild_index", counted_rebuild)
-    monkeypatch.setattr(context, "rebuild_index", counted_rebuild)
-    monkeypatch.setattr(review, "rebuild_index", counted_rebuild)
+    monkeypatch.setattr(control, "update_index", counted_rebuild)
+    monkeypatch.setattr(context, "update_index", counted_rebuild)
+    monkeypatch.setattr(review, "update_index", counted_rebuild)
 
     root = repo / ".agentdir"
 

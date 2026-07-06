@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer m
 from .envelope import parse_envelope, validate_required
 from .mailbox import iter_records
 from .memory import index_memory_document, index_session_summaries, memory_schema_sql
-from .store import AgentDirError, discover_mailboxes, paths_for, require_root
+from .store import AgentDirError, RootPaths, discover_mailboxes, paths_for, require_root
 
 SCHEMA = """
 pragma foreign_keys = on;
@@ -127,31 +127,144 @@ def index_rebuild_lock(indexes: Path):
 def rebuild_index(root: str | Path) -> IndexResult:
     paths = require_root(root)
     with index_rebuild_lock(paths.indexes):
-        temp_path = paths.index_path.with_name(
-            f"{paths.index_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
-        )
-        conn = sqlite3.connect(temp_path)
-        conn.row_factory = sqlite3.Row
-        replaced = False
-        try:
-            conn.execute("pragma foreign_keys = on")
-            initialize_schema(conn)
-            result = _index_into(conn, root)
-            conn.commit()
-            _carry_forward_semantic_embeddings(conn, paths.index_path)
-            conn.close()
-            os.replace(temp_path, paths.index_path)
-            replaced = True
-            return result
-        finally:
-            if not replaced:
-                conn.close()
-            if not replaced and temp_path.exists():
-                temp_path.unlink()
+        return _rebuild_index_locked(paths)
 
 
 def update_index(root: str | Path) -> IndexResult:
-    return rebuild_index(root)
+    """Incrementally index added and removed envelope files.
+
+    Diffs mailbox contents against indexed file paths, so it only parses new
+    envelopes and drops rows for deleted ones. It does not detect in-place
+    edits to existing envelopes; flows that mutate stored envelopes (secret
+    redaction) must run a full rebuild_index() instead. Falls back to a full
+    rebuild when the index is missing or has an unexpected schema.
+    """
+    paths = require_root(root)
+    if not paths.index_path.exists() or not _index_schema_current(paths.index_path):
+        return rebuild_index(root)
+    with index_rebuild_lock(paths.indexes):
+        conn = sqlite3.connect(paths.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("pragma foreign_keys = on")
+            result = _update_into(conn, root)
+            conn.commit()
+            return result
+        except sqlite3.DatabaseError:
+            conn.close()
+            conn = None
+            return _rebuild_index_locked(paths)
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+def _index_schema_current(index_path: Path) -> bool:
+    try:
+        conn = sqlite3.connect(index_path)
+        try:
+            row = conn.execute("select value from metadata where key = 'schema_version'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return False
+    return bool(row) and row[0] == "3"
+
+
+def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
+    paths = paths_for(root)
+    existing: dict[str, int] = {
+        row["file_path"]: row["id"]
+        for row in conn.execute("select id, file_path from messages")
+    }
+    on_disk: dict[str, tuple[str, Path, str, Path]] = {}
+    for kind, mailbox in discover_mailboxes(root):
+        for record in iter_records(mailbox):
+            relative = str(record.path.relative_to(paths.root))
+            on_disk[relative] = (kind, record.mailbox, record.state, record.path)
+
+    result = IndexResult()
+    affected_sessions: set[str] = set()
+
+    removed_ids = [existing[path] for path in existing.keys() - on_disk.keys()]
+    for start in range(0, len(removed_ids), 500):
+        chunk = removed_ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        for row in conn.execute(f"select session_id from messages where id in ({marks})", chunk):
+            if row["session_id"]:
+                affected_sessions.add(row["session_id"])
+        try:
+            conn.execute(f"delete from message_fts where rowid in ({marks})", chunk)
+        except sqlite3.DatabaseError:
+            pass
+        conn.execute(f"delete from messages where id in ({marks})", chunk)
+
+    for relative in sorted(on_disk.keys() - existing.keys()):
+        kind, mailbox, state, path = on_disk[relative]
+        rowid, _message_id, malformed = _insert_record(
+            conn=conn,
+            root=paths.root,
+            kind=kind,
+            mailbox=mailbox,
+            state=state,
+            path=path,
+        )
+        result.indexed += 1
+        if malformed:
+            result.malformed += 1
+        row = conn.execute("select session_id from messages where id = ?", (rowid,)).fetchone()
+        if row and row["session_id"]:
+            affected_sessions.add(row["session_id"])
+
+    if affected_sessions:
+        index_session_summaries(conn, only_sessions=affected_sessions)
+        conn.execute(
+            """
+            delete from memory_documents
+            where source_kind = 'session_summary'
+              and session_id is not null
+              and session_id not in (
+                select distinct session_id from messages where session_id is not null
+              )
+            """
+        )
+
+    duplicate_rows = conn.execute(
+        """
+        select message_id, group_concat(file_path, char(10)) as files
+        from messages
+        where message_id is not null
+        group by message_id
+        having count(*) > 1
+        """
+    ).fetchall()
+    result.duplicates = {row["message_id"]: row["files"].split("\n") for row in duplicate_rows}
+    return result
+
+
+def _rebuild_index_locked(paths: RootPaths) -> IndexResult:
+    # Caller must hold index_rebuild_lock.
+    temp_path = paths.index_path.with_name(
+        f"{paths.index_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    conn = sqlite3.connect(temp_path)
+    conn.row_factory = sqlite3.Row
+    replaced = False
+    try:
+        conn.execute("pragma foreign_keys = on")
+        initialize_schema(conn)
+        result = _index_into(conn, paths.root)
+        conn.commit()
+        _carry_forward_semantic_embeddings(conn, paths.index_path)
+        conn.close()
+        os.replace(temp_path, paths.index_path)
+        replaced = True
+        return result
+    finally:
+        if not replaced:
+            conn.close()
+        if not replaced and temp_path.exists():
+            temp_path.unlink()
 
 
 def _carry_forward_semantic_embeddings(conn: sqlite3.Connection, previous_index: Path) -> None:

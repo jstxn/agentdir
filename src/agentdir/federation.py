@@ -3,11 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .index import rebuild_index
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer machines.
+    fcntl = None
+
+from .fsutil import atomic_write_text
+from .index import rebuild_index, update_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_HYBRID, search_memory
 from .rendering import rich_root_diagnostics
 from .store import AgentDirError, paths_for, require_root, validate_id
@@ -30,18 +37,19 @@ def register_root(
     controller = require_root(controller_root)
     source_root = resolve_registered_root(root)
     root_id = root_id_for_path(source_root)
-    registry = _read_registry(controller.root)
-    entry = {
-        "root_id": root_id,
-        "name": name or default_root_name(source_root),
-        "root_path": str(source_root),
-        "visibility": visibility,
-        "registered_at": now_iso(),
-    }
-    roots = [item for item in registry["roots"] if item["root_id"] != root_id]
-    roots.append(entry)
-    registry["roots"] = sorted(roots, key=lambda item: (item["name"], item["root_id"]))
-    _write_registry(controller.root, registry)
+    with _registry_lock(controller.root):
+        registry = _read_registry(controller.root)
+        entry = {
+            "root_id": root_id,
+            "name": name or default_root_name(source_root),
+            "root_path": str(source_root),
+            "visibility": visibility,
+            "registered_at": now_iso(),
+        }
+        roots = [item for item in registry["roots"] if item["root_id"] != root_id]
+        roots.append(entry)
+        registry["roots"] = sorted(roots, key=lambda item: (item["name"], item["root_id"]))
+        _write_registry(controller.root, registry)
     return entry
 
 
@@ -57,18 +65,19 @@ def list_registered_roots(controller_root: str | Path, *, group: str | None = No
 
 def remove_registered_root(controller_root: str | Path, identifier: str) -> dict[str, Any]:
     controller = require_root(controller_root)
-    registry = _read_registry(controller.root)
-    remaining: list[dict[str, Any]] = []
-    removed: dict[str, Any] | None = None
-    for root in registry["roots"]:
-        if identifier in {root["root_id"], root["name"], root["root_path"]}:
-            removed = root
-        else:
-            remaining.append(root)
-    if removed is None:
-        raise AgentDirError(f"Unknown registered root: {identifier}")
-    registry["roots"] = remaining
-    _write_registry(controller.root, registry)
+    with _registry_lock(controller.root):
+        registry = _read_registry(controller.root)
+        remaining: list[dict[str, Any]] = []
+        removed: dict[str, Any] | None = None
+        for root in registry["roots"]:
+            if identifier in {root["root_id"], root["name"], root["root_path"]}:
+                removed = root
+            else:
+                remaining.append(root)
+        if removed is None:
+            raise AgentDirError(f"Unknown registered root: {identifier}")
+        registry["roots"] = remaining
+        _write_registry(controller.root, registry)
     return removed
 
 
@@ -143,7 +152,7 @@ def search_federated_memory(
         if not root["available"]:
             continue
         if rebuild:
-            rebuild_index(root_path)
+            update_index(root_path)
         for row in search_memory(
             root_path,
             query,
@@ -240,15 +249,16 @@ def doctor_registered_roots(controller_root: str | Path, *, group: str | None = 
 def create_root_group(controller_root: str | Path, name: str, root_ids: list[str]) -> dict[str, Any]:
     controller = require_root(controller_root)
     validate_id(name, "root group")
-    registry = _read_registry(controller.root)
-    normalized = _validate_registered_root_ids(registry, root_ids)
-    if any(group["name"] == name for group in registry["groups"]):
-        raise AgentDirError(f"Root group already exists: {name}")
-    now = now_iso()
-    group = {"name": name, "root_ids": normalized, "created_at": now, "updated_at": now}
-    registry["groups"].append(group)
-    registry["groups"] = sorted(registry["groups"], key=lambda item: item["name"])
-    _write_registry(controller.root, registry)
+    with _registry_lock(controller.root):
+        registry = _read_registry(controller.root)
+        normalized = _validate_registered_root_ids(registry, root_ids)
+        if any(group["name"] == name for group in registry["groups"]):
+            raise AgentDirError(f"Root group already exists: {name}")
+        now = now_iso()
+        group = {"name": name, "root_ids": normalized, "created_at": now, "updated_at": now}
+        registry["groups"].append(group)
+        registry["groups"] = sorted(registry["groups"], key=lambda item: item["name"])
+        _write_registry(controller.root, registry)
     return group
 
 
@@ -276,24 +286,26 @@ def list_root_groups(controller_root: str | Path) -> list[dict[str, Any]]:
 
 def add_root_to_group(controller_root: str | Path, name: str, root_id: str) -> dict[str, Any]:
     controller = require_root(controller_root)
-    registry = _read_registry(controller.root)
-    _validate_registered_root_ids(registry, [root_id])
-    group = _group_entry(registry, name)
-    if root_id not in group["root_ids"]:
-        group["root_ids"].append(root_id)
-        group["root_ids"].sort()
-        group["updated_at"] = now_iso()
-        _write_registry(controller.root, registry)
+    with _registry_lock(controller.root):
+        registry = _read_registry(controller.root)
+        _validate_registered_root_ids(registry, [root_id])
+        group = _group_entry(registry, name)
+        if root_id not in group["root_ids"]:
+            group["root_ids"].append(root_id)
+            group["root_ids"].sort()
+            group["updated_at"] = now_iso()
+            _write_registry(controller.root, registry)
     return group
 
 
 def remove_root_from_group(controller_root: str | Path, name: str, root_id: str) -> dict[str, Any]:
     controller = require_root(controller_root)
-    registry = _read_registry(controller.root)
-    group = _group_entry(registry, name)
-    group["root_ids"] = [candidate for candidate in group["root_ids"] if candidate != root_id]
-    group["updated_at"] = now_iso()
-    _write_registry(controller.root, registry)
+    with _registry_lock(controller.root):
+        registry = _read_registry(controller.root)
+        group = _group_entry(registry, name)
+        group["root_ids"] = [candidate for candidate in group["root_ids"] if candidate != root_id]
+        group["updated_at"] = now_iso()
+        _write_registry(controller.root, registry)
     return group
 
 
@@ -413,7 +425,23 @@ def _read_registry(root: str | Path) -> dict[str, Any]:
 def _write_registry(root: str | Path, registry: dict[str, Any]) -> None:
     path = _registry_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(registry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(registry, indent=2, sort_keys=True) + "\n")
+
+
+@contextmanager
+def _registry_lock(root: str | Path):
+    """Serialize registry read-modify-write cycles across concurrent agents."""
+    state = paths_for(root).state
+    state.mkdir(parents=True, exist_ok=True)
+    lock_path = state / ".registered-roots.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _federated_row(root: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:

@@ -16,12 +16,24 @@ from .sessions import ensure_session
 from .store import AgentDirError
 
 DEFAULT_MAX_CAPTURE_BYTES = 256 * 1024
+TIMEOUT_EXIT_CODE = 124
 
 
 @dataclass
 class CapturedText:
     text: str = ""
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class RunToolResult:
+    exit_code: int
+    session_id: str
+    tool: str
+    duration_ms: int
+    truncated_streams: tuple[str, ...] = ()
+    timed_out: bool = False
+    event_path: str | None = None
 
 
 def _append_limited(capture: CapturedText, chunk: str, max_bytes: int) -> None:
@@ -58,11 +70,14 @@ def run_tool(
     cwd: str | Path | None = None,
     max_capture_bytes: int = DEFAULT_MAX_CAPTURE_BYTES,
     redact: bool = True,
-) -> int:
+    timeout: float | None = None,
+) -> RunToolResult:
     if not argv:
         raise AgentDirError("argv is required")
     if max_capture_bytes < 0:
         raise AgentDirError("max_capture_bytes must be non-negative")
+    if timeout is not None and timeout <= 0:
+        raise AgentDirError("timeout must be positive")
 
     cwd_path = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
     session = ensure_session(root, session_id, title=f"AgentDir run: {argv[0]}", emit_started=session_id is None)
@@ -110,7 +125,7 @@ def run_tool(
         message = f"agentdir: command not found: {argv[0]}\n"
         sys.stderr.write(message)
         sys.stderr.flush()
-        emit_event(
+        delivered = emit_event(
             root,
             session_id=session.session_id,
             event_type="tool.result",
@@ -122,7 +137,13 @@ def run_tool(
             tool=tool,
             tool_exit_code=127,
         )
-        return 127
+        return RunToolResult(
+            exit_code=127,
+            session_id=session.session_id,
+            tool=tool,
+            duration_ms=0,
+            event_path=str(delivered.path),
+        )
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -138,10 +159,28 @@ def run_tool(
     )
     stdout_thread.start()
     stderr_thread.start()
-    exit_code = process.wait()
+    timed_out = False
+    try:
+        exit_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        exit_code = TIMEOUT_EXIT_CODE
     stdout_thread.join()
     stderr_thread.join()
     duration_ms = int((time.monotonic() - started) * 1000)
+
+    if timed_out:
+        sys.stderr.write(
+            f"agentdir: warning: command timed out after {timeout}s and was killed; "
+            f"recording exit code {TIMEOUT_EXIT_CODE}\n"
+        )
+        sys.stderr.flush()
 
     truncated_streams = [
         name
@@ -173,6 +212,7 @@ def run_tool(
             f"redactions={redactions}",
             f"stdout_truncated={str(stdout_capture.truncated).lower()}",
             f"stderr_truncated={str(stderr_capture.truncated).lower()}",
+            f"timed_out={str(timed_out).lower()}",
             "",
             "stdout:",
             stdout_text,
@@ -181,7 +221,7 @@ def run_tool(
             stderr_text,
         ]
     )
-    emit_event(
+    delivered = emit_event(
         root,
         session_id=session.session_id,
         event_type="tool.result",
@@ -196,6 +236,15 @@ def run_tool(
             "X-AgentDir-Duration-Ms": str(duration_ms),
             "X-AgentDir-Redactions": str(redactions),
             **({"X-AgentDir-Truncated": ",".join(truncated_streams)} if truncated_streams else {}),
+            **({"X-AgentDir-Timed-Out": "true"} if timed_out else {}),
         },
     )
-    return int(exit_code)
+    return RunToolResult(
+        exit_code=int(exit_code),
+        session_id=session.session_id,
+        tool=tool,
+        duration_ms=duration_ms,
+        truncated_streams=tuple(truncated_streams),
+        timed_out=timed_out,
+        event_path=str(delivered.path),
+    )

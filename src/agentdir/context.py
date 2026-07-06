@@ -11,7 +11,8 @@ from uuid import uuid4
 from .artifacts import add_artifact, artifact_headers, artifact_path
 from .events import emit_event
 from .federation import search_federated_memory
-from .index import connect_index, rebuild_index
+from .fsutil import atomic_write_text
+from .index import connect_index, update_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_HYBRID, recent_session_summaries, search_memory
 from .query import query_messages
 from .review import evidence_rows, format_evidence, format_summary, summarize_session
@@ -56,7 +57,7 @@ def build_context_pack(
     retrieval_mode: str = RETRIEVAL_HYBRID,
     exclude_session_from_memory: bool = False,
 ) -> dict[str, Any]:
-    rebuild_index(root)
+    update_index(root)
     resolved_session = session_id
     if resolved_session is None:
         current = read_current_session(root)
@@ -303,7 +304,7 @@ def cite_context_sources(
 
 def audit_context_pack(root: str | Path, pack_id: str, *, rebuild: bool = True) -> dict[str, Any]:
     if rebuild:
-        rebuild_index(root)
+        update_index(root)
     manifest = read_context_manifest(root, pack_id, rebuild=False)
     events = _context_events(root, pack_id, rebuild=False)
     consumed = _unique_source_ids(
@@ -396,9 +397,9 @@ def write_context_pack(path: str | Path, pack: dict[str, Any], *, as_json: bool 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     if as_json:
-        target.write_text(json.dumps(pack, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_text(target, json.dumps(pack, indent=2, sort_keys=True) + "\n")
     else:
-        target.write_text(format_context_pack(pack), encoding="utf-8")
+        atomic_write_text(target, format_context_pack(pack))
     return target
 
 
@@ -565,7 +566,7 @@ def _context_events(
     rebuild: bool = True,
 ) -> list[dict[str, Any]]:
     if rebuild:
-        rebuild_index(root)
+        update_index(root)
     clauses = ["hp.name = ?", "hp.value = ?"]
     params: list[Any] = [HEADER_PACK_ID, pack_id]
     if event_type:

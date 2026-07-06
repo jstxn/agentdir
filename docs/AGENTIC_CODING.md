@@ -87,7 +87,7 @@ agentdir memory backend list
 agentdir memory daemon status
 ```
 
-`agentdir memory search` rebuilds the index by default, then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
+`agentdir memory search` incrementally updates the index by default (new and deleted envelopes only; pass `--no-rebuild` to skip even that), then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
 
 When retrieved context materially influences a plan, tool call, answer, or handoff,
 emit an auditable context pack:
@@ -158,6 +158,10 @@ agentdir run -- git diff --check
 `agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. AgentDir also redacts common secret-like patterns from emitted message bodies before persistence. Agents should use this automatically for commands they run as evidence.
 
 When captured output is truncated, `agentdir run` prints a warning to stderr and the stored `tool.result` carries an `X-AgentDir-Truncated` header. Downstream surfaces treat the evidence as partial: `evidence` marks the row `truncated=true`, `audit session` reports a `truncated_evidence` warning, and `audit claims` downgrades claims resting on truncated successful evidence from `supported` to `partial` (which fails `--strict`). Raise the limit with `--max-capture-bytes` when full output matters for a claim.
+
+`agentdir run` supports `--timeout <seconds>` (kills the command and records exit 124), `--session require|create|auto|<id>` to control session placement, and `--json` for a machine-readable run summary after the streamed output.
+
+Exit codes are structured for agents: 2 = user error, 3 = state error (no root or no active session — the error message names the recovery command), 4 = missing dependency, 5 = configuration error. With `--json`, failures also print `{"success": false, "exit_code": ..., "error": ..., "error_code": ...}` to stdout. Every command accepts `--quiet` for exit-code-only checks.
 
 Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks. Use plain shell commands while reading files, mapping code, or gathering low-level context. The evidence trail should capture verification, reproduced failures, important diagnostics, and final support for claims, not every glance at a file.
 

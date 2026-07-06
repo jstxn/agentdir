@@ -12,7 +12,8 @@ from threading import Event
 from typing import Any
 
 from .federation import rebuild_registered_roots
-from .index import rebuild_index
+from .fsutil import atomic_write_text
+from .index import update_index
 from .store import AgentDirError, init_root, paths_for, require_root
 
 DAEMON_STATE_FILE = "memory-daemon.json"
@@ -168,7 +169,7 @@ def _watch_loop(root: Path, *, group: str | None, interval: float) -> None:
 def _refresh(root: Path, *, group: str | None) -> None:
     state = _read_state(root)
     try:
-        result = rebuild_index(root)
+        result = update_index(root)
         roots = rebuild_registered_roots(root, group=group)
     except Exception as exc:
         state.update(
@@ -224,7 +225,7 @@ def _read_state(root: Path) -> dict[str, Any]:
 def _write_state(root: Path, state: dict[str, Any]) -> None:
     path = _state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def _state_path(root: Path) -> Path:

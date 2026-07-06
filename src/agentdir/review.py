@@ -4,7 +4,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .index import rebuild_index
+from .index import update_index
 from .query import query_messages
 from .sessions import require_current_session
 
@@ -40,7 +40,7 @@ def resolve_review_session(root: str | Path, session_id: str | None) -> str:
 
 
 def ensure_index(root: str | Path) -> None:
-    rebuild_index(root)
+    update_index(root)
 
 
 def summarize_session(root: str | Path, session_id: str | None = None, *, rebuild: bool = True) -> dict[str, Any]:

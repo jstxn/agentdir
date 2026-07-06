@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .git import git_root
-from .store import AgentDirError, init_root, paths_for
+from .store import AgentDirDependencyError, AgentDirError, init_root, paths_for
 
 MANAGED_SKILL_MARKER = "<!-- agentdir-managed-skill -->"
 GENERIC_GUIDANCE_START = "<!-- agentdir-managed-generic:start -->"
@@ -216,7 +216,7 @@ def codex_skill_path(root: str | Path, *, target: str, cwd: str | Path | None = 
     if target == "project":
         project = git_root(cwd)
         if project is None:
-            raise AgentDirError("Project skill target requires a git repository")
+            raise AgentDirDependencyError("Project skill target requires a git repository")
         return project / ".agents" / "skills" / "agentdir" / "SKILL.md"
     raise AgentDirError("Unknown Codex skill target; expected user, project, or store")
 
@@ -228,7 +228,7 @@ def generic_guidance_path(root: str | Path, *, target: str, cwd: str | Path | No
     if target == "project":
         project = git_root(cwd)
         if project is None:
-            raise AgentDirError("Project generic guidance target requires a git repository")
+            raise AgentDirDependencyError("Project generic guidance target requires a git repository")
         return project / "AGENTS.md"
     raise AgentDirError("Unknown generic guidance target; expected project or store")
 
@@ -457,7 +457,7 @@ def integration_path(
         return paths_for(root).integrations / name / filename
     project = git_root(cwd)
     if project is None:
-        raise AgentDirError("Project integration target requires a git repository")
+        raise AgentDirDependencyError("Project integration target requires a git repository")
     return project / _project_integration_relative_path(name)
 
 
@@ -541,7 +541,7 @@ def codex_skill_path_no_create(
     if target == "project":
         project = git_root(cwd)
         if project is None:
-            raise AgentDirError("Project skill target requires a git repository")
+            raise AgentDirDependencyError("Project skill target requires a git repository")
         return project / ".agents" / "skills" / "agentdir" / "SKILL.md"
     raise AgentDirError("Unknown Codex skill target; expected user, project, or store")
 
@@ -560,7 +560,7 @@ def generic_guidance_path_no_create(
     if target == "project":
         project = git_root(cwd)
         if project is None:
-            raise AgentDirError("Project generic guidance target requires a git repository")
+            raise AgentDirDependencyError("Project generic guidance target requires a git repository")
         return project / "AGENTS.md"
     raise AgentDirError("Unknown generic guidance target; expected project or store")
 

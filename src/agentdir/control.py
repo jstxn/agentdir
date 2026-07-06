@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from .doctor import run_doctor
 from .events import emit_event
 from .federation import doctor_registered_roots, list_registered_roots, list_root_groups
 from .git import git_branch, git_head, git_status_short, workspace_name
-from .index import rebuild_index
+from .index import update_index
 from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_HYBRID, memory_stats
 from .query import query_messages
 from .review import evidence_brief, evidence_rows, format_evidence, format_summary, summarize_session
@@ -89,7 +90,7 @@ def build_status(
         return status
 
     if rebuild:
-        rebuild_index(paths.root)
+        update_index(paths.root)
 
     current = read_current_session(paths.root)
     summary: dict[str, Any] | None = None
@@ -324,7 +325,7 @@ def build_final_report(
 ) -> dict[str, Any]:
     paths = require_root(root)
     session = _resolve_session(paths.root, session_id)
-    rebuild_index(paths.root)
+    update_index(paths.root)
     summary = summarize_session(paths.root, session.session_id, rebuild=False)
     evidence = evidence_rows(paths.root, session.session_id, rebuild=False)
     latest_pack = latest_context_pack(paths.root, session.session_id, rebuild=False)
@@ -631,7 +632,7 @@ def latest_context_pack(
     rebuild: bool = True,
 ) -> dict[str, Any] | None:
     if rebuild:
-        rebuild_index(root)
+        update_index(root)
     rows = query_messages(
         root,
         session_id=session_id,
@@ -672,9 +673,11 @@ def _resolve_session(root: str | Path, session_id: str | None) -> SessionState:
 
 
 def _safe_memory_stats(root: str | Path) -> dict[str, Any]:
+    # Status must stay usable when the index is absent or stale; anything
+    # beyond expected index errors should propagate as a real bug.
     try:
         stats = memory_stats(root)
-    except Exception as exc:
+    except (AgentDirError, sqlite3.Error, OSError) as exc:
         return {"indexed": False, "error": str(exc)}
     return {"indexed": True, **stats}
 
