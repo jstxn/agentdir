@@ -7,7 +7,7 @@ from typing import Any
 from .context import audit_context_pack
 from .doctor import run_doctor
 from .git import git_status_short
-from .review import EVIDENCE_FAMILIES, evidence_rows, summarize_session
+from .review import EVIDENCE_FAMILIES, evidence_rows, evidence_truncated, summarize_session
 from .sessions import read_current_session
 from .store import AgentDirError
 
@@ -18,9 +18,10 @@ CHECK_NOT_APPLICABLE = "not_applicable"
 CHECK_STATUSES = (CHECK_PASS, CHECK_WARN, CHECK_FAIL, CHECK_NOT_APPLICABLE)
 
 CLAIM_SUPPORTED = "supported"
+CLAIM_PARTIAL = "partial"
 CLAIM_UNSUPPORTED = "unsupported"
 CLAIM_CONTRADICTED = "contradicted"
-CLAIM_STATUSES = (CLAIM_SUPPORTED, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED)
+CLAIM_STATUSES = (CLAIM_SUPPORTED, CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED)
 
 CLAIM_FAMILIES = tuple(family for family in EVIDENCE_FAMILIES if family != "diagnostic")
 
@@ -84,6 +85,11 @@ def audit_session(
     current = read_current_session(root)
     is_current = bool(current and current.session_id == resolved and current.status == "active")
     failed_evidence = [row for row in evidence if row.get("event_type") == "tool.result" and row.get("tool_exit_code") not in (None, 0)]
+    truncated_evidence = [
+        row
+        for row in evidence
+        if (row.get("truncated") if "truncated" in row else evidence_truncated(row))
+    ]
     dirty_status = git_status_short(root)
     checks = [
         _check(
@@ -107,6 +113,13 @@ def audit_session(
             "failed_tool_results",
             CHECK_FAIL if failed_evidence else CHECK_PASS,
             f"{len(failed_evidence)} failed tool result(s)" if failed_evidence else "no failed tool results",
+        ),
+        _check(
+            "truncated_evidence",
+            CHECK_WARN if truncated_evidence else CHECK_PASS,
+            f"{len(truncated_evidence)} tool result(s) with truncated output; evidence may be incomplete"
+            if truncated_evidence
+            else "no truncated tool output",
         ),
         _check(
             "context_pack_created",
@@ -155,8 +168,15 @@ def audit_claims(
             status = CLAIM_UNSUPPORTED
             message = f"no {family} evidence found"
         elif evidence.get("tool_exit_code") == 0:
-            status = CLAIM_SUPPORTED
-            message = f"latest {family} evidence succeeded"
+            if evidence.get("truncated") if "truncated" in evidence else evidence_truncated(evidence):
+                status = CLAIM_PARTIAL
+                message = (
+                    f"latest {family} evidence succeeded but its captured output was truncated; "
+                    "evidence may be incomplete"
+                )
+            else:
+                status = CLAIM_SUPPORTED
+                message = f"latest {family} evidence succeeded"
         else:
             status = CLAIM_CONTRADICTED
             message = f"latest {family} evidence failed with exit {evidence.get('tool_exit_code')}"
@@ -210,7 +230,7 @@ def claims_audit_gaps(audit: dict[str, Any] | None) -> list[str]:
         return []
     gaps: list[str] = []
     for claim in audit.get("claims") or []:
-        if claim.get("status") in {CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED}:
+        if claim.get("status") in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED}:
             gaps.append(f"{claim['family']}: {claim['message']}")
     return gaps
 
@@ -220,7 +240,7 @@ def strict_session_exit_code(audit: dict[str, Any]) -> int:
 
 
 def strict_claims_exit_code(audit: dict[str, Any]) -> int:
-    return 1 if any(claim["status"] in {CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in audit.get("claims") or []) else 0
+    return 1 if any(claim["status"] in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in audit.get("claims") or []) else 0
 
 
 def _check(
@@ -336,4 +356,5 @@ def _evidence_ref(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "subject": row.get("subject"),
         "file_path": row.get("file_path"),
         "date_utc": row.get("date_utc"),
+        "truncated": row.get("truncated") if "truncated" in row else evidence_truncated(row),
     }

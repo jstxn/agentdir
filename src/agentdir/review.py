@@ -88,6 +88,7 @@ def evidence_rows(root: str | Path, session_id: str | None = None, *, rebuild: b
     for row in evidence:
         row["family"] = classify_evidence(row)
         row["failed"] = evidence_failed(row)
+        row["truncated"] = evidence_truncated(row)
     return evidence
 
 
@@ -114,6 +115,19 @@ def evidence_failed(row: dict[str, Any]) -> bool:
     return row.get("event_type") == "tool.result" and row.get("tool_exit_code") not in (None, 0)
 
 
+def evidence_truncated(row: dict[str, Any]) -> bool:
+    if row.get("event_type") != "tool.result":
+        return False
+    # Only trust the structured prelude that run_tool writes before the
+    # "stdout:" marker; captured tool output cannot spoof these lines.
+    for line in str(row.get("body_text") or "").splitlines():
+        if line == "stdout:":
+            break
+        if line in ("stdout_truncated=true", "stderr_truncated=true"):
+            return True
+    return False
+
+
 def evidence_ref(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_type": row.get("event_type"),
@@ -124,6 +138,7 @@ def evidence_ref(row: dict[str, Any]) -> dict[str, Any]:
         "date": row.get("date_header") or row.get("date_utc") or row.get("indexed_at"),
         "path": row.get("file_path"),
         "failed": row.get("failed") if "failed" in row else evidence_failed(row),
+        "truncated": row.get("truncated") if "truncated" in row else evidence_truncated(row),
     }
 
 
@@ -267,7 +282,8 @@ def format_evidence(rows: list[dict[str, Any]]) -> str:
         family = row.get("family") or classify_evidence(row)
         detail = f" exit={exit_code}" if exit_code is not None else ""
         family_detail = f" family={family}" if family else ""
-        lines.append(f"{date} {event_type} {tool}{detail}{family_detail} {subject} [{file_path}]")
+        truncated_detail = " truncated=true" if (row.get("truncated") if "truncated" in row else evidence_truncated(row)) else ""
+        lines.append(f"{date} {event_type} {tool}{detail}{family_detail}{truncated_detail} {subject} [{file_path}]")
     return "\n".join(lines)
 
 
@@ -285,4 +301,5 @@ def _format_evidence_ref(item: dict[str, Any], *, prefix: str = "- ") -> str:
     date = item.get("date") or "unknown-date"
     exit_text = f" exit={exit_code}" if exit_code is not None else ""
     failed = " failed=true" if item.get("failed") else ""
-    return f"{prefix}{date} {item.get('event_type') or 'unknown'} {tool}{exit_text}{failed} {subject}".rstrip()
+    truncated = " truncated=true" if item.get("truncated") else ""
+    return f"{prefix}{date} {item.get('event_type') or 'unknown'} {tool}{exit_text}{failed}{truncated} {subject}".rstrip()

@@ -143,6 +143,19 @@ def run_tool(
     stderr_thread.join()
     duration_ms = int((time.monotonic() - started) * 1000)
 
+    truncated_streams = [
+        name
+        for name, capture in (("stdout", stdout_capture), ("stderr", stderr_capture))
+        if capture.truncated
+    ]
+    if truncated_streams:
+        sys.stderr.write(
+            f"agentdir: warning: captured {'+'.join(truncated_streams)} truncated at "
+            f"{max_capture_bytes} bytes; recorded evidence is partial "
+            "(use --max-capture-bytes to raise the limit)\n"
+        )
+        sys.stderr.flush()
+
     stored_stdout = redact_text(stdout_capture.text) if redact else None
     stored_stderr = redact_text(stderr_capture.text) if redact else None
     stdout_text = stored_stdout.text if stored_stdout else stdout_capture.text
@@ -182,6 +195,7 @@ def run_tool(
         extra_headers={
             "X-AgentDir-Duration-Ms": str(duration_ms),
             "X-AgentDir-Redactions": str(redactions),
+            **({"X-AgentDir-Truncated": ",".join(truncated_streams)} if truncated_streams else {}),
         },
     )
     return int(exit_code)

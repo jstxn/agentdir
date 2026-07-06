@@ -157,6 +157,8 @@ agentdir run -- git diff --check
 
 `agentdir run` streams command output to the terminal and records both the call and the result. Stored output is truncated at a bounded size and common secret-like patterns are redacted in the stored envelope. AgentDir also redacts common secret-like patterns from emitted message bodies before persistence. Agents should use this automatically for commands they run as evidence.
 
+When captured output is truncated, `agentdir run` prints a warning to stderr and the stored `tool.result` carries an `X-AgentDir-Truncated` header. Downstream surfaces treat the evidence as partial: `evidence` marks the row `truncated=true`, `audit session` reports a `truncated_evidence` warning, and `audit claims` downgrades claims resting on truncated successful evidence from `supported` to `partial` (which fails `--strict`). Raise the limit with `--max-capture-bytes` when full output matters for a claim.
+
 Do not wrap routine exploration commands such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status` checks. Use plain shell commands while reading files, mapping code, or gathering low-level context. The evidence trail should capture verification, reproduced failures, important diagnostics, and final support for claims, not every glance at a file.
 
 ## Capturing Diffs As Artifacts
