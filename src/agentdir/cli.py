@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -75,7 +76,7 @@ from .review import (
     summarize_session,
     timeline_rows,
 )
-from .sessions import end_session, ensure_session, read_current_session, start_session
+from .sessions import end_session, ensure_session, read_current_session, require_current_session, start_session
 from .rendering import rich_doctor
 from .secrets import (
     format_secret_findings,
@@ -95,7 +96,7 @@ from .skills import (
     integration_plan,
     uninstall_integrations,
 )
-from .store import AgentDirError, init_root, resolve_root
+from .store import AgentDirDependencyError, AgentDirError, init_root, resolve_root
 from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, upgrade_exit_code
 
 
@@ -294,7 +295,7 @@ def hooks_uninstall_plan(hooks: list[str] | None = None) -> list[dict[str, objec
 def git_hooks_dir_no_create() -> Path:
     git_dir = git_output(["rev-parse", "--git-dir"])
     if not git_dir:
-        raise AgentDirError("AgentDir hooks require a git repository")
+        raise AgentDirDependencyError("AgentDir hooks require a git repository")
     path = Path(git_dir)
     if not path.is_absolute():
         root = git_output(["rev-parse", "--show-toplevel"])
@@ -349,14 +350,26 @@ def cmd_emit(args: argparse.Namespace) -> int:
         artifact=args.artifact,
         message_id=args.message_id,
     )
-    print(delivered.path)
+    if args.json:
+        print_json(
+            {
+                "path": str(delivered.path),
+                "session_id": delivered.session_id,
+                "event_type": delivered.event_type,
+            }
+        )
+    else:
+        print(delivered.path)
     return 0
 
 
 def cmd_actor_create(args: argparse.Namespace) -> int:
     inbox, outbox = create_actor(command_root(args, create=True), args.actor_id)
-    print(f"inbox={inbox}")
-    print(f"outbox={outbox}")
+    if args.json:
+        print_json({"actor_id": args.actor_id, "inbox": str(inbox), "outbox": str(outbox)})
+    else:
+        print(f"inbox={inbox}")
+        print(f"outbox={outbox}")
     return 0
 
 
@@ -374,8 +387,19 @@ def cmd_send(args: argparse.Namespace) -> int:
         task_id=args.task,
         message_id=args.message_id,
     )
-    print(f"inbox={inbox}")
-    print(f"outbox={outbox}")
+    if args.json:
+        print_json(
+            {
+                "from": args.from_actor,
+                "to": args.to_actor,
+                "event_type": args.type,
+                "inbox": str(inbox),
+                "outbox": str(outbox),
+            }
+        )
+    else:
+        print(f"inbox={inbox}")
+        print(f"outbox={outbox}")
     return 0
 
 
@@ -539,7 +563,7 @@ def cmd_query(args: argparse.Namespace) -> int:
     if args.semantic and args.text:
         raise AgentDirError("Use either --text for literal search or --semantic for vector memory search")
     if args.semantic:
-        rebuild_index(root)
+        update_index(root)
         search = search_federated_memory if args.federated else search_memory
         rows = search(
             root,
@@ -590,7 +614,26 @@ def cmd_query(args: argparse.Namespace) -> int:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    for line in replay_session(command_root(args), args.session):
+    root = command_root(args)
+    update_index(root)
+    if args.json:
+        rows = query_messages(root, session_id=args.session, limit=10_000)
+        print_json(
+            [
+                {
+                    "date": row.get("date_header") or row.get("indexed_at"),
+                    "event_type": row.get("event_type"),
+                    "subject": row.get("subject"),
+                    "tool": row.get("tool"),
+                    "tool_exit_code": row.get("tool_exit_code"),
+                    "body_text": row.get("body_text"),
+                    "file_path": row.get("file_path"),
+                }
+                for row in rows
+            ]
+        )
+        return 0
+    for line in replay_session(root, args.session):
         print(line)
     return 0
 
@@ -708,15 +751,40 @@ def cmd_run(args: argparse.Namespace) -> int:
         command = command[1:]
     if not command:
         raise AgentDirError("Usage: agentdir run -- <command> [args...]")
-    return run_tool(
-        command_root(args, create=True),
+    root = command_root(args, create=True)
+    session_mode = args.session or "auto"
+    session_id: str | None
+    if session_mode == "auto":
+        session_id = None
+    elif session_mode == "require":
+        session_id = require_current_session(root).session_id
+    elif session_mode == "create":
+        session_id = start_session(root, title=f"AgentDir run: {command[0]}").session_id
+    else:
+        session_id = session_mode
+    result = run_tool(
+        root,
         argv=command,
-        session_id=args.session,
+        session_id=session_id,
         tool_name=args.name,
         cwd=args.cwd,
         max_capture_bytes=args.max_capture_bytes,
         redact=not args.no_redact,
+        timeout=args.timeout,
     )
+    if args.json:
+        print_json(
+            {
+                "exit_code": result.exit_code,
+                "session_id": result.session_id,
+                "tool": result.tool,
+                "duration_ms": result.duration_ms,
+                "truncated_streams": list(result.truncated_streams),
+                "timed_out": result.timed_out,
+                "event_path": result.event_path,
+            }
+        )
+    return result.exit_code
 
 
 def cmd_hooks_install(args: argparse.Namespace) -> int:
@@ -765,6 +833,14 @@ def cmd_hooks_record(args: argparse.Namespace) -> int:
         stdin_file=args.stdin_file,
         hook_args=hook_args,
     )
+    if args.json:
+        print_json(
+            {
+                "recorded": True,
+                "hook": args.hook,
+                "original_exit_code": args.original_exit_code,
+            }
+        )
     return 0
 
 
@@ -1036,7 +1112,7 @@ def cmd_integrations_doctor(args: argparse.Namespace) -> int:
 def cmd_memory_search(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
-        rebuild_index(root)
+        update_index(root)
     search_kwargs = {
         "session_id": args.session,
         "event_type": args.type,
@@ -1068,7 +1144,7 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
 def cmd_memory_explain(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
-        rebuild_index(root)
+        update_index(root)
     explanation = explain_memory_match(
         root,
         args.query,
@@ -1085,7 +1161,7 @@ def cmd_memory_explain(args: argparse.Namespace) -> int:
 def cmd_memory_stats(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
-        rebuild_index(root)
+        update_index(root)
     stats = memory_stats(root)
     if args.json:
         print_json(stats)
@@ -1105,7 +1181,7 @@ def cmd_memory_stats(args: argparse.Namespace) -> int:
 def cmd_memory_backend_list(args: argparse.Namespace) -> int:
     root = command_root(args)
     if not args.no_rebuild:
-        rebuild_index(root)
+        update_index(root)
     status = memory_backend_status(root)
     if args.json:
         print_json(status)
@@ -1122,7 +1198,7 @@ def cmd_memory_backend_list(args: argparse.Namespace) -> int:
 
 def cmd_memory_backend_configure(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
-    rebuild_index(root)
+    update_index(root)
     status = configure_vector_backend(root, args.backend)
     if args.json:
         print_json(status)
@@ -1134,7 +1210,7 @@ def cmd_memory_backend_configure(args: argparse.Namespace) -> int:
 
 def cmd_memory_embeddings_configure(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
-    rebuild_index(root)
+    update_index(root)
     status = configure_embeddings(root, args.provider, model=args.model)
     if args.json:
         print_json(status)
@@ -1148,7 +1224,7 @@ def cmd_memory_embeddings_configure(args: argparse.Namespace) -> int:
 
 def cmd_memory_team_configure(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
-    rebuild_index(root)
+    update_index(root)
     status = configure_team_backend(root, args.backend)
     if args.json:
         print_json(status)
@@ -1302,7 +1378,10 @@ def cmd_context_cite(args: argparse.Namespace) -> int:
         session_id=args.session,
         actor=args.actor,
     )
-    print(citation["rendered"], end="")
+    if args.json:
+        print_json(citation)
+    else:
+        print(citation["rendered"], end="")
     return 0
 
 
@@ -1388,6 +1467,7 @@ def build_parser() -> argparse.ArgumentParser:
     emit.add_argument("--parent")
     emit.add_argument("--artifact")
     emit.add_argument("--message-id")
+    emit.add_argument("--json", action="store_true")
     emit.set_defaults(func=cmd_emit)
 
     session = sub.add_parser("session")
@@ -1424,6 +1504,7 @@ def build_parser() -> argparse.ArgumentParser:
     actor_create = actor_sub.add_parser("create")
     add_scope_args(actor_create)
     actor_create.add_argument("actor_id")
+    actor_create.add_argument("--json", action="store_true")
     actor_create.set_defaults(func=cmd_actor_create)
 
     send = sub.add_parser("send")
@@ -1436,6 +1517,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--session")
     send.add_argument("--task")
     send.add_argument("--message-id")
+    send.add_argument("--json", action="store_true")
     send.set_defaults(func=cmd_send)
 
     artifact = sub.add_parser("artifact")
@@ -1557,6 +1639,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay = sub.add_parser("replay")
     add_scope_args(replay)
     replay.add_argument("--session", required=True)
+    replay.add_argument("--json", action="store_true")
     replay.set_defaults(func=cmd_replay)
 
     doctor = sub.add_parser("doctor")
@@ -1578,11 +1661,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run")
     add_scope_args(run)
-    run.add_argument("--session")
+    run.add_argument(
+        "--session",
+        help="session mode: auto (default), require, create, or an explicit session id",
+    )
     run.add_argument("--name")
     run.add_argument("--cwd")
     run.add_argument("--max-capture-bytes", type=int, default=DEFAULT_MAX_CAPTURE_BYTES)
     run.add_argument("--no-redact", action="store_true")
+    run.add_argument("--timeout", type=float, help="kill the command after this many seconds (exit 124)")
+    run.add_argument("--json", action="store_true", help="print a JSON run summary after the command output")
     run.add_argument("command", nargs=argparse.REMAINDER)
     run.set_defaults(func=cmd_run)
 
@@ -1607,6 +1695,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_record.add_argument("--hook", required=True)
     hooks_record.add_argument("--original-exit-code", type=int, required=True)
     hooks_record.add_argument("--stdin-file")
+    hooks_record.add_argument("--json", action="store_true")
     hooks_record.add_argument("hook_args", nargs=argparse.REMAINDER)
     hooks_record.set_defaults(func=cmd_hooks_record)
 
@@ -1854,6 +1943,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_cite.add_argument("--format", choices=("md", "json"), default="md")
     context_cite.add_argument("--session")
     context_cite.add_argument("--actor", default="agent")
+    context_cite.add_argument("--json", action="store_true")
     context_cite.set_defaults(func=cmd_context_cite)
 
     audit = sub.add_parser("audit")
@@ -1883,11 +1973,19 @@ def build_parser() -> argparse.ArgumentParser:
 def add_scope_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", dest="root_option")
     parser.add_argument("--scope", choices=("project", "user", "global", "machine"))
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress stdout; use the exit code (errors and --json still print)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    wants_json = bool(getattr(args, "json", False) or getattr(args, "upgrade_json", False))
+    if getattr(args, "quiet", False) and not wants_json:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
     try:
         if args.upgrade:
             return int(cmd_upgrade(args))
@@ -1896,5 +1994,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return int(args.func(args))
     except AgentDirError as exc:
+        exit_code = getattr(exc, "exit_code", 2)
+        if wants_json:
+            print_json(
+                {
+                    "success": False,
+                    "exit_code": exit_code,
+                    "error": str(exc),
+                    "error_code": type(exc).__name__,
+                    "data": None,
+                }
+            )
         print(f"agentdir: {exc}", file=sys.stderr)
-        return 2
+        return int(exit_code)

@@ -7,8 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .events import emit_event
+from .fsutil import atomic_write_text
 from .git import git_head, workspace_name
-from .store import AgentDirError, init_root, paths_for, validate_id
+from .store import AgentDirStateError, init_root, paths_for, validate_id
 
 
 @dataclass
@@ -50,7 +51,7 @@ def last_session_path(root: str | Path) -> Path:
 def write_session_state(root: str | Path, state: SessionState) -> None:
     paths = init_root(root)
     paths.state.mkdir(parents=True, exist_ok=True)
-    current_session_path(root).write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(current_session_path(root), json.dumps(asdict(state), indent=2) + "\n")
 
 
 def read_current_session(root: str | Path) -> SessionState | None:
@@ -64,7 +65,11 @@ def read_current_session(root: str | Path) -> SessionState | None:
 def require_current_session(root: str | Path) -> SessionState:
     state = read_current_session(root)
     if state is None or state.status != "active":
-        raise AgentDirError("No active AgentDir session; run: agentdir session ensure")
+        raise AgentDirStateError(
+            "No active AgentDir session. "
+            "Run 'agentdir work start \"<task>\"' to begin one, "
+            "or 'agentdir session ensure' for a bare session."
+        )
     return state
 
 
@@ -163,7 +168,7 @@ def end_session(
         git_head=git_head(),
     )
     paths = init_root(root)
-    last_session_path(root).write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(last_session_path(root), json.dumps(asdict(state), indent=2) + "\n")
     current = current_session_path(root)
     if current.exists():
         current.unlink()

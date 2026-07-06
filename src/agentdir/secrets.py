@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .envelope import envelope_bytes, parse_envelope
+from .fsutil import atomic_write_bytes
 from .index import rebuild_index
-from .mailbox import fsync_directory, iter_records
+from .mailbox import iter_records
 from .redaction import redact_text, secret_labels
 from .store import is_mailbox, require_root
 
@@ -137,22 +137,4 @@ def _replace_header(message: Any, name: str, value: str) -> None:
 
 
 def _atomic_replace(path: Path, data: bytes) -> None:
-    temp = path.with_name(f".{path.name}.agentdir-redact-tmp")
-    if temp.exists():
-        temp.unlink()
-    mode = path.stat().st_mode
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp, mode)
-        os.replace(temp, path)
-        fsync_directory(path.parent)
-    except Exception:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    atomic_write_bytes(path, data)

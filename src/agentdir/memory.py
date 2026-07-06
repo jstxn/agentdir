@@ -211,7 +211,10 @@ def index_memory_document(
     )
 
 
-def index_session_summaries(conn: sqlite3.Connection) -> None:
+def index_session_summaries(
+    conn: sqlite3.Connection,
+    only_sessions: set[str] | None = None,
+) -> None:
     sessions = conn.execute(
         """
         select session_id
@@ -223,6 +226,8 @@ def index_session_summaries(conn: sqlite3.Connection) -> None:
     ).fetchall()
     for session in sessions:
         session_id = session["session_id"]
+        if only_sessions is not None and session_id not in only_sessions:
+            continue
         rows = conn.execute(
             """
             select *

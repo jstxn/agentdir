@@ -17,7 +17,27 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
 
 
 class AgentDirError(Exception):
-    """Base exception for user-facing AgentDir failures."""
+    """Base exception for user-facing AgentDir failures (exit code 2)."""
+
+    exit_code = 2
+
+
+class AgentDirStateError(AgentDirError):
+    """Missing state the command needs: no root, no active session (exit code 3)."""
+
+    exit_code = 3
+
+
+class AgentDirDependencyError(AgentDirError):
+    """A required external dependency is unavailable, e.g. git (exit code 4)."""
+
+    exit_code = 4
+
+
+class AgentDirConfigError(AgentDirError):
+    """The store or configuration is present but unusable (exit code 5)."""
+
+    exit_code = 5
 
 
 @dataclass(frozen=True)
@@ -202,8 +222,9 @@ def init_root(root: str | Path) -> RootPaths:
     if version_path.exists():
         current = version_path.read_text(encoding="utf-8").strip()
         if current != STORE_VERSION:
-            raise AgentDirError(
-                f"Unsupported AgentDir root version {current!r}; expected {STORE_VERSION}"
+            raise AgentDirConfigError(
+                f"Unsupported AgentDir root version {current!r}; expected {STORE_VERSION}. "
+                "Upgrade AgentDir or rebuild the store from its envelopes."
             )
     else:
         version_path.write_text(f"{STORE_VERSION}\n", encoding="utf-8")
@@ -218,7 +239,11 @@ def init_root(root: str | Path) -> RootPaths:
 def require_root(root: str | Path) -> RootPaths:
     paths = paths_for(root)
     if not (paths.meta / "VERSION").is_file():
-        raise AgentDirError(f"Not an AgentDir root: {paths.root}")
+        raise AgentDirStateError(
+            f"Not an AgentDir root: {paths.root}. "
+            "Run 'agentdir adopt' for one-time repository setup, "
+            "or 'agentdir init' to create an empty store."
+        )
     return paths
 
 

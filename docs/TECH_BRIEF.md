@@ -411,7 +411,7 @@ agentdir session ensure [--id <id>] [--title <title>]
 agentdir session start [--id <id>] [--title <title>]
 agentdir session current
 agentdir session end [--summary <file-or-text>]
-agentdir run [--session <id>] [--name <tool>] -- <command> [args...]
+agentdir run [--session auto|require|create|<id>] [--name <tool>] [--timeout <seconds>] [--json] -- <command> [args...]
 agentdir emit [--root <root>] [--scope <scope>] [--session <id>] --type <type> --body <file>
 agentdir actor create [--root <root>] [--scope <scope>] <actor-id>
 agentdir send [--root <root>] [--scope <scope>] --from <actor> --to <actor> --type <type> --body <file>
@@ -486,6 +486,26 @@ The memory daemon is an opt-in warm indexer. It records process state under
 `state/memory-daemon.json`, rebuilds the local index and selected registered
 roots, and can use `watchfiles` when that extra is installed. Commands remain
 correct without the daemon because the index is still rebuildable on demand.
+
+## Exit Codes
+
+`agentdir` commands use a small exit-code taxonomy so agents can branch on
+failure class without parsing stderr:
+
+```text
+0  success
+1  command-specific failure result (doctor unhealthy, strict audit violations,
+   secrets found); agentdir run passes through the wrapped command's exit code,
+   with 124 reserved for --timeout kills
+2  user error: bad arguments or flags
+3  state error: not an AgentDir root, or no active session
+4  missing dependency: e.g. git repository required
+5  configuration error: unsupported store version, corrupted config
+```
+
+With `--json`, failures also print a structured error envelope to stdout:
+`{"success": false, "exit_code": <n>, "error": "...", "error_code": "<class>", "data": null}`.
+All commands accept `--quiet` to suppress stdout for exit-code-only checks.
 
 ## 14. Implementation Recommendation
 

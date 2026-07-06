@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .fsutil import fsync_directory
 from .store import AgentDirError, ensure_mailbox
 
 _SEQUENCE = 0
@@ -32,19 +33,6 @@ def unique_basename() -> str:
     if "/" in basename or ":" in basename or basename.startswith("."):
         raise AgentDirError("Generated unsafe Maildir basename")
     return basename
-
-
-def fsync_directory(path: Path) -> None:
-    if not hasattr(os, "O_DIRECTORY"):
-        return
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def atomic_deliver(mailbox: Path, data: bytes, basename: str | None = None) -> Path:

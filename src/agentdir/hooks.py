@@ -9,7 +9,7 @@ from pathlib import Path
 from .events import emit_event
 from .git import git_branch, git_head, git_output, git_status_short
 from .sessions import end_session, read_current_session, start_session
-from .store import AgentDirError, init_root
+from .store import AgentDirDependencyError, AgentDirError, init_root
 
 DEFAULT_HOOKS = ("pre-commit", "post-commit", "pre-push", "post-checkout", "post-merge")
 MANAGED_MARKER = "# AgentDir managed hook"
@@ -27,7 +27,7 @@ class HookInfo:
 def git_hooks_dir(cwd: str | Path | None = None) -> Path:
     git_dir = git_output(["rev-parse", "--git-dir"], cwd)
     if not git_dir:
-        raise AgentDirError("AgentDir hooks require a git repository")
+        raise AgentDirDependencyError("AgentDir hooks require a git repository")
     path = Path(git_dir)
     if not path.is_absolute():
         root = git_output(["rev-parse", "--show-toplevel"], cwd)
