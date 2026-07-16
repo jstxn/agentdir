@@ -282,8 +282,10 @@ rulesync source instead:
 
 Run `rulesync generate` afterwards to propagate it into every generated tool
 file; it now survives regeneration. The skipped generated files are listed in
-the adopt output. To force the classic behavior and write tool files directly,
-use `agentdir adopt --install-integrations project-files`.
+the adopt output. To select the classic project-file destinations, use
+`agentdir adopt --install-integrations project-files`. Existing files with
+generated headers remain protected; add `--force` only when you intentionally
+want to edit those files directly.
 
 Independent of rulesync, adoption refuses to insert managed blocks into any
 existing file whose header marks it as generated (`DO NOT EDIT`,

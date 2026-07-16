@@ -145,6 +145,9 @@ def install_codex_skill(
     backup_path: Path | None = None
     if destination.exists() and not force:
         existing = destination.read_text(encoding="utf-8", errors="ignore")
+        marker = generated_file_marker(existing)
+        if marker:
+            return InstalledSkill(path=destination, target=target, skipped=f"generated file ({marker})")
         if existing != CODEX_SKILL:
             if not is_agentdir_managed_skill(existing):
                 raise AgentDirError(f"Refusing to overwrite existing Codex skill: {destination}")
@@ -173,7 +176,7 @@ def install_generic_guidance(
     backup_path: Path | None = None
     if target == "project":
         existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
-        if existing and not force and not is_agentdir_managed_generic(existing):
+        if existing and not force:
             marker = generated_file_marker(existing)
             if marker:
                 return InstalledSkill(path=destination, target=target, skipped=f"generated file ({marker})")
@@ -404,6 +407,8 @@ def integration_state(
                     "message": f"Codex skill is installed at {effective['target']} target",
                 }
         state = "missing"
+    elif generated_file_marker(existing):
+        state = "generated"
     elif name == "codex":
         state = "installed" if existing == CODEX_SKILL else "stale" if managed else "conflict"
     elif _can_merge_guidance(name, target):
@@ -412,16 +417,12 @@ def integration_state(
             state = "installed"
         elif managed:
             state = "stale"
-        elif generated_file_marker(existing):
-            state = "generated"
         else:
             state = "missing"
     elif existing == expected:
         state = "installed"
     elif managed:
         state = "stale"
-    elif generated_file_marker(existing):
-        state = "generated"
     else:
         state = "conflict"
     return {
@@ -602,7 +603,7 @@ def _install_guidance_integration(
     existing = destination.read_text(encoding="utf-8", errors="ignore") if destination.exists() else ""
     updated = existing != expected
     backup_path: Path | None = None
-    if existing and not force and not _integration_managed(name, existing):
+    if existing and not force:
         marker = generated_file_marker(existing)
         if marker:
             return {

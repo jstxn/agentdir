@@ -59,6 +59,7 @@ from .gitignore import GITIGNORE_CHOICES, ensure_agentdir_ignored, gitignore_pla
 from .hooks import (
     DEFAULT_HOOKS,
     MANAGED_MARKER,
+    can_refresh_manager_hook_backup,
     hook_status,
     install_hooks,
     record_hook_event,
@@ -99,6 +100,7 @@ from .secrets import (
 from .skills import (
     BROAD_PROJECT_INTEGRATIONS,
     INTEGRATION_NAMES,
+    InstalledSkill,
     codex_skill_path_no_create,
     generic_guidance_path_no_create,
     install_codex_skill,
@@ -206,7 +208,8 @@ def resolve_setup_selection(
     In rulesync repos the generated tool files (CLAUDE.md, AGENTS.md,
     .cursor/rules, ...) are regenerated from .rulesync/ and would silently lose
     managed blocks, so the default target becomes the rulesync source rule.
-    ``--install-integrations project-files`` restores the classic behavior.
+    ``--install-integrations project-files`` restores project-file selection;
+    generated-header files still require ``--force`` before they are edited.
     """
     mode = getattr(args, "install_integrations", "all")
     integration_target = getattr(args, "integration_target", "project")
@@ -242,7 +245,8 @@ def resolve_setup_selection(
     elif rulesync and mode == "project-files":
         warnings.append(
             "rulesync detected but --install-integrations project-files was given: managed blocks in "
-            "generated files will be wiped by the next 'rulesync generate'."
+            "generated files will be wiped by the next 'rulesync generate'. Files with a generated "
+            "header remain protected unless --force is also given."
         )
 
     install_legacy_generic = install_generic != "none" and not (
@@ -318,18 +322,31 @@ def selected_gitignore_target(args: argparse.Namespace) -> str:
 def print_setup_notices(
     *,
     integrations: list[dict[str, object]],
-    generic: object,
+    skill: InstalledSkill | None,
+    generic: InstalledSkill | None,
     selection: dict[str, object],
 ) -> None:
     for item in integrations:
         if item.get("skipped"):
             print(f"skipped {item['name']}: {item['skipped']}")
-    if generic is not None and getattr(generic, "skipped", None):
+    if skill and skill.skipped:
+        print(f"skipped codex skill: {skill.skipped}")
+    if generic and generic.skipped:
         print(f"skipped generic: {generic.skipped}")
     for adjustment in selection.get("adjustments") or []:
         print(f"skipped {adjustment['name']}: {adjustment['reason']}")
     for warning in selection.get("warnings") or []:
         print(f"warning: {warning}")
+
+
+def installed_skill_payload(installed: InstalledSkill) -> dict[str, object]:
+    return {
+        "target": installed.target,
+        "path": str(installed.path),
+        "updated": installed.updated,
+        "backup_path": str(installed.backup_path) if installed.backup_path else None,
+        "skipped": installed.skipped,
+    }
 
 
 def format_gitignore_result(result: dict[str, object] | None) -> str:
@@ -351,13 +368,17 @@ def hooks_install_plan(*, force: bool = False, hooks: list[str] | None = None) -
         path = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
         existing = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+        backup = original.read_text(encoding="utf-8", errors="ignore") if original.is_file() else ""
         managed = MANAGED_MARKER in existing
+        refresh_manager_backup = can_refresh_manager_hook_backup(existing, backup)
         if not path.exists():
             action = "create"
         elif managed:
             action = "update"
-        elif original.exists() and not force:
+        elif original.exists() and not force and not refresh_manager_backup:
             action = "refuse"
+        elif refresh_manager_backup:
+            action = "refresh-manager-backup"
         else:
             action = "backup-and-install"
         plan.append(
@@ -960,7 +981,9 @@ def cmd_skills_install_codex(args: argparse.Namespace) -> int:
         force=args.force,
     )
     if args.json:
-        print_json({"target": installed.target, "path": str(installed.path)})
+        print_json(installed_skill_payload(installed))
+    elif installed.skipped:
+        print(f"skipped {installed.path}: {installed.skipped}")
     else:
         print(installed.path)
     return 0
@@ -973,7 +996,9 @@ def cmd_skills_install_generic(args: argparse.Namespace) -> int:
         force=args.force,
     )
     if args.json:
-        print_json({"target": installed.target, "path": str(installed.path)})
+        print_json(installed_skill_payload(installed))
+    elif installed.skipped:
+        print(f"skipped {installed.path}: {installed.skipped}")
     else:
         print(installed.path)
     return 0
@@ -1006,7 +1031,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "root": str(root),
         "hooks": [asdict(info) for info in hooks],
         "codex_skill": str(skill.path) if skill else None,
+        "codex_skill_skipped": skill.skipped if skill else None,
         "generic_guidance": str(generic.path) if generic else None,
+        "generic_guidance_skipped": generic.skipped if generic else None,
         "integrations": integrations,
         "gitignore": gitignore,
         "environment": environment,
@@ -1019,14 +1046,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"root={root}")
         if hooks:
             print(f"hooks={len(hooks)}")
-        if skill:
+        if skill and not skill.skipped:
             print(f"codex_skill={skill.path}")
-        if generic:
+        if generic and not generic.skipped:
             print(f"generic_guidance={generic.path}")
         if integrations:
             print(f"integrations={len(integrations)}")
         print(f"gitignore={format_gitignore_result(gitignore)}")
-        print_setup_notices(integrations=integrations, generic=generic, selection=selection)
+        print_setup_notices(integrations=integrations, skill=skill, generic=generic, selection=selection)
     return 0
 
 
@@ -1056,14 +1083,16 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     result = adopt_repo(
         root,
         install_hooks_result=[asdict(info) for info in hooks],
-        codex_skill_path=str(skill.path) if skill else None,
-        generic_guidance_path=str(generic.path) if generic else None,
+        codex_skill_path=str(skill.path) if skill and not skill.skipped else None,
+        generic_guidance_path=str(generic.path) if generic and not generic.skipped else None,
         integrations=integrations,
         gitignore=gitignore,
     )
     result["environment"] = environment
     result["adjustments"] = selection["adjustments"]
     result["warnings"] = selection["warnings"]
+    result["codex_skill_skipped"] = skill.skipped if skill else None
+    result["generic_guidance_skipped"] = generic.skipped if generic else None
     if args.json:
         print_json(result)
     else:
@@ -1071,14 +1100,14 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         print(f"doctor_ok={str(result['doctor']['ok']).lower()}")
         if hooks:
             print(f"hooks={len(hooks)}")
-        if skill:
+        if skill and not skill.skipped:
             print(f"codex_skill={skill.path}")
-        if generic:
+        if generic and not generic.skipped:
             print(f"generic_guidance={generic.path}")
         if integrations:
             print(f"integrations={len(integrations)}")
         print(f"gitignore={format_gitignore_result(gitignore)}")
-        print_setup_notices(integrations=integrations, generic=generic, selection=selection)
+        print_setup_notices(integrations=integrations, skill=skill, generic=generic, selection=selection)
         print(f"next={result['next']}")
     return 0
 
@@ -1847,7 +1876,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-integrations",
         choices=("all", "none", "project-files"),
         default="all",
-        help="all adapts to detected rule generators; project-files always writes tool files",
+        help=(
+            "all adapts to rule generators; project-files selects tool files "
+            "(generated headers still require --force)"
+        ),
     )
     setup.add_argument("--integration-target", choices=("project", "store"), default="project")
     setup.add_argument("--gitignore", choices=GITIGNORE_CHOICES, default="ask")
@@ -1864,7 +1896,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-integrations",
         choices=("all", "none", "project-files"),
         default="all",
-        help="all adapts to detected rule generators; project-files always writes tool files",
+        help=(
+            "all adapts to rule generators; project-files selects tool files "
+            "(generated headers still require --force)"
+        ),
     )
     adopt.add_argument("--integration-target", choices=("project", "store"), default="project")
     adopt.add_argument("--gitignore", choices=GITIGNORE_CHOICES, default="ask")

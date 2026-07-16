@@ -96,7 +96,7 @@ def install_hooks(
                     # stale manager script as the backup; refreshing it loses
                     # nothing, so heal without --force. Anything else needs an
                     # explicit --force to discard the backup.
-                    stale_manager_backup = bool(owner and identify_hook_owner(backup))
+                    stale_manager_backup = can_refresh_manager_hook_backup(existing, backup)
                     if not force and not stale_manager_backup:
                         raise AgentDirError(f"Refusing to overwrite existing hook and backup: {target}")
                     original.unlink()
@@ -179,17 +179,18 @@ def hooks_manifest_issues(root: str | Path) -> list[str]:
     issues: list[str] = []
     repo = manifest.get("repo")
     if isinstance(repo, str) and repo:
-        configured = git_output(["config", "--get", "core.hooksPath"], repo)
-        if configured:
-            configured_dir = Path(configured).expanduser()
-            if not configured_dir.is_absolute():
-                configured_dir = Path(repo) / configured_dir
-            if configured_dir.resolve() != hooks_dir:
-                issues.append(
-                    f"git core.hooksPath={configured} bypasses the AgentDir hook shims in "
-                    f"{hooks_dir}; git activity is not being recorded. Re-run 'agentdir hooks "
-                    "install' to install into the configured hooks directory."
-                )
+        try:
+            current_hooks_dir = resolve_git_hooks_dir(repo)
+        except AgentDirDependencyError:
+            current_hooks_dir = None
+        if current_hooks_dir is not None and current_hooks_dir != hooks_dir.resolve():
+            configured = git_output(["config", "--get", "core.hooksPath"], repo)
+            source = f"git core.hooksPath={configured}" if configured else "git's default hooks path"
+            issues.append(
+                f"{source} resolves to {current_hooks_dir} and bypasses the AgentDir hook shims in "
+                f"{hooks_dir}; git activity is not being recorded. Re-run 'agentdir hooks "
+                "install' to install into the active hooks directory."
+            )
     for name in names:
         if not isinstance(name, str):
             continue
@@ -252,6 +253,11 @@ def _forget_installed_hooks(root: str | Path, *, names: list[str]) -> None:
     manifest["hooks"] = remaining
     manifest["updated_at"] = datetime.now(UTC).isoformat()
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def can_refresh_manager_hook_backup(existing: str, backup: str) -> bool:
+    """Return whether replacing a stale hook-manager backup is non-destructive."""
+    return bool(identify_hook_owner(existing) and identify_hook_owner(backup))
 
 
 def record_hook_event(
