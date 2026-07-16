@@ -95,7 +95,8 @@ curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install
 
 The installer uses `pipx` when available. Otherwise it creates a self-contained
 virtual environment under `~/.local/share/agentdir` and links the CLI into
-`~/.local/bin`.
+`~/.local/bin`. It does not edit Git configuration or ignore files; after
+installation it prints the explicit adoption choices.
 
 Verify:
 
@@ -122,7 +123,7 @@ available automatically during coding tasks:
 Package page: [@jstxn/agentdir-pi](https://pi.dev/packages/@jstxn/agentdir-pi)
 
 ```bash
-pi install npm:@jstxn/agentdir-pi@0.7.7
+pi install npm:@jstxn/agentdir-pi@0.7.8
 # or install directly from a local checkout / release tag:
 pi install /absolute/path/to/agentdir
 pi install git:github.com/jstxn/agentdir@<tag-or-commit>
@@ -139,6 +140,13 @@ Run once from a git repository:
 
 ```bash
 agentdir adopt
+```
+
+Coding agents use the non-interactive form below so `.agentdir/` is ignored at
+the user level without creating a repository `.gitignore` change:
+
+```bash
+agentdir adopt --gitignore user
 ```
 
 This is intentionally boring setup. It prepares the repository once, then agents
@@ -185,6 +193,10 @@ agentdir adopt --gitignore project  # write <repo>/.gitignore
 agentdir adopt --gitignore user     # write the user-level Git excludes file
 agentdir adopt --gitignore none     # leave ignore files unchanged
 ```
+
+Generated AgentDir guidance selects `--gitignore user` by default. The plain
+interactive command still prompts, and all three explicit choices remain
+available.
 
 Undo managed setup while keeping the `.agentdir` evidence store:
 

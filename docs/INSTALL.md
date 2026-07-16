@@ -28,6 +28,17 @@ The installer downloads release assets anonymously with `curl`. If `curl` is
 unavailable or the download fails, it falls back to authenticated GitHub CLI
 (`gh auth login`).
 
+The installer does not modify Git configuration or ignore files. It prints a
+post-install command that agents can use from a repository:
+
+```bash
+agentdir adopt --gitignore user
+```
+
+This appends `.agentdir/` to the configured user-level Git excludes file. Use
+`--gitignore project` for a repository `.gitignore` entry or `--gitignore none`
+to leave ignore files unchanged.
+
 The installer downloads the release wheel and installs it with `pipx` when available. If `pipx` is not installed, it falls back to a self-contained virtual environment at:
 
 ```text
@@ -65,7 +76,7 @@ Useful variants:
 ```bash
 agentdir update --install-skill none
 agentdir update --no-adopt
-agentdir update --version v0.7.7
+agentdir update --version v0.7.8
 agentdir update --dry-run
 ```
 
@@ -82,7 +93,7 @@ repo="$(mktemp -d)/agentdir-install-smoke"
 mkdir -p "$repo"
 git -C "$repo" init
 cd "$repo"
-agentdir adopt --install-skill store
+agentdir adopt --install-skill store --gitignore user
 agentdir work start "install smoke" --emit-context
 agentdir run -- python3 -c "print('agentdir install smoke')"
 agentdir evidence --brief
@@ -99,13 +110,13 @@ agentdir work finish --json
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.7-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.8-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.7-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.8-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -122,13 +133,13 @@ curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollbac
 To choose a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.6
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.7
 ```
 
 The equivalent manual rollback is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.6 bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.7 bash
 ```
 
 ## Optional Extras

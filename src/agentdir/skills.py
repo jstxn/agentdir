@@ -35,7 +35,9 @@ user when reporting evidence, blockers, or setup problems.
 ## Start
 
 - At the start of a coding task in a repository, run `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing and the task is non-trivial, run `agentdir adopt` once for the repository before work begins.
+- If `.agentdir` is missing and the task is non-trivial, run
+  `agentdir adopt --gitignore user` once so the local store stays out of Git
+  without changing the repository's `.gitignore`.
 - Prefer the default project store. It writes to the nearest repo `.agentdir`.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output.
 - If `doctor` reports secret-like persisted bodies, do not print the bodies.
@@ -103,7 +105,8 @@ The engineer should not have to run AgentDir commands during normal coding work.
 The agent owns the background recording flow:
 
 - Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt` once before work begins.
+- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the
+  local store stays out of Git without changing the repository's `.gitignore`.
 - Run evidence-bearing commands through `agentdir run -- <command>`.
 - Evidence-bearing commands include tests, lint, typecheck, build, release checks,
   reproduced failures, and diagnostics that support final claims.
@@ -697,7 +700,7 @@ GUIDANCE_BODY = """AgentDir is agent-owned background instrumentation for this r
 The engineer installs or adopts it once; agents operate it during normal work.
 
 - Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt` once before starting.
+- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the local store stays out of Git without changing the repository's `.gitignore`.
 - Wrap evidence-bearing commands with `agentdir run -- <command>`.
 - Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
 - Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.

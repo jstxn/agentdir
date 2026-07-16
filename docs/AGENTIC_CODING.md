@@ -27,6 +27,15 @@ From a git repository:
 agentdir adopt
 ```
 
+For agent-driven, non-interactive setup, make the ignore destination explicit:
+
+```bash
+agentdir adopt --gitignore user
+```
+
+This keeps `.agentdir/` out of Git across repositories without changing a
+project's tracked `.gitignore`.
+
 This initializes `.agentdir`, installs managed Git hook shims, installs the
 Codex skill in the user skill directory, writes broad project guidance for
 common agent tools, asks interactive users where to ignore `.agentdir/`, runs
@@ -54,7 +63,7 @@ The user should not have to operate AgentDir during a normal coding session. Onc
 Agent responsibilities:
 
 - run `agentdir work start "<task>" --emit-context` when coding work begins
-- run `agentdir adopt` once if the repository has not been prepared yet
+- run `agentdir adopt --gitignore user` once if the repository has not been prepared yet
 - use `agentdir status` when a single health view is needed
 - emit context packs when retrieved context materially informs the work
 - record which context sources were consumed and cited when reporting lineage
