@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.7.6}"
+AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.7.7}"
 AGENTDIR_REPO="${AGENTDIR_REPO:-jstxn/agentdir}"
 AGENTDIR_PACKAGE_VERSION="${AGENTDIR_VERSION#v}"
 # Releases after v0.7.4 ship the wheel under the agentdir-cli distribution

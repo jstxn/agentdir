@@ -1570,7 +1570,11 @@ def cmd_audit_claims(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentdir")
     parser.add_argument("--version", action="version", version=f"agentdir {__version__}")
-    parser.add_argument("--upgrade", action="store_true", help="reinstall latest AgentDir and re-adopt this repo")
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="legacy shortcut for 'agentdir update'",
+    )
     parser.add_argument("--upgrade-version", help="release tag to install instead of the latest release")
     parser.add_argument("--upgrade-repo", default="jstxn/agentdir", help="GitHub repo to install from")
     parser.add_argument(
@@ -1584,6 +1588,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--upgrade-dry-run", action="store_true", help="show the upgrade plan without changing files")
     parser.add_argument("--upgrade-json", action="store_true", help="print upgrade result as JSON")
     sub = parser.add_subparsers(dest="command")
+
+    update_command = sub.add_parser(
+        "update",
+        help="reinstall AgentDir from a release and re-adopt the current repo",
+        description=(
+            "Reinstall AgentDir from the latest GitHub Release, then re-adopt "
+            "the current repository and run doctor."
+        ),
+    )
+    update_command.add_argument(
+        "--version",
+        dest="upgrade_version",
+        help="release tag to install instead of the latest release",
+    )
+    update_command.add_argument(
+        "--repo",
+        dest="upgrade_repo",
+        default="jstxn/agentdir",
+        help="GitHub repo to install from",
+    )
+    update_command.add_argument(
+        "--install-skill",
+        dest="upgrade_install_skill",
+        choices=("user", "project", "store", "none"),
+        default="user",
+        help="Codex skill target to use during re-adoption",
+    )
+    update_command.add_argument(
+        "--no-adopt",
+        dest="upgrade_no_adopt",
+        action="store_true",
+        help="only reinstall; do not re-adopt the current repo",
+    )
+    update_command.add_argument(
+        "--no-hooks",
+        dest="upgrade_no_hooks",
+        action="store_true",
+        help="re-adopt without installing Git hooks",
+    )
+    update_command.add_argument(
+        "--dry-run",
+        dest="upgrade_dry_run",
+        action="store_true",
+        help="show the update plan without changing files",
+    )
+    update_command.add_argument(
+        "--json",
+        dest="upgrade_json",
+        action="store_true",
+        help="print the update result as JSON",
+    )
+    update_command.set_defaults(func=cmd_upgrade)
 
     init = sub.add_parser("init")
     init.add_argument("root", nargs="?")
