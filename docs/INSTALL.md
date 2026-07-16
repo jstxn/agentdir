@@ -48,26 +48,29 @@ If `~/.local/bin` is not on PATH, add it:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Upgrade Existing Installs
+## Update Existing Installs
 
 From any repo where AgentDir should stay adopted:
 
 ```bash
-agentdir --upgrade
+agentdir update
 ```
 
-The upgrade command resolves the latest GitHub Release, reinstalls AgentDir,
+The update command resolves the latest GitHub Release, reinstalls AgentDir,
 then re-runs adoption for the current git repository. It refreshes hooks, the
 Codex skill, and broad project guidance by default, then runs `doctor`.
 
 Useful variants:
 
 ```bash
-agentdir --upgrade --upgrade-install-skill none
-agentdir --upgrade --upgrade-no-adopt
-agentdir --upgrade --upgrade-version v0.7.6
-agentdir --upgrade --upgrade-dry-run
+agentdir update --install-skill none
+agentdir update --no-adopt
+agentdir update --version v0.7.7
+agentdir update --dry-run
 ```
+
+The older `agentdir --upgrade` interface and its `--upgrade-*` options remain
+supported for compatibility.
 
 ## Verify Install
 
@@ -96,13 +99,13 @@ agentdir work finish --json
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.6-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.7-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.6-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.7-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -119,13 +122,13 @@ curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollbac
 To choose a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.5
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.6
 ```
 
 The equivalent manual rollback is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.5 bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.6 bash
 ```
 
 ## Optional Extras

@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.6"
+    assert result.stdout.strip() == "agentdir 0.7.7"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -182,6 +182,55 @@ def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
     assert "target_version=v9.9.9" in result.stdout
     assert "install=install jstxn/agentdir@v9.9.9" in result.stdout
     assert "adopt=agentdir adopt --install-skill none" in result.stdout
+
+
+def test_update_subcommand_matches_legacy_upgrade_json(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    legacy = run_cli(
+        "--upgrade",
+        "--upgrade-dry-run",
+        "--upgrade-version",
+        "v9.9.9",
+        "--upgrade-install-skill",
+        "store",
+        "--upgrade-no-hooks",
+        "--upgrade-json",
+        cwd=repo,
+    )
+    update = run_cli(
+        "update",
+        "--dry-run",
+        "--version",
+        "v9.9.9",
+        "--install-skill",
+        "store",
+        "--no-hooks",
+        "--json",
+        cwd=repo,
+    )
+
+    assert json.loads(update.stdout) == json.loads(legacy.stdout)
+    payload = json.loads(update.stdout)
+    assert payload["adopt"]["command"] == "agentdir adopt --install-skill store --no-hooks"
+
+
+def test_update_subcommand_can_skip_re_adoption(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    result = run_cli(
+        "update",
+        "--dry-run",
+        "--version",
+        "v9.9.9",
+        "--no-adopt",
+        "--json",
+        cwd=repo,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["adopt"]["planned"] is False
+    assert payload["doctor"]["planned"] is False
 
 
 def test_hooks_install_record_and_uninstall_preserve_original_hook(tmp_path: Path) -> None:

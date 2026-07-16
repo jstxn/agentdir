@@ -12,11 +12,11 @@ def test_pi_package_manifest_points_to_agentdir_skill() -> None:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 
     assert package["name"] == "@jstxn/agentdir-pi"
-    assert package["version"] == "0.7.6"
+    assert package["version"] == "0.7.7"
     assert "pi-package" in package["keywords"]
     assert package["pi"] == {
         "skills": ["./skills"],
-        "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.6/docs/assets/agentdir-overview.png",
+        "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.7/docs/assets/agentdir-overview.png",
     }
     assert "skills" in package["files"]
     assert "docs/PI_PACKAGE.md" in package["files"]

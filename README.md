@@ -104,6 +104,16 @@ agentdir --version
 agentdir --help
 ```
 
+Update an existing install to the latest release and refresh adoption for the
+current repository:
+
+```bash
+agentdir update
+agentdir update --dry-run
+```
+
+The older `agentdir --upgrade` interface remains supported for compatibility.
+
 ## Pi Package
 
 Pi users can install this repository as a Pi package so the AgentDir skill is
@@ -112,7 +122,7 @@ available automatically during coding tasks:
 Package page: [@jstxn/agentdir-pi](https://pi.dev/packages/@jstxn/agentdir-pi)
 
 ```bash
-pi install npm:@jstxn/agentdir-pi@0.7.6
+pi install npm:@jstxn/agentdir-pi@0.7.7
 # or install directly from a local checkout / release tag:
 pi install /absolute/path/to/agentdir
 pi install git:github.com/jstxn/agentdir@<tag-or-commit>
@@ -189,17 +199,22 @@ Default adoption writes only local files:
 
 ```text
 <repo>/.agentdir/                         # evidence, artifacts, indexes, state
-<repo>/.git/hooks/*                       # managed hook shims with backups
+<repo>/.agentdir/hooks.json               # installed-hook drift manifest
+<active-hooks-directory>/*                # managed hook shims with backups
 <repo>/AGENTS.md                          # generic / Codex-readable guidance
 <repo>/CLAUDE.md                          # Claude Code guidance
 <repo>/.github/copilot-instructions.md    # Copilot guidance
 <repo>/.cursor/rules/agentdir.mdc         # Cursor guidance
 <repo>/.windsurf/rules/agentdir.md        # Windsurf guidance
+<repo>/.rulesync/rules/agentdir.md        # rulesync source, when detected
 ~/.codex/skills/agentdir/SKILL.md         # Codex skill, by default
 ```
 
 Managed guidance is wrapped in AgentDir markers. Existing unmanaged content is
-preserved where the target format supports managed blocks.
+preserved where the target format supports managed blocks. The active hooks
+directory is `.git/hooks` by default and follows `core.hooksPath` or linked
+worktree configuration. In rulesync repos, the source rule replaces the listed
+project guidance files as the managed source of truth.
 
 ## Inspect A Session
 
