@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .artifacts import artifact_path
 from .envelope import parse_envelope, validate_required
+from .hooks import hooks_manifest_issues
 from .mailbox import iter_records
 from .redaction import looks_secret_bearing
 from .secrets import scan_secret_records
@@ -72,6 +73,12 @@ def run_doctor(root: str | Path) -> DoctorReport:
     for tmp in paths.root.glob("**/Maildir/tmp/*"):
         if tmp.is_file():
             report.add_warning(f"incomplete tmp record ignored: {tmp.relative_to(paths.root)}")
+    try:
+        for issue in hooks_manifest_issues(paths.root):
+            report.add_warning(issue)
+    except Exception:
+        # Hook drift detection is best-effort; it must never break doctor.
+        pass
     secret_findings = scan_secret_records(paths.root)
     for finding in secret_findings:
         labels = ",".join(finding.labels)

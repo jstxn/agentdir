@@ -158,6 +158,16 @@ instead of project instruction files:
 agentdir adopt --install-skill store --install-generic store --integration-target store
 ```
 
+Adoption adapts to repos where other tools own these files. When
+[rulesync](https://github.com/dyoshikawa/rulesync) generates the guidance
+files, the managed rule is written to `.rulesync/rules/agentdir.md` instead so
+it survives regeneration, and files with generated-file headers are never
+edited without `--force`. When lefthook, husky, or pre-commit own the Git
+hooks, adopt warns up front, `agentdir doctor` flags hook shims those tools
+later overwrite, and `agentdir hooks install` restores them. See
+[docs/INSTALL.md](docs/INSTALL.md#coexisting-with-rule-generators-and-hook-managers)
+for details.
+
 For non-interactive installs, choose the ignore destination explicitly:
 
 ```bash
