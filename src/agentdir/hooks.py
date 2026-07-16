@@ -6,13 +6,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .environment import identify_hook_owner
 from .events import emit_event
-from .git import git_branch, git_head, git_output, git_status_short
+from .git import git_branch, git_head, git_output, git_root, git_status_short
 from .sessions import end_session, read_current_session, start_session
-from .store import AgentDirDependencyError, AgentDirError, init_root
+from .store import AgentDirDependencyError, AgentDirError, init_root, paths_for
 
 DEFAULT_HOOKS = ("pre-commit", "post-commit", "pre-push", "post-checkout", "post-merge")
 MANAGED_MARKER = "# AgentDir managed hook"
+HOOKS_MANIFEST_NAME = "hooks.json"
 
 
 @dataclass(frozen=True)
@@ -22,18 +24,27 @@ class HookInfo:
     installed: bool
     managed: bool
     original: str | None = None
+    owner: str | None = None
+
+
+def resolve_git_hooks_dir(cwd: str | Path | None = None) -> Path:
+    """Resolve the hooks directory git actually consults.
+
+    ``rev-parse --git-path hooks`` honours ``core.hooksPath`` and linked
+    worktrees (which share the common hooks directory); resolving the git dir
+    by hand does neither, so shims would land where git never looks.
+    """
+    hooks_path = git_output(["rev-parse", "--git-path", "hooks"], cwd)
+    if not hooks_path:
+        raise AgentDirDependencyError("AgentDir hooks require a git repository")
+    path = Path(hooks_path).expanduser()
+    if not path.is_absolute():
+        path = Path(cwd or Path.cwd()) / path
+    return path.resolve()
 
 
 def git_hooks_dir(cwd: str | Path | None = None) -> Path:
-    git_dir = git_output(["rev-parse", "--git-dir"], cwd)
-    if not git_dir:
-        raise AgentDirDependencyError("AgentDir hooks require a git repository")
-    path = Path(git_dir)
-    if not path.is_absolute():
-        root = git_output(["rev-parse", "--show-toplevel"], cwd)
-        base = Path(root) if root else Path(cwd or Path.cwd())
-        path = base / path
-    hooks = path.resolve() / "hooks"
+    hooks = resolve_git_hooks_dir(cwd)
     hooks.mkdir(parents=True, exist_ok=True)
     return hooks
 
@@ -45,7 +56,8 @@ def hook_status(cwd: str | Path | None = None, hooks: list[str] | None = None) -
     for name in names:
         path = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
-        managed = path.is_file() and MANAGED_MARKER in path.read_text(encoding="utf-8", errors="ignore")
+        text = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+        managed = MANAGED_MARKER in text
         statuses.append(
             HookInfo(
                 hook=name,
@@ -53,6 +65,7 @@ def hook_status(cwd: str | Path | None = None, hooks: list[str] | None = None) -
                 installed=path.exists(),
                 managed=managed,
                 original=str(original) if original.exists() else None,
+                owner=identify_hook_owner(text) if text and not managed else None,
             )
         )
     return statuses
@@ -71,12 +84,21 @@ def install_hooks(
     for name in hooks or list(DEFAULT_HOOKS):
         target = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
+        owner: str | None = None
         if target.exists():
-            managed = target.is_file() and MANAGED_MARKER in target.read_text(encoding="utf-8", errors="ignore")
+            existing = target.read_text(encoding="utf-8", errors="ignore") if target.is_file() else ""
+            managed = MANAGED_MARKER in existing
             if not managed:
-                if original.exists() and not force:
-                    raise AgentDirError(f"Refusing to overwrite existing hook and backup: {target}")
-                if original.exists() and force:
+                owner = identify_hook_owner(existing)
+                if original.exists():
+                    backup = original.read_text(encoding="utf-8", errors="ignore")
+                    # A hook manager that reinstalled over our shim leaves a
+                    # stale manager script as the backup; refreshing it loses
+                    # nothing, so heal without --force. Anything else needs an
+                    # explicit --force to discard the backup.
+                    stale_manager_backup = bool(owner and identify_hook_owner(backup))
+                    if not force and not stale_manager_backup:
+                        raise AgentDirError(f"Refusing to overwrite existing hook and backup: {target}")
                     original.unlink()
                 target.rename(original)
         target.write_text(_hook_script(name, original), encoding="utf-8")
@@ -88,8 +110,10 @@ def install_hooks(
                 installed=True,
                 managed=True,
                 original=str(original) if original.exists() else None,
+                owner=owner,
             )
         )
+    _record_installed_hooks(root, hooks_dir=hooks_dir, names=[info.hook for info in installed], cwd=cwd)
     return installed
 
 
@@ -97,6 +121,7 @@ def uninstall_hooks(
     *,
     cwd: str | Path | None = None,
     hooks: list[str] | None = None,
+    root: str | Path | None = None,
 ) -> list[HookInfo]:
     hooks_dir = git_hooks_dir(cwd)
     removed: list[HookInfo] = []
@@ -117,7 +142,116 @@ def uninstall_hooks(
                 original=str(original) if original.exists() else None,
             )
         )
+    if root is not None:
+        _forget_installed_hooks(root, names=[info.hook for info in removed])
     return removed
+
+
+def hooks_manifest_path(root: str | Path) -> Path:
+    return paths_for(root).meta / HOOKS_MANIFEST_NAME
+
+
+def read_hooks_manifest(root: str | Path) -> dict[str, object] | None:
+    path = hooks_manifest_path(root)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def hooks_manifest_issues(root: str | Path) -> list[str]:
+    """Report installed-hook drift: shims a hook manager overwrote or removed.
+
+    Uses the manifest written at install time so drift is visible even when
+    doctor runs from a different working directory than the hooked repo.
+    """
+    manifest = read_hooks_manifest(root)
+    if not manifest:
+        return []
+    hooks_dir_value = manifest.get("hooks_dir")
+    names = manifest.get("hooks")
+    if not isinstance(hooks_dir_value, str) or not isinstance(names, list):
+        return []
+    hooks_dir = Path(hooks_dir_value)
+    issues: list[str] = []
+    repo = manifest.get("repo")
+    if isinstance(repo, str) and repo:
+        configured = git_output(["config", "--get", "core.hooksPath"], repo)
+        if configured:
+            configured_dir = Path(configured).expanduser()
+            if not configured_dir.is_absolute():
+                configured_dir = Path(repo) / configured_dir
+            if configured_dir.resolve() != hooks_dir:
+                issues.append(
+                    f"git core.hooksPath={configured} bypasses the AgentDir hook shims in "
+                    f"{hooks_dir}; git activity is not being recorded. Re-run 'agentdir hooks "
+                    "install' to install into the configured hooks directory."
+                )
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        path = hooks_dir / name
+        if not path.is_file():
+            issues.append(
+                f"AgentDir git hook {name} is missing from {hooks_dir}; git activity is not "
+                "being recorded. Run 'agentdir hooks install' to restore it."
+            )
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if MANAGED_MARKER in text:
+            continue
+        owner = identify_hook_owner(text)
+        owner_label = owner or "another tool"
+        issues.append(
+            f"AgentDir git hook {name} was overwritten by {owner_label}; git activity is not "
+            f"being recorded. Run 'agentdir hooks install' to restore it (the shim chains "
+            f"{owner_label}), and see docs/INSTALL.md for hook-manager coexistence."
+        )
+    return issues
+
+
+def _record_installed_hooks(
+    root: str | Path,
+    *,
+    hooks_dir: Path,
+    names: list[str],
+    cwd: str | Path | None = None,
+) -> None:
+    manifest = read_hooks_manifest(root) or {}
+    recorded = manifest.get("hooks")
+    merged = set(recorded) if isinstance(recorded, list) else set()
+    merged.update(names)
+    repo = git_root(cwd)
+    payload = {
+        "version": 1,
+        "repo": str(repo) if repo else manifest.get("repo"),
+        "hooks_dir": str(hooks_dir),
+        "hooks": sorted(merged),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    hooks_manifest_path(root).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _forget_installed_hooks(root: str | Path, *, names: list[str]) -> None:
+    manifest = read_hooks_manifest(root)
+    if not manifest:
+        return
+    recorded = manifest.get("hooks")
+    if not isinstance(recorded, list):
+        return
+    remaining = sorted(set(recorded) - set(names))
+    path = hooks_manifest_path(root)
+    if not remaining:
+        path.unlink(missing_ok=True)
+        return
+    manifest["hooks"] = remaining
+    manifest["updated_at"] = datetime.now(UTC).isoformat()
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def record_hook_event(

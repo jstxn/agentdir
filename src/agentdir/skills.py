@@ -4,13 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .environment import generated_file_marker
 from .git import git_root
 from .store import AgentDirDependencyError, AgentDirError, init_root, paths_for
 
 MANAGED_SKILL_MARKER = "<!-- agentdir-managed-skill -->"
 GENERIC_GUIDANCE_START = "<!-- agentdir-managed-generic:start -->"
 GENERIC_GUIDANCE_END = "<!-- agentdir-managed-generic:end -->"
-INTEGRATION_NAMES = ("generic", "codex", "claude", "copilot", "cursor", "windsurf")
+INTEGRATION_NAMES = ("generic", "codex", "claude", "copilot", "cursor", "windsurf", "rulesync")
+# "all" deliberately excludes rulesync: its source rule is only wanted in repos
+# that actually run rulesync, so it is selected by detection or by name.
+DEFAULT_INTEGRATION_EXPANSION = ("generic", "codex", "claude", "copilot", "cursor", "windsurf")
 BROAD_PROJECT_INTEGRATIONS = ("generic", "claude", "copilot", "cursor", "windsurf")
 
 CODEX_SKILL = f"""---
@@ -126,6 +130,7 @@ class InstalledSkill:
     target: str
     updated: bool = False
     backup_path: Path | None = None
+    skipped: str | None = None
 
 
 def install_codex_skill(
@@ -168,6 +173,10 @@ def install_generic_guidance(
     backup_path: Path | None = None
     if target == "project":
         existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
+        if existing and not force and not is_agentdir_managed_generic(existing):
+            marker = generated_file_marker(existing)
+            if marker:
+                return InstalledSkill(path=destination, target=target, skipped=f"generated file ({marker})")
         updated_text = merge_generic_guidance(existing)
         updated = existing != updated_text
         if destination.exists() and updated and force:
@@ -278,6 +287,8 @@ def integration_plan(
             action = "none"
         elif state["state"] == "stale":
             action = "update"
+        elif state["state"] == "generated":
+            action = "overwrite" if force else "skip-generated"
         elif state["state"] == "missing" and _can_merge_guidance(name, target):
             action = "update"
         elif state["state"] == "conflict":
@@ -315,7 +326,7 @@ def integration_doctor(
     checks = [integration_state(root, name, target=target, cwd=cwd) for name in selected]
     return {
         "target": target,
-        "ok": all(item["state"] in {"installed", "missing"} for item in checks),
+        "ok": all(item["state"] in {"installed", "missing", "generated"} for item in checks),
         "checks": checks,
     }
 
@@ -397,9 +408,22 @@ def integration_state(
         state = "installed" if existing == CODEX_SKILL else "stale" if managed else "conflict"
     elif _can_merge_guidance(name, target):
         current = extract_managed_block(existing, *_integration_markers(name))
-        state = "installed" if current == expected else "stale" if managed else "missing"
+        if current == expected:
+            state = "installed"
+        elif managed:
+            state = "stale"
+        elif generated_file_marker(existing):
+            state = "generated"
+        else:
+            state = "missing"
+    elif existing == expected:
+        state = "installed"
+    elif managed:
+        state = "stale"
+    elif generated_file_marker(existing):
+        state = "generated"
     else:
-        state = "installed" if existing == expected else "stale" if managed else "conflict"
+        state = "conflict"
     return {
         "name": name,
         "target": target,
@@ -474,7 +498,7 @@ def expand_integration_names(names: list[str]) -> list[str]:
     expanded: list[str] = []
     for name in names:
         if name == "all":
-            expanded.extend(INTEGRATION_NAMES)
+            expanded.extend(DEFAULT_INTEGRATION_EXPANSION)
         else:
             expanded.append(normalize_integration_name(name))
     deduped: list[str] = []
@@ -578,6 +602,17 @@ def _install_guidance_integration(
     existing = destination.read_text(encoding="utf-8", errors="ignore") if destination.exists() else ""
     updated = existing != expected
     backup_path: Path | None = None
+    if existing and not force and not _integration_managed(name, existing):
+        marker = generated_file_marker(existing)
+        if marker:
+            return {
+                "name": name,
+                "target": target,
+                "path": str(destination),
+                "updated": False,
+                "backup_path": None,
+                "skipped": f"generated file ({marker})",
+            }
     if _can_merge_guidance(name, target):
         merged = merge_managed_block(existing, expected, *_integration_markers(name))
         updated = existing != merged
@@ -616,6 +651,7 @@ def _skill_result(name: str, installed: InstalledSkill) -> dict[str, Any]:
         "path": str(installed.path),
         "updated": installed.updated,
         "backup_path": str(installed.backup_path) if installed.backup_path else None,
+        "skipped": installed.skipped,
     }
 
 
@@ -628,6 +664,8 @@ def _project_integration_relative_path(name: str) -> Path:
         return Path(".cursor") / "rules" / "agentdir.mdc"
     if name == "windsurf":
         return Path(".windsurf") / "rules" / "agentdir.md"
+    if name == "rulesync":
+        return Path(".rulesync") / "rules" / "agentdir.md"
     raise AgentDirError(f"Integration {name!r} does not have a project guidance path")
 
 
@@ -654,8 +692,42 @@ def _integration_markers(name: str) -> tuple[str, str]:
     return f"<!-- agentdir-managed-{name}:start -->", f"<!-- agentdir-managed-{name}:end -->"
 
 
+GUIDANCE_BODY = """AgentDir is agent-owned background instrumentation for this repository.
+The engineer installs or adopts it once; agents operate it during normal work.
+
+- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
+- If `.agentdir` is missing, run `agentdir adopt` once before starting.
+- Wrap evidence-bearing commands with `agentdir run -- <command>`.
+- Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
+- Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.
+- Use `agentdir evidence --brief` and `agentdir timeline` to skim what happened.
+- Use `agentdir report final --format json` or `agentdir work finish --json` for the agent handoff object before final claims when practical.
+- Do not record secrets, private keys, raw environment dumps, or credential-bearing command output."""
+
+RULESYNC_FRONTMATTER = """---
+root: false
+targets: ["*"]
+description: "AgentDir agent-owned background instrumentation for coding agents."
+globs: ["**/*"]
+cursor:
+  alwaysApply: true
+---
+
+"""
+
+
 def _guidance_block(name: str) -> str:
     start, end = _integration_markers(name)
+    if name == "rulesync":
+        return f"""{RULESYNC_FRONTMATTER}{start}
+# AgentDir
+
+{GUIDANCE_BODY}
+
+This file is the rulesync source for AgentDir guidance. AgentDir manages it in
+place of the generated tool files; run `rulesync generate` after it changes.
+{end}
+"""
     title = {
         "claude": "Claude Code",
         "copilot": "GitHub Copilot",
@@ -670,16 +742,6 @@ def _guidance_block(name: str) -> str:
     return f"""{frontmatter}{start}
 # AgentDir for {title}
 
-AgentDir is agent-owned background instrumentation for this repository.
-The engineer installs or adopts it once; agents operate it during normal work.
-
-- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt` once before starting.
-- Wrap evidence-bearing commands with `agentdir run -- <command>`.
-- Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
-- Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.
-- Use `agentdir evidence --brief` and `agentdir timeline` to skim what happened.
-- Use `agentdir report final --format json` or `agentdir work finish --json` for the agent handoff object before final claims when practical.
-- Do not record secrets, private keys, raw environment dumps, or credential-bearing command output.
+{GUIDANCE_BODY}
 {end}
 """
