@@ -9,7 +9,9 @@ skills/agentdir/SKILL.md
 
 The skill teaches Pi to start AgentDir sessions, wrap evidence-bearing shell
 commands, use local memory/context packs, and produce evidence-aware handoffs.
-It does not install the `agentdir` CLI; install AgentDir separately first.
+It also tells Pi to adopt unprepared repositories with `--gitignore user`, so
+the local store stays out of Git without changing project files. It does not
+install the `agentdir` CLI; install AgentDir separately first.
 
 ## Install
 
@@ -34,7 +36,7 @@ pi install git:github.com/jstxn/agentdir@<tag-or-commit>
 If the npm package has been published:
 
 ```bash
-pi install npm:@jstxn/agentdir-pi@0.7.7
+pi install npm:@jstxn/agentdir-pi@0.7.8
 ```
 
 Use `pi config` to enable or disable the bundled skill after installation.
@@ -48,7 +50,7 @@ The root `package.json` declares the Pi resources:
   "keywords": ["pi-package"],
   "pi": {
     "skills": ["./skills"],
-    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.7/docs/assets/agentdir-overview.png"
+    "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.8/docs/assets/agentdir-overview.png"
   }
 }
 ```

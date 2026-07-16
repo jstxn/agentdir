@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.7"
+    assert result.stdout.strip() == "agentdir 0.7.8"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -322,6 +322,7 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     assert skill_path.is_file()
     skill_text = skill_path.read_text(encoding="utf-8")
     assert "The user should not have to run AgentDir commands during normal coding work." in skill_text
+    assert "agentdir adopt --gitignore user" in skill_text
     assert 'agentdir work start "<short task>" --emit-context' in skill_text
     assert "agentdir status" in skill_text
     assert "agentdir run -- <command>" in skill_text
@@ -564,6 +565,24 @@ def test_integrations_project_rerun_is_byte_stable_for_managed_only_files(tmp_pa
     assert before == after
     assert all(not text.startswith("\n") for text in after.values())
     assert all(item["updated"] is False for item in json.loads(rerun.stdout))
+
+
+def test_generated_agent_guidance_uses_user_gitignore(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+
+    run_cli("integrations", "install", "all", "--target", "project", "--json", cwd=repo)
+
+    guidance_paths = [
+        repo / "AGENTS.md",
+        repo / ".agents" / "skills" / "agentdir" / "SKILL.md",
+        repo / "CLAUDE.md",
+        repo / ".github" / "copilot-instructions.md",
+        repo / ".cursor" / "rules" / "agentdir.mdc",
+        repo / ".windsurf" / "rules" / "agentdir.md",
+    ]
+    for path in guidance_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "agentdir adopt --gitignore user" in text, path
 
 
 def test_integrations_install_all_store_target(tmp_path: Path) -> None:

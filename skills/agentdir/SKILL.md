@@ -21,7 +21,7 @@ This Pi package teaches Pi how to operate AgentDir. It does not install the `age
 
 At the start of a non-trivial coding task in a software repository:
 
-1. If `.agentdir` is missing, run `agentdir adopt` once before work begins.
+1. If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the local store stays out of Git without changing the repository's `.gitignore`.
 2. Start the session with `agentdir work start "<short task>" --emit-context`.
 3. Keep any returned context pack id/source ids if you plan to cite or consume retrieved context later.
 

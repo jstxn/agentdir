@@ -7,7 +7,8 @@ The engineer should not have to run AgentDir commands during normal coding work.
 The agent owns the background recording flow:
 
 - Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt` once before work begins.
+- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the
+  local store stays out of Git without changing the repository's `.gitignore`.
 - Run evidence-bearing commands through `agentdir run -- <command>`.
 - Evidence-bearing commands include tests, lint, typecheck, build, release checks,
   reproduced failures, and diagnostics that support final claims.

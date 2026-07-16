@@ -12,11 +12,11 @@ def test_pi_package_manifest_points_to_agentdir_skill() -> None:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 
     assert package["name"] == "@jstxn/agentdir-pi"
-    assert package["version"] == "0.7.7"
+    assert package["version"] == "0.7.8"
     assert "pi-package" in package["keywords"]
     assert package["pi"] == {
         "skills": ["./skills"],
-        "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.7/docs/assets/agentdir-overview.png",
+        "image": "https://raw.githubusercontent.com/jstxn/agentdir/v0.7.8/docs/assets/agentdir-overview.png",
     }
     assert "skills" in package["files"]
     assert "docs/PI_PACKAGE.md" in package["files"]
@@ -35,5 +35,6 @@ def test_agentdir_pi_skill_frontmatter_and_workflow() -> None:
     assert len(description.group(1)) <= 1024
     assert re.search(r"^compatibility: ", frontmatter, re.MULTILINE)
     assert "agentdir work start" in text
+    assert "agentdir adopt --gitignore user" in text
     assert "agentdir run --" in text
     assert "agentdir work finish --json" in text

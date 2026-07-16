@@ -31,9 +31,9 @@ chmod +x dist/rollback-agentdir.sh
 Expected assets (substitute the release version):
 
 ```text
-dist/agentdir_cli-0.7.7-py3-none-any.whl
-dist/agentdir_cli-0.7.7.tar.gz
-dist/jstxn-agentdir-pi-0.7.7.tgz
+dist/agentdir_cli-0.7.8-py3-none-any.whl
+dist/agentdir_cli-0.7.8.tar.gz
+dist/jstxn-agentdir-pi-0.7.8.tgz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -41,19 +41,19 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.7.7 -m "Release AgentDir v0.7.7"
+git tag -a v0.7.8 -m "Release AgentDir v0.7.8"
 git push origin main
-git push origin v0.7.7
+git push origin v0.7.8
 
-gh release create v0.7.7 \
-  dist/agentdir_cli-0.7.7-py3-none-any.whl \
-  dist/agentdir_cli-0.7.7.tar.gz \
-  dist/jstxn-agentdir-pi-0.7.7.tgz \
+gh release create v0.7.8 \
+  dist/agentdir_cli-0.7.8-py3-none-any.whl \
+  dist/agentdir_cli-0.7.8.tar.gz \
+  dist/jstxn-agentdir-pi-0.7.8.tgz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.7.7" \
-  --notes-file docs/releases/v0.7.7.md
+  --title "AgentDir v0.7.8" \
+  --notes-file docs/releases/v0.7.8.md
 ```
 
 Publishing the release triggers `publish.yml`, which rebuilds the sdist and
@@ -65,7 +65,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.7.7 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.7.8 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -79,7 +79,7 @@ mkdir -p "$repo"
 git -C "$repo" init
 printf 'release smoke\n' > "$tmp/body.txt"
 cd "$repo"
-"$tmp/prefix/bin/agentdir" adopt --install-skill store
+"$tmp/prefix/bin/agentdir" adopt --install-skill store --gitignore user
 "$tmp/prefix/bin/agentdir" work start "release smoke" --emit-context
 "$tmp/prefix/bin/agentdir" run -- python3 -c "print('release smoke')"
 "$tmp/prefix/bin/agentdir" context build "release smoke"
@@ -101,13 +101,13 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.7.7-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.7.8-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.7.6
+  bash dist/rollback-agentdir.sh v0.7.7
 
 "$tmp/prefix/bin/agentdir" --help
 ```
