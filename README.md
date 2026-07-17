@@ -1,7 +1,7 @@
 # AgentDir
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/jstxn/agentdir/main/docs/assets/agentdir-overview.png" alt="AgentDir turns agent work into a saved trail, searchable memory, and proof for engineers." />
+  <img src="docs/assets/agentdir-agent-trace-demo.gif" alt="AgentDir records observable agent reasoning artifacts, tool calls, evidence, and handoffs across Codex, Claude, Pi, and other coding agents." />
 </p>
 
 <p align="center">
