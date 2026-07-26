@@ -73,3 +73,5 @@ If you need to preview the final handoff without ending the active session, run 
 Before claiming tests, builds, lint, typecheck, hooks, release checks, or doctor checks passed, verify the latest recorded evidence with `agentdir evidence --brief`.
 
 `agentdir audit claims` matches claim keywords, so vague phrasing ("everything works", "verified locally") is not checkable. When evidence failed and the text claims nothing about it, the family is reported `unreviewed` and the audit is not `ok`. Name the check and its result plainly so the claim can be verified against evidence.
+
+Reporting a failure plainly ("tests failed", "two tests still fail") is recorded as `acknowledged` and does not count against the audit. Report failing checks rather than writing around them.

@@ -553,3 +553,80 @@ def test_audit_claims_still_matches_stated_claims_by_keyword(tmp_path: Path) -> 
     )
 
     assert claim(payload, "build")["status"] == "contradicted"
+
+
+def test_audit_claims_accepts_an_honest_failure_report(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    _session_with_failed_tests(repo)
+
+    # Success patterns only know one polarity, so "tests failed" parses as no
+    # claim. Flagging it would punish exactly the honesty the audit wants.
+    for text in (
+        "Tests failed.",
+        "The test suite is still failing.",
+        "Two tests fail; I am still debugging.",
+        "I did not run the tests.",
+    ):
+        payload = json.loads(
+            run_cli("audit", "claims", "--text", "-", "--json", cwd=repo, input_text=text).stdout
+        )
+        assert claim(payload, "test")["status"] == "acknowledged", text
+        assert payload["ok"] is True, text
+
+        run_cli("audit", "claims", "--text", "-", "--json", "--strict", cwd=repo, input_text=text)
+
+
+def test_audit_claims_treats_negated_failure_as_a_success_claim(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    _session_with_failed_tests(repo)
+
+    # Failure vocabulary asserting success ("no test failures") must not read as
+    # an acknowledgement; it contradicts the recorded evidence.
+    for text in ("No test failures.", "There are no failing tests.", "Tests are not failing."):
+        payload = json.loads(
+            run_cli("audit", "claims", "--text", "-", "--json", cwd=repo, input_text=text).stdout
+        )
+        assert claim(payload, "test")["status"] == "contradicted", text
+        assert payload["ok"] is False, text
+
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            "--strict",
+            cwd=repo,
+            input_text=text,
+            expected_returncode=1,
+        )
+
+
+def test_audit_claims_supports_negated_failure_against_passing_evidence(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "negated success", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('5 tests passed')",
+        cwd=repo,
+    )
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="No test failures.",
+        ).stdout
+    )
+
+    assert claim(payload, "test")["status"] == "supported"
+    assert payload["ok"] is True

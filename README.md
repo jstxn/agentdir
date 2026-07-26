@@ -335,6 +335,12 @@ and the text makes no checkable claim about it, the audit reports that family as
 check. `claims_detected` reports how many claims were actually parsed, so
 "nothing to audit" is never mistaken for "audited and clean".
 
+Text that states the failure instead ("tests failed", "two tests fail") is
+reported as `acknowledged` and does not count against the audit, so honest
+failure reporting is never flagged like text that hid the failure. Failure
+vocabulary asserting success ("no test failures") is treated as a success claim
+and checked against evidence like any other.
+
 ### Context Packs
 
 Agents can package retrieved context into auditable source manifests:

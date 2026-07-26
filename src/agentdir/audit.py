@@ -25,12 +25,17 @@ CLAIM_CONTRADICTED = "contradicted"
 # patterns cannot check. Distinct from "contradicted": nothing was disproved,
 # the text simply dodged review.
 CLAIM_UNREVIEWED = "unreviewed"
+# Recorded evidence failed and the text says so. Reported for visibility, but it
+# is not a problem: the success patterns only know one polarity, so without this
+# an honest failure report would be flagged exactly like a text that hid one.
+CLAIM_ACKNOWLEDGED = "acknowledged"
 CLAIM_STATUSES = (
     CLAIM_SUPPORTED,
     CLAIM_PARTIAL,
     CLAIM_UNSUPPORTED,
     CLAIM_CONTRADICTED,
     CLAIM_UNREVIEWED,
+    CLAIM_ACKNOWLEDGED,
 )
 CLAIM_PROBLEM_STATUSES = (CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED, CLAIM_UNREVIEWED)
 
@@ -61,6 +66,26 @@ CLAIM_PATTERNS = {
 }
 
 NEGATED_CLAIM_RE = re.compile(r"\b(not run|did not run|didn't run|was not run|wasn't run|without running)\b", re.I)
+
+FAILURE_WORDS_RE = re.compile(
+    r"\b(fail|fails|failed|failing|failure|failures|broken|breaking|error|errors|"
+    r"red|regressed|regression|regressions|does not pass|did not pass|not passing)\b",
+    re.I,
+)
+
+# "no test failures", "tests are not failing": failure vocabulary asserting
+# success. These are success claims, not acknowledgements of a failure.
+NEGATED_FAILURE_RE = re.compile(
+    r"\b(no|not|never|zero|without|free of)\b[^.\n]{0,30}?"
+    r"\b(fail\w*|error\w*|broken|regress\w*|red)\b",
+    re.I,
+)
+
+FAMILY_KEYWORD_PATTERNS = {
+    family: re.compile(r"\b(" + "|".join(re.escape(word) for word in words) + r")\b", re.I)
+    for family, words in CLAIM_KEYWORDS.items()
+}
+
 _MISSING = object()
 
 
@@ -200,7 +225,7 @@ def audit_claims(
                 "evidence": _evidence_ref(evidence),
             }
         )
-    claims.extend(_unreviewed_failures(tool_results, detected))
+    claims.extend(_unclaimed_failures(tool_results, detected, _detect_acknowledged_families(text)))
     return {
         "session_id": resolved,
         "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
@@ -210,16 +235,39 @@ def audit_claims(
     }
 
 
-def _unreviewed_failures(
+def _detect_acknowledged_families(text: str) -> set[str]:
+    """Families the text reports as failing, rather than claiming success for.
+
+    ``CLAIM_PATTERNS`` only matches success wording, so "tests failed" parses as
+    no claim at all. Without this, honest failure reporting would be flagged
+    exactly like text that hid the failure.
+    """
+    families: set[str] = set()
+    for sentence in re.split(r"[.\n]", text):
+        if not (FAILURE_WORDS_RE.search(sentence) or NEGATED_CLAIM_RE.search(sentence)):
+            continue
+        # "no test failures" uses failure words to assert success; that is a
+        # claim to check, not an acknowledgement.
+        if NEGATED_FAILURE_RE.search(sentence):
+            continue
+        for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+            if pattern.search(sentence):
+                families.add(family)
+    return families
+
+
+def _unclaimed_failures(
     tool_results: list[dict[str, Any]],
     detected: list[str],
+    acknowledged: set[str],
 ) -> list[dict[str, Any]]:
-    """Flag failed evidence the text never made a checkable claim about.
+    """Report failed evidence the text made no success claim about.
 
     Claim detection is keyword-based, so ordinary phrasing ("everything works",
     "verified locally") matches nothing. Reporting ``ok`` in that case reads as
     "audited and clean" when the truth is "not audited at all", which is the
-    worst direction for this check to fail in.
+    worst direction for this check to fail in. Text that states the failure
+    instead is recorded as acknowledged and does not count against the audit.
     """
     unreviewed: list[dict[str, Any]] = []
     for family in CLAIM_FAMILIES:
@@ -232,14 +280,21 @@ def _unreviewed_failures(
         evidence = _latest_classified_tool_result(tool_results, family)
         if evidence is None or evidence.get("tool_exit_code") == 0:
             continue
+        exit_code = evidence.get("tool_exit_code")
+        if family in acknowledged:
+            status = CLAIM_ACKNOWLEDGED
+            message = f"latest {family} evidence failed with exit {exit_code}; the text reports it as failing"
+        else:
+            status = CLAIM_UNREVIEWED
+            message = (
+                f"latest {family} evidence failed with exit {exit_code} "
+                f"but the text makes no checkable {family} claim"
+            )
         unreviewed.append(
             {
                 "family": family,
-                "status": CLAIM_UNREVIEWED,
-                "message": (
-                    f"latest {family} evidence failed with exit {evidence.get('tool_exit_code')} "
-                    f"but the text makes no checkable {family} claim"
-                ),
+                "status": status,
+                "message": message,
                 "evidence": _evidence_ref(evidence),
             }
         )
@@ -362,14 +417,30 @@ def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None | o
 
 def _detect_claim_families(text: str) -> list[str]:
     families: list[str] = []
+    negated_failure = _families_in_sentences(text, NEGATED_FAILURE_RE)
     for family in CLAIM_FAMILIES:
         pattern = CLAIM_PATTERNS[family]
+        matched = False
         for match in pattern.finditer(text):
             window = text[max(0, match.start() - 40): match.end() + 40]
             if NEGATED_CLAIM_RE.search(window):
                 continue
             families.append(family)
+            matched = True
             break
+        if not matched and family in negated_failure:
+            families.append(family)
+    return families
+
+
+def _families_in_sentences(text: str, trigger: re.Pattern[str]) -> set[str]:
+    families: set[str] = set()
+    for sentence in re.split(r"[.\n]", text):
+        if not trigger.search(sentence):
+            continue
+        for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+            if pattern.search(sentence):
+                families.add(family)
     return families
 
 
