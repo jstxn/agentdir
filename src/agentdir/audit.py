@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .claims import OUTCOME_PASSED, recorded_claims
 from .context import audit_context_pack
 from .doctor import run_doctor
 from .git import git_status_short
@@ -21,7 +22,23 @@ CLAIM_SUPPORTED = "supported"
 CLAIM_PARTIAL = "partial"
 CLAIM_UNSUPPORTED = "unsupported"
 CLAIM_CONTRADICTED = "contradicted"
-CLAIM_STATUSES = (CLAIM_SUPPORTED, CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED)
+# Recorded evidence failed, but the text phrases its result in a way the claim
+# patterns cannot check. Distinct from "contradicted": nothing was disproved,
+# the text simply dodged review.
+CLAIM_UNREVIEWED = "unreviewed"
+# Recorded evidence failed and the text says so. Reported for visibility, but it
+# is not a problem: the success patterns only know one polarity, so without this
+# an honest failure report would be flagged exactly like a text that hid one.
+CLAIM_ACKNOWLEDGED = "acknowledged"
+CLAIM_STATUSES = (
+    CLAIM_SUPPORTED,
+    CLAIM_PARTIAL,
+    CLAIM_UNSUPPORTED,
+    CLAIM_CONTRADICTED,
+    CLAIM_UNREVIEWED,
+    CLAIM_ACKNOWLEDGED,
+)
+CLAIM_PROBLEM_STATUSES = (CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED, CLAIM_UNREVIEWED)
 
 CLAIM_FAMILIES = tuple(family for family in EVIDENCE_FAMILIES if family != "diagnostic")
 
@@ -50,6 +67,26 @@ CLAIM_PATTERNS = {
 }
 
 NEGATED_CLAIM_RE = re.compile(r"\b(not run|did not run|didn't run|was not run|wasn't run|without running)\b", re.I)
+
+FAILURE_WORDS_RE = re.compile(
+    r"\b(fail|fails|failed|failing|failure|failures|broken|breaking|error|errors|"
+    r"red|regressed|regression|regressions|does not pass|did not pass|not passing)\b",
+    re.I,
+)
+
+# "no test failures", "tests are not failing": failure vocabulary asserting
+# success. These are success claims, not acknowledgements of a failure.
+NEGATED_FAILURE_RE = re.compile(
+    r"\b(no|not|never|zero|without|free of)\b[^.\n]{0,30}?"
+    r"\b(fail\w*|error\w*|broken|regress\w*|red)\b",
+    re.I,
+)
+
+FAMILY_KEYWORD_PATTERNS = {
+    family: re.compile(r"\b(" + "|".join(re.escape(word) for word in words) + r")\b", re.I)
+    for family, words in CLAIM_KEYWORDS.items()
+}
+
 _MISSING = object()
 
 
@@ -144,6 +181,80 @@ def audit_session(
     }
 
 
+def audit_recorded_claims(
+    root: str | Path,
+    session_id: str | None = None,
+    *,
+    strict: bool = False,
+    rebuild: bool = True,
+    summary: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Check structured claims against evidence.
+
+    No wording is involved: each claim already names its family and outcome, so
+    this is a comparison rather than the interpretation `audit_claims` performs.
+    """
+    if summary is None:
+        summary = summarize_session(root, session_id, rebuild=rebuild)
+        rebuild = False
+    resolved = summary["session_id"]
+    if evidence is None:
+        evidence = evidence_rows(root, resolved, rebuild=rebuild)
+    tool_results = [row for row in evidence if row.get("event_type") == "tool.result"]
+    recorded = recorded_claims(root, resolved, rebuild=rebuild)
+
+    claims: list[dict[str, Any]] = []
+    for claim in recorded:
+        family = claim["family"]
+        row = _latest_classified_tool_result(tool_results, family)
+        claimed_pass = claim["outcome"] == OUTCOME_PASSED
+        if row is None:
+            status = CLAIM_UNSUPPORTED
+            message = f"claimed {family} {claim['outcome']} but no {family} evidence was recorded"
+        elif row.get("tool_exit_code") == 0:
+            if claimed_pass:
+                truncated = row.get("truncated") if "truncated" in row else evidence_truncated(row)
+                status = CLAIM_PARTIAL if truncated else CLAIM_SUPPORTED
+                message = (
+                    f"latest {family} evidence succeeded but its captured output was truncated; "
+                    "evidence may be incomplete"
+                    if truncated
+                    else f"latest {family} evidence succeeded"
+                )
+            else:
+                status = CLAIM_CONTRADICTED
+                message = f"claimed {family} failed but the latest {family} evidence succeeded"
+        else:
+            exit_code = row.get("tool_exit_code")
+            if claimed_pass:
+                status = CLAIM_CONTRADICTED
+                message = f"claimed {family} passed but the latest {family} evidence failed with exit {exit_code}"
+            else:
+                status = CLAIM_ACKNOWLEDGED
+                message = f"latest {family} evidence failed with exit {exit_code}; the claim reports it as failed"
+        claims.append(
+            {
+                "family": family,
+                "status": status,
+                "outcome": claim["outcome"],
+                "message": message,
+                "evidence": _evidence_ref(row),
+            }
+        )
+
+    claimed_families = [claim["family"] for claim in recorded]
+    claims.extend(_unclaimed_failures(tool_results, claimed_families, set(), source="recorded"))
+    return {
+        "session_id": resolved,
+        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
+        "strict": strict,
+        "source": "recorded",
+        "claims_detected": len(recorded),
+        "claims": claims,
+    }
+
+
 def audit_claims(
     root: str | Path,
     text: str,
@@ -162,7 +273,8 @@ def audit_claims(
         evidence = evidence_rows(root, resolved, rebuild=rebuild)
     tool_results = [row for row in evidence if row.get("event_type") == "tool.result"]
     claims = []
-    for family in _detect_claim_families(text):
+    detected = _detect_claim_families(text)
+    for family in detected:
         evidence = _latest_relevant_tool_result(tool_results, family)
         if evidence is None:
             status = CLAIM_UNSUPPORTED
@@ -188,12 +300,85 @@ def audit_claims(
                 "evidence": _evidence_ref(evidence),
             }
         )
+    claims.extend(_unclaimed_failures(tool_results, detected, _detect_acknowledged_families(text)))
     return {
         "session_id": resolved,
-        "ok": not any(claim["status"] in {CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in claims),
+        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
         "strict": strict,
+        "source": "text",
+        "claims_detected": len(detected),
         "claims": claims,
     }
+
+
+def _detect_acknowledged_families(text: str) -> set[str]:
+    """Families the text reports as failing, rather than claiming success for.
+
+    ``CLAIM_PATTERNS`` only matches success wording, so "tests failed" parses as
+    no claim at all. Without this, honest failure reporting would be flagged
+    exactly like text that hid the failure.
+    """
+    families: set[str] = set()
+    for sentence in re.split(r"[.\n]", text):
+        if not (FAILURE_WORDS_RE.search(sentence) or NEGATED_CLAIM_RE.search(sentence)):
+            continue
+        # "no test failures" uses failure words to assert success; that is a
+        # claim to check, not an acknowledgement.
+        if NEGATED_FAILURE_RE.search(sentence):
+            continue
+        for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+            if pattern.search(sentence):
+                families.add(family)
+    return families
+
+
+def _unclaimed_failures(
+    tool_results: list[dict[str, Any]],
+    detected: list[str],
+    acknowledged: set[str],
+    *,
+    source: str = "text",
+) -> list[dict[str, Any]]:
+    """Report failed evidence the text made no success claim about.
+
+    Claim detection is keyword-based, so ordinary phrasing ("everything works",
+    "verified locally") matches nothing. Reporting ``ok`` in that case reads as
+    "audited and clean" when the truth is "not audited at all", which is the
+    worst direction for this check to fail in. Text that states the failure
+    instead is recorded as acknowledged and does not count against the audit.
+    """
+    unreviewed: list[dict[str, Any]] = []
+    for family in CLAIM_FAMILIES:
+        if family in detected:
+            continue
+        # Only evidence AgentDir actually classified into this family, never the
+        # keyword fallback. That fallback exists to attach a claim the text made
+        # to plausible evidence; guessing here would report one failed command
+        # under every family whose keyword appears anywhere in its output.
+        evidence = _latest_classified_tool_result(tool_results, family)
+        if evidence is None or evidence.get("tool_exit_code") == 0:
+            continue
+        exit_code = evidence.get("tool_exit_code")
+        if family in acknowledged:
+            status = CLAIM_ACKNOWLEDGED
+            message = f"latest {family} evidence failed with exit {exit_code}; the text reports it as failing"
+        else:
+            status = CLAIM_UNREVIEWED
+            unclaimed = (
+                f"no {family} claim was recorded"
+                if source == "recorded"
+                else f"the text makes no checkable {family} claim"
+            )
+            message = f"latest {family} evidence failed with exit {exit_code} but {unclaimed}"
+        unreviewed.append(
+            {
+                "family": family,
+                "status": status,
+                "message": message,
+                "evidence": _evidence_ref(evidence),
+            }
+        )
+    return unreviewed
 
 
 def format_session_audit(audit: dict[str, Any]) -> str:
@@ -204,9 +389,19 @@ def format_session_audit(audit: dict[str, Any]) -> str:
 
 
 def format_claims_audit(audit: dict[str, Any]) -> str:
-    lines = [f"session={audit['session_id']}", f"ok={str(audit['ok']).lower()}"]
+    source = audit.get("source", "text")
+    lines = [
+        f"session={audit['session_id']}",
+        f"ok={str(audit['ok']).lower()}",
+        f"source={source}",
+        f"claims_detected={audit.get('claims_detected', len(audit['claims']))}",
+    ]
     if not audit["claims"]:
-        lines.append("claims=none")
+        lines.append(
+            "claims=none no structured claim recorded"
+            if source == "recorded"
+            else "claims=none no checkable verification claim found in the text"
+        )
         return "\n".join(lines)
     for claim in audit["claims"]:
         evidence = claim.get("evidence") or {}
@@ -230,7 +425,7 @@ def claims_audit_gaps(audit: dict[str, Any] | None) -> list[str]:
         return []
     gaps: list[str] = []
     for claim in audit.get("claims") or []:
-        if claim.get("status") in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED}:
+        if claim.get("status") in {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES}:
             gaps.append(f"{claim['family']}: {claim['message']}")
     return gaps
 
@@ -240,7 +435,7 @@ def strict_session_exit_code(audit: dict[str, Any]) -> int:
 
 
 def strict_claims_exit_code(audit: dict[str, Any]) -> int:
-    return 1 if any(claim["status"] in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in audit.get("claims") or []) else 0
+    return 1 if any(claim["status"] in {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES} for claim in audit.get("claims") or []) else 0
 
 
 def _check(
@@ -308,21 +503,44 @@ def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None | o
 
 def _detect_claim_families(text: str) -> list[str]:
     families: list[str] = []
+    negated_failure = _families_in_sentences(text, NEGATED_FAILURE_RE)
     for family in CLAIM_FAMILIES:
         pattern = CLAIM_PATTERNS[family]
+        matched = False
         for match in pattern.finditer(text):
             window = text[max(0, match.start() - 40): match.end() + 40]
             if NEGATED_CLAIM_RE.search(window):
                 continue
             families.append(family)
+            matched = True
             break
+        if not matched and family in negated_failure:
+            families.append(family)
     return families
 
 
-def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
+def _families_in_sentences(text: str, trigger: re.Pattern[str]) -> set[str]:
+    families: set[str] = set()
+    for sentence in re.split(r"[.\n]", text):
+        if not trigger.search(sentence):
+            continue
+        for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+            if pattern.search(sentence):
+                families.add(family)
+    return families
+
+
+def _latest_classified_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
     for row in reversed(rows):
         if row.get("family") == family:
             return row
+    return None
+
+
+def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
+    classified = _latest_classified_tool_result(rows, family)
+    if classified is not None:
+        return classified
     keywords = CLAIM_KEYWORDS[family]
     for row in reversed(rows):
         haystack = _tool_result_search_text(row)

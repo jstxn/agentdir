@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          # The store resolves paths and installs hook shims per platform, so
+          # cover macOS on one version rather than trusting Linux alone.
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Configure git identity
+        # The suite creates repositories and commits into them.
+        run: |
+          git config --global user.email "ci@agentdir.test"
+          git config --global user.name "AgentDir CI"
+          git config --global init.defaultBranch main
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e . pytest
+      - run: python -m compileall -q src tests
+      - run: python -m pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+      - name: Check the Pi package version matches the Python package
+        run: |
+          python - <<'PY'
+          import json, pathlib, re
+          pyproject = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+          package = json.loads(pathlib.Path("package.json").read_text(encoding="utf-8"))
+          if package["version"] != version:
+              raise SystemExit(
+                  f"package.json version {package['version']} does not match pyproject {version}"
+              )
+          print(f"versions match: {version}")
+          PY
+      - name: Check the install scripts parse
+        run: |
+          bash -n scripts/install.sh
+          bash -n scripts/rollback.sh

@@ -395,3 +395,103 @@ def test_dogfood_session_rejects_unsupported_agentdir_python(tmp_path: Path) -> 
 
     assert result.returncode == 1
     assert "AGENTDIR_PYTHON must be Python 3.11 or newer" in result.stderr
+
+
+def _session_with_failed_tests(repo: Path) -> None:
+    run_cli("work", "start", "unreviewed claims", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; print('FAILED test_x'); sys.exit(1)",
+        cwd=repo,
+        expected_returncode=1,
+    )
+
+
+def test_audit_claims_flags_failures_outside_a_partial_acknowledgement(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    _session_with_failed_tests(repo)
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="Lint passed.",
+        ).stdout
+    )
+
+    assert payload["claims_detected"] == 1
+    assert claim(payload, "lint")["status"] == "unsupported"
+    assert claim(payload, "test")["status"] == "unreviewed"
+
+
+def test_audit_claims_does_not_guess_families_for_unreviewed_failures(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "noisy failure", cwd=repo)
+    # A realistic failure log mentions many family keywords. Only the family the
+    # evidence was actually classified into may be flagged, or one failed command
+    # reports itself under every family and buries the real signal.
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; print('FAILED: build step, lint config, typecheck, doctor, release'); sys.exit(1)",
+        cwd=repo,
+        expected_returncode=1,
+    )
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="Everything works.",
+        ).stdout
+    )
+
+    unreviewed = [c for c in payload["claims"] if c["status"] == "unreviewed"]
+    assert [c["family"] for c in unreviewed] == ["test"]
+
+
+def test_audit_claims_still_matches_stated_claims_by_keyword(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "keyword fallback", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "check",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; print('build failed'); sys.exit(1)",
+        cwd=repo,
+        expected_returncode=1,
+    )
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="Build passed.",
+        ).stdout
+    )
+
+    assert claim(payload, "build")["status"] == "contradicted"

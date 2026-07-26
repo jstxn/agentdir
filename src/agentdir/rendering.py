@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
 
@@ -80,7 +81,16 @@ def _rich() -> tuple[Any, Any] | None:
 
 
 def _export(renderable: Any, Console: Any) -> str:
-    console = Console(record=True, force_terminal=False, color_system=None, width=120)
+    # Render into a private buffer. Without an explicit file, rich writes the
+    # table to stdout as well as recording it, and callers that print the
+    # exported text then emit it a second time.
+    console = Console(
+        record=True,
+        force_terminal=False,
+        color_system=None,
+        width=120,
+        file=io.StringIO(),
+    )
     console.print(renderable)
     return console.export_text(clear=True)
 

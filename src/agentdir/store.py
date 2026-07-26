@@ -4,14 +4,17 @@ import json
 import os
 import platform
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .git import git_common_root, git_root
 
 STORE_VERSION = "0.1"
 CONFIG_DIR = ".agentdir"
 INDEX_FILE = "agentdir.sqlite3"
 SCOPE_CHOICES = ("project", "user", "global", "machine")
+WORKTREE_STORE_ENV = "AGENTDIR_WORKTREE_STORE"
+WORKTREE_STORE_MODES = ("shared", "local")
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
 
@@ -86,19 +89,42 @@ def paths_for(root: str | Path) -> RootPaths:
 
 def find_project_base(cwd: str | Path | None = None) -> Path:
     start = Path(cwd or Path.cwd()).expanduser().resolve()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=start,
-            text=True,
-            capture_output=True,
-            check=False,
+    toplevel = git_root(start)
+    if toplevel is None:
+        return start
+    return _share_worktree_base(toplevel, start)
+
+
+def worktree_store_mode() -> str:
+    mode = (os.environ.get(WORKTREE_STORE_ENV) or "shared").strip().lower()
+    if mode not in WORKTREE_STORE_MODES:
+        raise AgentDirConfigError(
+            f"Invalid {WORKTREE_STORE_ENV}={mode!r}; expected one of {', '.join(WORKTREE_STORE_MODES)}"
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
-    except OSError:
-        pass
-    return start
+    return mode
+
+
+def _share_worktree_base(toplevel: Path, cwd: Path) -> Path:
+    """Point a linked worktree at the main working tree's store.
+
+    Every ``git worktree`` checkout has its own toplevel, so without this a
+    repository's evidence and memory silently fragment into one store per
+    worktree. An existing store inside the worktree always wins, so nothing
+    that already recorded there is orphaned.
+    """
+    # Validated first so a misspelled opt-out is reported rather than silently
+    # ignored on the paths that return early.
+    mode = worktree_store_mode()
+    if (toplevel / CONFIG_DIR).is_dir() or mode == "local":
+        return toplevel
+    main = git_common_root(cwd)
+    if main is None or main == toplevel:
+        return toplevel
+    # Only adopt the main tree's store when it already exists, and only when it
+    # is a real store; a worktree must never silently create one outside itself.
+    if (main / CONFIG_DIR / "VERSION").is_file():
+        return main
+    return toplevel
 
 
 def machine_root() -> Path:

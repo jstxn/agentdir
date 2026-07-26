@@ -17,7 +17,14 @@ The agent owns the background recording flow:
 - Use `agentdir status` for a single view of session, evidence, memory, context,
   registered roots, and doctor health.
 - Use `agentdir evidence --brief` and `agentdir timeline` to skim recorded work.
-- Use `agentdir audit session` and `agentdir audit claims --text <path|->` before
+- Record each verification the final response relies on with
+  `agentdir claim <family> --passed|--failed`, e.g. `agentdir claim test --passed`.
+  Families: test, lint, typecheck, build, doctor, release.
+- Record failures as failures. A claim that overstates a result is reported as
+  contradicted; an honest failure claim is acknowledged.
+- Re-recording a family replaces its earlier claim; withdraw one made in error
+  with `agentdir claim <family> --retract`.
+- Use `agentdir audit session` and `agentdir audit claims` before
   final claims when evidence support matters.
 - Before the final response, run `agentdir work finish --json` when practical.
   Use `agentdir report final --format json` to preview the same agent handoff
