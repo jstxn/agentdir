@@ -4,9 +4,10 @@ import json
 import os
 import platform
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .git import git_common_root, git_root
 
 STORE_VERSION = "0.1"
 CONFIG_DIR = ".agentdir"
@@ -88,20 +89,10 @@ def paths_for(root: str | Path) -> RootPaths:
 
 def find_project_base(cwd: str | Path | None = None) -> Path:
     start = Path(cwd or Path.cwd()).expanduser().resolve()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=start,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            toplevel = Path(result.stdout.strip()).resolve()
-            return _share_worktree_base(toplevel, start)
-    except OSError:
-        pass
-    return start
+    toplevel = git_root(start)
+    if toplevel is None:
+        return start
+    return _share_worktree_base(toplevel, start)
 
 
 def worktree_store_mode() -> str:
@@ -121,18 +112,17 @@ def _share_worktree_base(toplevel: Path, cwd: Path) -> Path:
     worktree. An existing store inside the worktree always wins, so nothing
     that already recorded there is orphaned.
     """
-    if (toplevel / CONFIG_DIR).is_dir():
+    # Validated first so a misspelled opt-out is reported rather than silently
+    # ignored on the paths that return early.
+    mode = worktree_store_mode()
+    if (toplevel / CONFIG_DIR).is_dir() or mode == "local":
         return toplevel
-    if worktree_store_mode() == "local":
-        return toplevel
-    from .git import git_common_root
-
     main = git_common_root(cwd)
     if main is None or main == toplevel:
         return toplevel
-    # Only adopt the main tree's store when it already exists; a worktree must
-    # never silently create a store outside itself.
-    if (main / CONFIG_DIR).is_dir():
+    # Only adopt the main tree's store when it already exists, and only when it
+    # is a real store; a worktree must never silently create one outside itself.
+    if (main / CONFIG_DIR / "VERSION").is_file():
         return main
     return toplevel
 

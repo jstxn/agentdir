@@ -225,7 +225,11 @@ def _unreviewed_failures(
     for family in CLAIM_FAMILIES:
         if family in detected:
             continue
-        evidence = _latest_relevant_tool_result(tool_results, family)
+        # Only evidence AgentDir actually classified into this family, never the
+        # keyword fallback. That fallback exists to attach a claim the text made
+        # to plausible evidence; guessing here would report one failed command
+        # under every family whose keyword appears anywhere in its output.
+        evidence = _latest_classified_tool_result(tool_results, family)
         if evidence is None or evidence.get("tool_exit_code") == 0:
             continue
         unreviewed.append(
@@ -369,10 +373,17 @@ def _detect_claim_families(text: str) -> list[str]:
     return families
 
 
-def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
+def _latest_classified_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
     for row in reversed(rows):
         if row.get("family") == family:
             return row
+    return None
+
+
+def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
+    classified = _latest_classified_tool_result(rows, family)
+    if classified is not None:
+        return classified
     keywords = CLAIM_KEYWORDS[family]
     for row in reversed(rows):
         haystack = _tool_result_search_text(row)

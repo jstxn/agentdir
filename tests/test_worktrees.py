@@ -112,3 +112,27 @@ def test_doctor_renders_once(tmp_path: Path) -> None:
     output = run_cli("doctor", cwd=repo).stdout
 
     assert output.count("AgentDir Doctor") == 1
+
+
+def test_invalid_worktree_store_mode_is_reported(tmp_path: Path) -> None:
+    repo = adopted_repo(tmp_path)
+
+    result = run_cli(
+        "status",
+        cwd=repo,
+        env_extra={"AGENTDIR_WORKTREE_STORE": "locl"},
+        expected_returncode=5,
+    )
+
+    assert "AGENTDIR_WORKTREE_STORE" in result.stderr
+
+
+def test_worktree_ignores_a_main_directory_that_is_not_a_store(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "main")
+    commit_initial(repo)
+    (repo / ".agentdir").mkdir()
+    worktree = add_worktree(repo, tmp_path / "feature", "feature")
+
+    resolved = run_cli("root", cwd=worktree).stdout.strip()
+
+    assert Path(resolved) == (worktree / ".agentdir").resolve()

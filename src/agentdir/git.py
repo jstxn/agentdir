@@ -1,7 +1,27 @@
 from __future__ import annotations
 
 import subprocess
+from functools import lru_cache
 from pathlib import Path
+
+
+def _cache_key(cwd: str | Path | None) -> str:
+    return str(Path(cwd).expanduser().resolve() if cwd else Path.cwd())
+
+
+@lru_cache(maxsize=128)
+def _cached_topology(args: tuple[str, ...], key: str) -> str | None:
+    return git_output(list(args), key)
+
+
+def _topology(args: list[str], cwd: str | Path | None = None) -> str | None:
+    """Repository layout lookup, memoised for the life of the process.
+
+    ``git_root`` sits on hot paths (every session-pointer read resolves the
+    workspace), and a repository's layout does not move under a running
+    command, so the subprocess is worth spending only once per directory.
+    """
+    return _cached_topology(tuple(args), _cache_key(cwd))
 
 
 def git_output(args: list[str], cwd: str | Path | None = None) -> str | None:
@@ -21,7 +41,7 @@ def git_output(args: list[str], cwd: str | Path | None = None) -> str | None:
 
 
 def git_root(cwd: str | Path | None = None) -> Path | None:
-    output = git_output(["rev-parse", "--show-toplevel"], cwd)
+    output = _topology(["rev-parse", "--show-toplevel"], cwd)
     return Path(output).resolve() if output else None
 
 
@@ -33,7 +53,7 @@ def git_common_root(cwd: str | Path | None = None) -> Path | None:
     repository. The common git directory is shared by every worktree, so its
     parent is the main working tree.
     """
-    output = git_output(["rev-parse", "--git-common-dir"], cwd)
+    output = _topology(["rev-parse", "--git-common-dir"], cwd)
     if not output:
         return None
     common = Path(output)
