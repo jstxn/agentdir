@@ -74,19 +74,27 @@ def current_session_path(root: str | Path, cwd: str | Path | None = None) -> Pat
     if scoped.is_file():
         return scoped
     legacy = _legacy_current_session_path(root)
-    if legacy.is_file():
-        return legacy
+    others = _scoped_session_paths(root)
     if _cwd_owns_store(root, cwd):
         # The caller is inside a working tree that owns this store, so its slug
-        # is authoritative: a sibling worktree's pointer must not be borrowed.
+        # is authoritative and a sibling worktree's pointer must not be
+        # borrowed. The legacy pointer is only this workspace's when nothing has
+        # written a scoped one, i.e. a store from before workspace scoping.
+        if not others and legacy.is_file():
+            return legacy
         return scoped
     # Otherwise the command targeted the store from an unrelated directory
     # (e.g. an explicit --root) and the slug is meaningless. A single active
     # pointer is unambiguous; with several, refuse to guess between worktrees.
-    others = sorted((paths_for(root).state / "workspaces").glob("*/current-session.json"))
+    if legacy.is_file():
+        return legacy
     if len(others) == 1:
         return others[0]
     return scoped
+
+
+def _scoped_session_paths(root: str | Path) -> list[Path]:
+    return sorted((paths_for(root).state / "workspaces").glob("*/current-session.json"))
 
 
 def _cwd_owns_store(root: str | Path, cwd: str | Path | None = None) -> bool:
@@ -103,13 +111,14 @@ def last_session_path(root: str | Path, cwd: str | Path | None = None) -> Path:
 
 def write_session_state(root: str | Path, state: SessionState) -> None:
     init_root(root)
+    payload = json.dumps(asdict(state), indent=2) + "\n"
     path = scoped_current_session_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(asdict(state), indent=2) + "\n")
-    # One-way migration: the unscoped pointer would otherwise shadow this one.
-    legacy = _legacy_current_session_path(root)
-    if legacy.is_file():
-        legacy.unlink()
+    atomic_write_text(path, payload)
+    # Mirror to the unscoped pointer so a downgrade still finds the session.
+    # The scoped path wins on read, so this never shadows the real one; the
+    # project ships scripts/rollback.sh, which makes downgrade a supported path.
+    atomic_write_text(_legacy_current_session_path(root), payload)
 
 
 def read_current_session(root: str | Path) -> SessionState | None:

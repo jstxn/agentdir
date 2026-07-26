@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .artifacts import artifact_path
-from .envelope import parse_envelope, validate_required
+from .envelope import header_value, parse_envelope, validate_required
 from .git import git_common_root
 from .hooks import hooks_manifest_issues
 from .mailbox import iter_records
@@ -96,6 +96,13 @@ def run_doctor(root: str | Path) -> DoctorReport:
                 f"{paths.index_path}: {finding} contains secret-like indexed text; "
                 "run 'agentdir index rebuild'"
             )
+    unfolded = _index_unfolded_headers(paths.index_path)
+    if unfolded:
+        report.add_warning(
+            f"{paths.index_path}: {unfolded} indexed header value(s) keep the whitespace of a "
+            "folded header, which was indexed by AgentDir before 0.7.9 on Python 3.11. "
+            "Artifact lookups against those rows will not match; run 'agentdir index rebuild'"
+        )
     return report
 
 
@@ -121,6 +128,28 @@ def _split_worktree_store(root: Path) -> str | None:
         )
     except OSError:
         return None
+
+
+def _index_unfolded_headers(index_path: Path) -> int:
+    """Count indexed header values that still carry fold whitespace.
+
+    Upgrading does not rewrite rows that were already indexed, so a store built
+    by an affected 3.11 install keeps padded values and silently fails artifact
+    lookups against them until the index is rebuilt.
+    """
+    if not index_path.is_file():
+        return 0
+    try:
+        with sqlite3.connect(index_path) as conn:
+            if not _table_exists(conn, "headers"):
+                return 0
+            return sum(
+                1
+                for (value,) in conn.execute("select value from headers")
+                if value is not None and value != header_value(value)
+            )
+    except sqlite3.DatabaseError:
+        return 0
 
 
 def _index_secret_findings(index_path: Path) -> list[str]:

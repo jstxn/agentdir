@@ -69,7 +69,7 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.7.8"
+    assert result.stdout.strip() == "agentdir 0.8.0"
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
