@@ -56,7 +56,7 @@ def run_doctor(root: str | Path) -> DoctorReport:
                 relative_path = str(record.path.relative_to(paths.root))
                 if parsed.message_id:
                     seen[parsed.message_id].append((relative_path, parsed.body_sha256))
-                for sha in parsed.message.get_all("X-AgentDir-Blob-SHA256", []):
+                for sha in parsed.headers("X-AgentDir-Blob-SHA256"):
                     if not artifact_path(root, sha).exists():
                         report.add_error(f"{record.path}: missing artifact blob {sha}")
             except Exception as exc:

@@ -16,6 +16,18 @@ from .store import AgentDirError
 AGENTDIR_VERSION = "0.1"
 
 
+def header_value(value: object) -> str:
+    """Normalise a parsed header value.
+
+    A header longer than the fold width is written across continuation lines.
+    Python 3.12 and newer strip the continuation's leading whitespace when the
+    value is read back; 3.11 does not. `X-AgentDir-Blob-SHA256` is 89 characters
+    with its name, so it always folds, and on 3.11 the artifact lookup was made
+    with a leading space and never matched.
+    """
+    return " ".join(str(value).split())
+
+
 @dataclass(frozen=True)
 class ParsedEnvelope:
     message: Message
@@ -24,7 +36,14 @@ class ParsedEnvelope:
 
     @property
     def message_id(self) -> str | None:
-        return self.message.get("Message-ID")
+        return self.header("Message-ID")
+
+    def header(self, name: str) -> str | None:
+        raw = self.message.get(name)
+        return None if raw is None else header_value(raw)
+
+    def headers(self, name: str) -> list[str]:
+        return [header_value(raw) for raw in self.message.get_all(name, [])]
 
     @property
     def body_text(self) -> str:

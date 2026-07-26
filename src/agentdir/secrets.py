@@ -45,8 +45,8 @@ def scan_secret_records(root: str | Path) -> list[SecretFinding]:
                     path=str(record.path.relative_to(paths.root)),
                     mailbox=str(mailbox.relative_to(paths.root)),
                     message_id=parsed.message_id,
-                    event_type=parsed.message.get("X-AgentDir-Event-Type"),
-                    subject=parsed.message.get("Subject"),
+                    event_type=parsed.header("X-AgentDir-Event-Type"),
+                    subject=parsed.header("Subject"),
                     labels=labels,
                 )
             )

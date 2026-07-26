@@ -16,7 +16,7 @@ try:
 except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer machines.
     fcntl = None
 
-from .envelope import parse_envelope, validate_required
+from .envelope import header_value, parse_envelope, validate_required
 from .mailbox import iter_records
 from .memory import index_memory_document, index_session_summaries, memory_schema_sql
 from .store import AgentDirError, RootPaths, discover_mailboxes, paths_for, require_root
@@ -417,12 +417,12 @@ def _insert_record(
         for name, value in msg.items():
             conn.execute(
                 "insert into headers(message_rowid, name, value) values (?, ?, ?)",
-                (rowid, name, value),
+                (rowid, name, header_value(value)),
             )
         for sha in msg.get_all("X-AgentDir-Blob-SHA256", []):
             conn.execute(
                 "insert into message_artifacts(message_rowid, sha256) values (?, ?)",
-                (rowid, sha),
+                (rowid, header_value(sha)),
             )
     try:
         conn.execute(
