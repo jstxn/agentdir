@@ -12,11 +12,21 @@ from .actors import create_actor, send_message
 from .artifacts import add_artifact
 from .audit import (
     audit_claims,
+    audit_recorded_claims,
     audit_session,
     format_claims_audit,
     format_session_audit,
     strict_claims_exit_code,
     strict_session_exit_code,
+)
+from .claims import (
+    CLAIM_FAMILIES,
+    OUTCOME_FAILED,
+    OUTCOME_PASSED,
+    OUTCOME_RETRACTED,
+    format_claims,
+    record_claim,
+    recorded_claims,
 )
 from .context import (
     CONSUMPTION_PURPOSES,
@@ -1554,17 +1564,47 @@ def cmd_audit_session(args: argparse.Namespace) -> int:
 
 
 def cmd_audit_claims(args: argparse.Namespace) -> int:
-    audit = audit_claims(
-        command_root(args),
-        read_body(args.text),
-        args.session,
-        strict=args.strict,
-    )
+    root = command_root(args)
+    if args.text is None:
+        audit = audit_recorded_claims(root, args.session, strict=args.strict)
+    else:
+        audit = audit_claims(root, read_body(args.text), args.session, strict=args.strict)
     if args.json:
         print_json(audit)
     else:
         print(format_claims_audit(audit))
     return strict_claims_exit_code(audit) if args.strict else 0
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    if args.retract:
+        outcome = OUTCOME_RETRACTED
+    elif args.failed:
+        outcome = OUTCOME_FAILED
+    else:
+        outcome = OUTCOME_PASSED
+    result = record_claim(
+        command_root(args, create=True),
+        args.family,
+        outcome,
+        note=args.note,
+        session_id=args.session,
+        actor=args.actor,
+    )
+    if args.json:
+        print_json(result)
+    else:
+        print(f"claim={result['family']} outcome={result['outcome']} session={result['session_id']}")
+    return 0
+
+
+def cmd_claim_list(args: argparse.Namespace) -> int:
+    claims = recorded_claims(command_root(args), args.session)
+    if args.json:
+        print_json({"claims": claims})
+    else:
+        print(format_claims(claims))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2182,13 +2222,48 @@ def build_parser() -> argparse.ArgumentParser:
     audit_session_parser.add_argument("--strict", action="store_true")
     audit_session_parser.add_argument("--json", action="store_true")
     audit_session_parser.set_defaults(func=cmd_audit_session)
-    audit_claims_parser = audit_sub.add_parser("claims")
+    audit_claims_parser = audit_sub.add_parser(
+        "claims",
+        help="check claims against evidence; without --text, checks recorded structured claims",
+    )
     add_scope_args(audit_claims_parser)
-    audit_claims_parser.add_argument("--text", required=True)
+    audit_claims_parser.add_argument(
+        "--text",
+        help="audit prose instead of recorded claims ('-' reads stdin)",
+    )
     audit_claims_parser.add_argument("--session")
     audit_claims_parser.add_argument("--strict", action="store_true")
     audit_claims_parser.add_argument("--json", action="store_true")
     audit_claims_parser.set_defaults(func=cmd_audit_claims)
+
+    claim_parser = sub.add_parser(
+        "claim",
+        help="record a structured verification claim checked against evidence",
+    )
+    claim_sub = claim_parser.add_subparsers(dest="claim_command", required=True)
+
+    claim_list_parser = claim_sub.add_parser("list", help="show the latest claim per family")
+    add_scope_args(claim_list_parser)
+    claim_list_parser.add_argument("--session")
+    claim_list_parser.add_argument("--json", action="store_true")
+    claim_list_parser.set_defaults(func=cmd_claim_list)
+
+    for family in CLAIM_FAMILIES:
+        family_parser = claim_sub.add_parser(family, help=f"record a {family} claim")
+        add_scope_args(family_parser)
+        outcome_group = family_parser.add_mutually_exclusive_group(required=True)
+        outcome_group.add_argument("--passed", action="store_true", help=f"{family} check passed")
+        outcome_group.add_argument("--failed", action="store_true", help=f"{family} check failed")
+        outcome_group.add_argument(
+            "--retract",
+            action="store_true",
+            help=f"withdraw the recorded {family} claim",
+        )
+        family_parser.add_argument("--note")
+        family_parser.add_argument("--session")
+        family_parser.add_argument("--actor", default="agent")
+        family_parser.add_argument("--json", action="store_true")
+        family_parser.set_defaults(func=cmd_claim, family=family)
 
     return parser
 

@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .claims import OUTCOME_PASSED, recorded_claims
 from .context import audit_context_pack
 from .doctor import run_doctor
 from .git import git_status_short
@@ -180,6 +181,80 @@ def audit_session(
     }
 
 
+def audit_recorded_claims(
+    root: str | Path,
+    session_id: str | None = None,
+    *,
+    strict: bool = False,
+    rebuild: bool = True,
+    summary: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Check structured claims against evidence.
+
+    No wording is involved: each claim already names its family and outcome, so
+    this is a comparison rather than the interpretation `audit_claims` performs.
+    """
+    if summary is None:
+        summary = summarize_session(root, session_id, rebuild=rebuild)
+        rebuild = False
+    resolved = summary["session_id"]
+    if evidence is None:
+        evidence = evidence_rows(root, resolved, rebuild=rebuild)
+    tool_results = [row for row in evidence if row.get("event_type") == "tool.result"]
+    recorded = recorded_claims(root, resolved, rebuild=rebuild)
+
+    claims: list[dict[str, Any]] = []
+    for claim in recorded:
+        family = claim["family"]
+        row = _latest_classified_tool_result(tool_results, family)
+        claimed_pass = claim["outcome"] == OUTCOME_PASSED
+        if row is None:
+            status = CLAIM_UNSUPPORTED
+            message = f"claimed {family} {claim['outcome']} but no {family} evidence was recorded"
+        elif row.get("tool_exit_code") == 0:
+            if claimed_pass:
+                truncated = row.get("truncated") if "truncated" in row else evidence_truncated(row)
+                status = CLAIM_PARTIAL if truncated else CLAIM_SUPPORTED
+                message = (
+                    f"latest {family} evidence succeeded but its captured output was truncated; "
+                    "evidence may be incomplete"
+                    if truncated
+                    else f"latest {family} evidence succeeded"
+                )
+            else:
+                status = CLAIM_CONTRADICTED
+                message = f"claimed {family} failed but the latest {family} evidence succeeded"
+        else:
+            exit_code = row.get("tool_exit_code")
+            if claimed_pass:
+                status = CLAIM_CONTRADICTED
+                message = f"claimed {family} passed but the latest {family} evidence failed with exit {exit_code}"
+            else:
+                status = CLAIM_ACKNOWLEDGED
+                message = f"latest {family} evidence failed with exit {exit_code}; the claim reports it as failed"
+        claims.append(
+            {
+                "family": family,
+                "status": status,
+                "outcome": claim["outcome"],
+                "message": message,
+                "evidence": _evidence_ref(row),
+            }
+        )
+
+    claimed_families = [claim["family"] for claim in recorded]
+    claims.extend(_unclaimed_failures(tool_results, claimed_families, set(), source="recorded"))
+    return {
+        "session_id": resolved,
+        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
+        "strict": strict,
+        "source": "recorded",
+        "claims_detected": len(recorded),
+        "claims": claims,
+    }
+
+
 def audit_claims(
     root: str | Path,
     text: str,
@@ -230,6 +305,7 @@ def audit_claims(
         "session_id": resolved,
         "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
         "strict": strict,
+        "source": "text",
         "claims_detected": len(detected),
         "claims": claims,
     }
@@ -260,6 +336,8 @@ def _unclaimed_failures(
     tool_results: list[dict[str, Any]],
     detected: list[str],
     acknowledged: set[str],
+    *,
+    source: str = "text",
 ) -> list[dict[str, Any]]:
     """Report failed evidence the text made no success claim about.
 
@@ -286,10 +364,12 @@ def _unclaimed_failures(
             message = f"latest {family} evidence failed with exit {exit_code}; the text reports it as failing"
         else:
             status = CLAIM_UNREVIEWED
-            message = (
-                f"latest {family} evidence failed with exit {exit_code} "
-                f"but the text makes no checkable {family} claim"
+            unclaimed = (
+                f"no {family} claim was recorded"
+                if source == "recorded"
+                else f"the text makes no checkable {family} claim"
             )
+            message = f"latest {family} evidence failed with exit {exit_code} but {unclaimed}"
         unreviewed.append(
             {
                 "family": family,
@@ -309,13 +389,19 @@ def format_session_audit(audit: dict[str, Any]) -> str:
 
 
 def format_claims_audit(audit: dict[str, Any]) -> str:
+    source = audit.get("source", "text")
     lines = [
         f"session={audit['session_id']}",
         f"ok={str(audit['ok']).lower()}",
+        f"source={source}",
         f"claims_detected={audit.get('claims_detected', len(audit['claims']))}",
     ]
     if not audit["claims"]:
-        lines.append("claims=none no checkable verification claim found in the text")
+        lines.append(
+            "claims=none no structured claim recorded"
+            if source == "recorded"
+            else "claims=none no checkable verification claim found in the text"
+        )
         return "\n".join(lines)
     for claim in audit["claims"]:
         evidence = claim.get("evidence") or {}

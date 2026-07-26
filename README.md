@@ -8,6 +8,10 @@
   <strong>Local-first memory and evidence for agentic engineering.</strong>
 </p>
 
+<p align="center">
+  <a href="https://github.com/jstxn/agentdir/actions/workflows/ci.yml"><img src="https://github.com/jstxn/agentdir/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+</p>
+
 AgentDir is a flight recorder for coding agents. It lets agents record what
 happened during a software task, then gives engineers a clean way to inspect,
 replay, search, and audit that work later.
@@ -266,7 +270,8 @@ For final-answer support:
 
 ```bash
 agentdir audit session
-agentdir audit claims --text final-response.md
+agentdir audit claims                              # recorded structured claims
+agentdir audit claims --text final-response.md     # prose, when not instrumented
 ```
 
 Audits are advisory by default. Use `--strict` when unsupported or contradicted
@@ -315,9 +320,44 @@ gaps, and recommended next agent actions.
 
 ### Claims-To-Evidence Checks
 
-AgentDir can compare final-response claims such as "tests passed" or "build
-passed" against the latest recorded tool results. It does this with
-deterministic heuristics, not an LLM.
+Agents record what a check showed, and AgentDir compares that against the
+recorded tool results. It does this deterministically, not with an LLM.
+
+```bash
+agentdir claim test --passed
+agentdir claim build --failed --note "linker error in release profile"
+agentdir claim list
+agentdir audit claims           # checks recorded claims against evidence
+agentdir audit claims --strict  # exit 1 when a claim is not supported
+```
+
+A structured claim names its family and outcome outright, so checking it is a
+comparison rather than an interpretation of prose:
+
+| Claim | Evidence | Result |
+| --- | --- | --- |
+| passed | succeeded | `supported` |
+| passed | failed | `contradicted` |
+| failed | failed | `acknowledged` |
+| failed | succeeded | `contradicted` |
+| either | none recorded | `unsupported` |
+| none recorded | failed | `unreviewed` |
+
+Recording a family again replaces its earlier claim, so a check re-run after a
+fix supersedes rather than accumulates. Claiming a failure honestly is
+`acknowledged` and does not count against the audit.
+
+A claim made in error can be withdrawn:
+
+```bash
+agentdir claim build --retract
+```
+
+Claims are append-only events, so retracting supersedes the earlier claim in the
+latest-claim view while leaving both in the record.
+
+Recorded claims also reach the `agent_handoff` object without any final text
+being supplied.
 
 Supported claim families:
 
@@ -327,6 +367,18 @@ Supported claim families:
 - build
 - doctor
 - release
+
+#### Auditing prose instead
+
+For final responses that were not instrumented, `agentdir audit claims --text`
+reads claims out of prose:
+
+```bash
+agentdir audit claims --text final-response.md
+```
+
+This path has to infer intent from wording, so prefer recorded claims when the
+agent can emit them.
 
 Claim detection is keyword-based, so ordinary phrasing such as "everything
 works" or "verified locally" matches no family. When recorded evidence failed

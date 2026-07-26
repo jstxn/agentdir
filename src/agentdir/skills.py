@@ -58,6 +58,14 @@ user when reporting evidence, blockers, or setup problems.
 - Do not wrap command chains unless the whole chain is evidence worth preserving.
 - If a command must not be wrapped, emit the evidence afterward with `agentdir emit`.
 
+## Claims
+
+- Record every verification the final response relies on with `agentdir claim <family> --passed|--failed`.
+- Families are test, lint, typecheck, build, doctor, and release. Add `--note` for detail worth keeping.
+- Re-recording a family replaces its earlier claim, so record again after re-running a check. Withdraw a claim you should not have made with `agentdir claim <family> --retract`.
+- Record failures as failures. `agentdir audit claims` reports an honest failure claim as acknowledged, and a claim that overstates a result as contradicted.
+- Use `agentdir audit claims` to compare recorded claims against evidence, and `agentdir claim list` to see what is on record.
+
 ## During Work
 
 - `agentdir work start "<task>" --emit-context` is the normal entry point. Use
@@ -115,7 +123,14 @@ The agent owns the background recording flow:
 - Use `agentdir status` for a single view of session, evidence, memory, context,
   registered roots, and doctor health.
 - Use `agentdir evidence --brief` and `agentdir timeline` to skim recorded work.
-- Use `agentdir audit session` and `agentdir audit claims --text <path|->` before
+- Record each verification the final response relies on with
+  `agentdir claim <family> --passed|--failed`, e.g. `agentdir claim test --passed`.
+  Families: test, lint, typecheck, build, doctor, release.
+- Record failures as failures. A claim that overstates a result is reported as
+  contradicted; an honest failure claim is acknowledged.
+- Re-recording a family replaces its earlier claim; withdraw one made in error
+  with `agentdir claim <family> --retract`.
+- Use `agentdir audit session` and `agentdir audit claims` before
   final claims when evidence support matters.
 - Before the final response, run `agentdir work finish --json` when practical.
   Use `agentdir report final --format json` to preview the same agent handoff
@@ -705,6 +720,9 @@ The engineer installs or adopts it once; agents operate it during normal work.
 - Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
 - Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.
 - Use `agentdir evidence --brief` and `agentdir timeline` to skim what happened.
+- Record each verification you will rely on with `agentdir claim <family> --passed|--failed`, e.g. `agentdir claim test --passed`. Families: test, lint, typecheck, build, doctor, release.
+- Claim what the evidence shows, including failures. `agentdir audit claims` compares recorded claims against evidence, so a claim that overstates a result is reported as contradicted.
+- Re-recording a family replaces its earlier claim; withdraw one made in error with `agentdir claim <family> --retract`.
 - Use `agentdir report final --format json` or `agentdir work finish --json` for the agent handoff object before final claims when practical.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output."""
 

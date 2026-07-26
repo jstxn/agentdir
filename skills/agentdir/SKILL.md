@@ -64,6 +64,20 @@ Emit important plans, blockers, diffs, review decisions, and final handoffs as i
 - Add `--json` to get a `{"success": false, "exit_code": ..., "error_code": ...}` envelope on failure; add `--quiet` for exit-code-only checks.
 - `agentdir run --session require` fails fast instead of auto-creating a session; `--session create` forces a fresh one.
 
+## Record Claims
+
+After running a check you will rely on in the final response, record what it showed:
+
+```bash
+agentdir claim test --passed
+agentdir claim build --failed --note "linker error in release profile"
+agentdir claim list
+```
+
+Families: `test`, `lint`, `typecheck`, `build`, `doctor`, `release`. Re-recording a family replaces the earlier claim, so record again after a fix. Withdraw a claim you should not have made with `agentdir claim <family> --retract`.
+
+`agentdir audit claims` (no `--text`) compares recorded claims against evidence, with no wording involved. A claim that overstates a result is reported `contradicted`; failed evidence with no claim about it is `unreviewed`. Claiming a failure honestly is `acknowledged` and does not count against the audit, so record failures rather than omitting them.
+
 ## Finish Work
 
 Before the final response, run `agentdir work finish --json` when practical. Read the `agent_handoff` object before making final verification claims.

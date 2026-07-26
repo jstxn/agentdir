@@ -5,7 +5,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .audit import audit_claims, audit_session, claims_audit_gaps, session_audit_gaps
+from .audit import (
+    audit_claims,
+    audit_recorded_claims,
+    audit_session,
+    claims_audit_gaps,
+    session_audit_gaps,
+)
 from .context import (
     audit_context_pack,
     build_context_pack,
@@ -348,8 +354,8 @@ def build_final_report(
         context_audit=context_audit,
         doctor=doctor,
     )
-    claims_audit = (
-        audit_claims(
+    if claims_text is not None:
+        claims_audit = audit_claims(
             paths.root,
             claims_text,
             session.session_id,
@@ -357,9 +363,17 @@ def build_final_report(
             summary=summary,
             evidence=evidence,
         )
-        if claims_text is not None
-        else None
-    )
+    else:
+        # Structured claims need no prose to check, so the handoff can report
+        # claim support even when no final text was supplied.
+        recorded = audit_recorded_claims(
+            paths.root,
+            session.session_id,
+            rebuild=False,
+            summary=summary,
+            evidence=evidence,
+        )
+        claims_audit = recorded if recorded["claims"] else None
     gaps = _known_gaps(summary, evidence, context_audit, doctor, session_audit, claims_audit)
     brief = evidence_brief(evidence)
     handoff = _agent_handoff(
