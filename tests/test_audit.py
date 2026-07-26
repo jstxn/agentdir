@@ -395,3 +395,97 @@ def test_dogfood_session_rejects_unsupported_agentdir_python(tmp_path: Path) -> 
 
     assert result.returncode == 1
     assert "AGENTDIR_PYTHON must be Python 3.11 or newer" in result.stderr
+
+
+def _session_with_failed_tests(repo: Path) -> None:
+    run_cli("work", "start", "unreviewed claims", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; print('FAILED test_x'); sys.exit(1)",
+        cwd=repo,
+        expected_returncode=1,
+    )
+
+
+def test_audit_claims_flags_failed_evidence_the_text_never_claims(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    _session_with_failed_tests(repo)
+
+    # Ordinary agent phrasing that the keyword patterns cannot match. Reporting
+    # ok here would read as "audited and clean" rather than "never audited".
+    for text in ("Everything works.", "Verified locally.", "No regressions."):
+        payload = json.loads(
+            run_cli("audit", "claims", "--text", "-", "--json", cwd=repo, input_text=text).stdout
+        )
+        assert payload["claims_detected"] == 0, text
+        assert payload["ok"] is False, text
+        assert claim(payload, "test")["status"] == "unreviewed", text
+
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            "--strict",
+            cwd=repo,
+            input_text=text,
+            expected_returncode=1,
+        )
+
+
+def test_audit_claims_flags_failures_outside_a_partial_acknowledgement(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    _session_with_failed_tests(repo)
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="Lint passed.",
+        ).stdout
+    )
+
+    assert payload["claims_detected"] == 1
+    assert claim(payload, "lint")["status"] == "unsupported"
+    assert claim(payload, "test")["status"] == "unreviewed"
+
+
+def test_audit_claims_stays_ok_when_no_claim_and_no_failed_evidence(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "clean session", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('tests passed')",
+        cwd=repo,
+    )
+
+    payload = json.loads(
+        run_cli(
+            "audit",
+            "claims",
+            "--text",
+            "-",
+            "--json",
+            cwd=repo,
+            input_text="I refactored the parser.",
+        ).stdout
+    )
+
+    assert payload["claims_detected"] == 0
+    assert payload["ok"] is True
+    assert payload["claims"] == []

@@ -8,11 +8,12 @@ from pathlib import Path
 
 from .artifacts import artifact_path
 from .envelope import parse_envelope, validate_required
+from .git import git_common_root
 from .hooks import hooks_manifest_issues
 from .mailbox import iter_records
 from .redaction import looks_secret_bearing
 from .secrets import scan_secret_records
-from .store import discover_mailboxes, require_root
+from .store import CONFIG_DIR, discover_mailboxes, require_root
 
 
 @dataclass
@@ -79,6 +80,9 @@ def run_doctor(root: str | Path) -> DoctorReport:
     except Exception:
         # Hook drift detection is best-effort; it must never break doctor.
         pass
+    split = _split_worktree_store(paths.root)
+    if split is not None:
+        report.add_warning(split)
     secret_findings = scan_secret_records(paths.root)
     for finding in secret_findings:
         labels = ",".join(finding.labels)
@@ -93,6 +97,30 @@ def run_doctor(root: str | Path) -> DoctorReport:
                 "run 'agentdir index rebuild'"
             )
     return report
+
+
+def _split_worktree_store(root: Path) -> str | None:
+    """Warn when this linked worktree keeps a store the main working tree also has.
+
+    New worktrees share the main tree's store, but one created before that
+    behaviour existed keeps its own. Nothing is lost, yet memory and evidence
+    stay split across the two, so say which command joins them.
+    """
+    try:
+        worktree = root.parent
+        main = git_common_root(worktree)
+        if main is None or main == worktree:
+            return None
+        main_store = main / CONFIG_DIR
+        if not main_store.is_dir() or main_store.resolve() == root:
+            return None
+        return (
+            f"worktree store {root} is separate from the main working tree store {main_store}; "
+            f"memory and evidence stay split. Run 'agentdir roots add {main_store}' to search both, "
+            f"or remove this store to share the main one."
+        )
+    except OSError:
+        return None
 
 
 def _index_secret_findings(index_path: Path) -> list[str]:

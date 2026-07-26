@@ -12,6 +12,8 @@ STORE_VERSION = "0.1"
 CONFIG_DIR = ".agentdir"
 INDEX_FILE = "agentdir.sqlite3"
 SCOPE_CHOICES = ("project", "user", "global", "machine")
+WORKTREE_STORE_ENV = "AGENTDIR_WORKTREE_STORE"
+WORKTREE_STORE_MODES = ("shared", "local")
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
 
@@ -95,10 +97,44 @@ def find_project_base(cwd: str | Path | None = None) -> Path:
             check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
+            toplevel = Path(result.stdout.strip()).resolve()
+            return _share_worktree_base(toplevel, start)
     except OSError:
         pass
     return start
+
+
+def worktree_store_mode() -> str:
+    mode = (os.environ.get(WORKTREE_STORE_ENV) or "shared").strip().lower()
+    if mode not in WORKTREE_STORE_MODES:
+        raise AgentDirConfigError(
+            f"Invalid {WORKTREE_STORE_ENV}={mode!r}; expected one of {', '.join(WORKTREE_STORE_MODES)}"
+        )
+    return mode
+
+
+def _share_worktree_base(toplevel: Path, cwd: Path) -> Path:
+    """Point a linked worktree at the main working tree's store.
+
+    Every ``git worktree`` checkout has its own toplevel, so without this a
+    repository's evidence and memory silently fragment into one store per
+    worktree. An existing store inside the worktree always wins, so nothing
+    that already recorded there is orphaned.
+    """
+    if (toplevel / CONFIG_DIR).is_dir():
+        return toplevel
+    if worktree_store_mode() == "local":
+        return toplevel
+    from .git import git_common_root
+
+    main = git_common_root(cwd)
+    if main is None or main == toplevel:
+        return toplevel
+    # Only adopt the main tree's store when it already exists; a worktree must
+    # never silently create a store outside itself.
+    if (main / CONFIG_DIR).is_dir():
+        return main
+    return toplevel
 
 
 def machine_root() -> Path:

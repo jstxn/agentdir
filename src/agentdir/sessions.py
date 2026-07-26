@@ -9,7 +9,14 @@ from pathlib import Path
 from .events import emit_event
 from .fsutil import atomic_write_text
 from .git import git_head, workspace_name
-from .store import AgentDirStateError, init_root, paths_for, validate_id
+from .store import (
+    CONFIG_DIR,
+    AgentDirStateError,
+    find_project_base,
+    init_root,
+    paths_for,
+    validate_id,
+)
 
 
 @dataclass
@@ -40,18 +47,69 @@ def default_session_id(cwd: str | Path | None = None) -> str:
     return safe_session_id(f"repo-{workspace_name(cwd)}-{stamp}-{suffix}")
 
 
-def current_session_path(root: str | Path) -> Path:
+def workspace_slug(cwd: str | Path | None = None) -> str:
+    return safe_session_id(workspace_name(cwd))
+
+
+def _workspace_state_dir(root: str | Path, cwd: str | Path | None = None) -> Path:
+    return paths_for(root).state / "workspaces" / workspace_slug(cwd)
+
+
+def _legacy_current_session_path(root: str | Path) -> Path:
     return paths_for(root).state / "current-session.json"
 
 
-def last_session_path(root: str | Path) -> Path:
-    return paths_for(root).state / "last-session.json"
+def scoped_current_session_path(root: str | Path, cwd: str | Path | None = None) -> Path:
+    return _workspace_state_dir(root, cwd) / "current-session.json"
+
+
+def current_session_path(root: str | Path, cwd: str | Path | None = None) -> Path:
+    """Active-session pointer for the calling workspace.
+
+    Linked worktrees share the main tree's store, so a single pointer would let
+    parallel worktree sessions overwrite each other. Reads still fall back to
+    the pre-workspace location so existing stores keep working.
+    """
+    scoped = scoped_current_session_path(root, cwd)
+    if scoped.is_file():
+        return scoped
+    legacy = _legacy_current_session_path(root)
+    if legacy.is_file():
+        return legacy
+    if _cwd_owns_store(root, cwd):
+        # The caller is inside a working tree that owns this store, so its slug
+        # is authoritative: a sibling worktree's pointer must not be borrowed.
+        return scoped
+    # Otherwise the command targeted the store from an unrelated directory
+    # (e.g. an explicit --root) and the slug is meaningless. A single active
+    # pointer is unambiguous; with several, refuse to guess between worktrees.
+    others = sorted((paths_for(root).state / "workspaces").glob("*/current-session.json"))
+    if len(others) == 1:
+        return others[0]
+    return scoped
+
+
+def _cwd_owns_store(root: str | Path, cwd: str | Path | None = None) -> bool:
+    try:
+        base = find_project_base(cwd)
+    except OSError:
+        return False
+    return (base / CONFIG_DIR).resolve() == paths_for(root).root
+
+
+def last_session_path(root: str | Path, cwd: str | Path | None = None) -> Path:
+    return _workspace_state_dir(root, cwd) / "last-session.json"
 
 
 def write_session_state(root: str | Path, state: SessionState) -> None:
-    paths = init_root(root)
-    paths.state.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(current_session_path(root), json.dumps(asdict(state), indent=2) + "\n")
+    init_root(root)
+    path = scoped_current_session_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(asdict(state), indent=2) + "\n")
+    # One-way migration: the unscoped pointer would otherwise shadow this one.
+    legacy = _legacy_current_session_path(root)
+    if legacy.is_file():
+        legacy.unlink()
 
 
 def read_current_session(root: str | Path) -> SessionState | None:
@@ -168,9 +226,11 @@ def end_session(
         git_head=git_head(),
     )
     paths = init_root(root)
-    atomic_write_text(last_session_path(root), json.dumps(asdict(state), indent=2) + "\n")
-    current = current_session_path(root)
-    if current.exists():
-        current.unlink()
+    last = last_session_path(root)
+    last.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(last, json.dumps(asdict(state), indent=2) + "\n")
+    for current in (scoped_current_session_path(root), _legacy_current_session_path(root)):
+        if current.exists():
+            current.unlink()
     paths.state.mkdir(parents=True, exist_ok=True)
     return state

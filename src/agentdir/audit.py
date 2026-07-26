@@ -21,7 +21,18 @@ CLAIM_SUPPORTED = "supported"
 CLAIM_PARTIAL = "partial"
 CLAIM_UNSUPPORTED = "unsupported"
 CLAIM_CONTRADICTED = "contradicted"
-CLAIM_STATUSES = (CLAIM_SUPPORTED, CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED)
+# Recorded evidence failed, but the text phrases its result in a way the claim
+# patterns cannot check. Distinct from "contradicted": nothing was disproved,
+# the text simply dodged review.
+CLAIM_UNREVIEWED = "unreviewed"
+CLAIM_STATUSES = (
+    CLAIM_SUPPORTED,
+    CLAIM_PARTIAL,
+    CLAIM_UNSUPPORTED,
+    CLAIM_CONTRADICTED,
+    CLAIM_UNREVIEWED,
+)
+CLAIM_PROBLEM_STATUSES = (CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED, CLAIM_UNREVIEWED)
 
 CLAIM_FAMILIES = tuple(family for family in EVIDENCE_FAMILIES if family != "diagnostic")
 
@@ -162,7 +173,8 @@ def audit_claims(
         evidence = evidence_rows(root, resolved, rebuild=rebuild)
     tool_results = [row for row in evidence if row.get("event_type") == "tool.result"]
     claims = []
-    for family in _detect_claim_families(text):
+    detected = _detect_claim_families(text)
+    for family in detected:
         evidence = _latest_relevant_tool_result(tool_results, family)
         if evidence is None:
             status = CLAIM_UNSUPPORTED
@@ -188,12 +200,46 @@ def audit_claims(
                 "evidence": _evidence_ref(evidence),
             }
         )
+    claims.extend(_unreviewed_failures(tool_results, detected))
     return {
         "session_id": resolved,
-        "ok": not any(claim["status"] in {CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in claims),
+        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
         "strict": strict,
+        "claims_detected": len(detected),
         "claims": claims,
     }
+
+
+def _unreviewed_failures(
+    tool_results: list[dict[str, Any]],
+    detected: list[str],
+) -> list[dict[str, Any]]:
+    """Flag failed evidence the text never made a checkable claim about.
+
+    Claim detection is keyword-based, so ordinary phrasing ("everything works",
+    "verified locally") matches nothing. Reporting ``ok`` in that case reads as
+    "audited and clean" when the truth is "not audited at all", which is the
+    worst direction for this check to fail in.
+    """
+    unreviewed: list[dict[str, Any]] = []
+    for family in CLAIM_FAMILIES:
+        if family in detected:
+            continue
+        evidence = _latest_relevant_tool_result(tool_results, family)
+        if evidence is None or evidence.get("tool_exit_code") == 0:
+            continue
+        unreviewed.append(
+            {
+                "family": family,
+                "status": CLAIM_UNREVIEWED,
+                "message": (
+                    f"latest {family} evidence failed with exit {evidence.get('tool_exit_code')} "
+                    f"but the text makes no checkable {family} claim"
+                ),
+                "evidence": _evidence_ref(evidence),
+            }
+        )
+    return unreviewed
 
 
 def format_session_audit(audit: dict[str, Any]) -> str:
@@ -204,9 +250,13 @@ def format_session_audit(audit: dict[str, Any]) -> str:
 
 
 def format_claims_audit(audit: dict[str, Any]) -> str:
-    lines = [f"session={audit['session_id']}", f"ok={str(audit['ok']).lower()}"]
+    lines = [
+        f"session={audit['session_id']}",
+        f"ok={str(audit['ok']).lower()}",
+        f"claims_detected={audit.get('claims_detected', len(audit['claims']))}",
+    ]
     if not audit["claims"]:
-        lines.append("claims=none")
+        lines.append("claims=none no checkable verification claim found in the text")
         return "\n".join(lines)
     for claim in audit["claims"]:
         evidence = claim.get("evidence") or {}
@@ -230,7 +280,7 @@ def claims_audit_gaps(audit: dict[str, Any] | None) -> list[str]:
         return []
     gaps: list[str] = []
     for claim in audit.get("claims") or []:
-        if claim.get("status") in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED}:
+        if claim.get("status") in {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES}:
             gaps.append(f"{claim['family']}: {claim['message']}")
     return gaps
 
@@ -240,7 +290,7 @@ def strict_session_exit_code(audit: dict[str, Any]) -> int:
 
 
 def strict_claims_exit_code(audit: dict[str, Any]) -> int:
-    return 1 if any(claim["status"] in {CLAIM_PARTIAL, CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED} for claim in audit.get("claims") or []) else 0
+    return 1 if any(claim["status"] in {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES} for claim in audit.get("claims") or []) else 0
 
 
 def _check(

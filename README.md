@@ -228,6 +228,26 @@ directory is `.git/hooks` by default and follows `core.hooksPath` or linked
 worktree configuration. In rulesync repos, the source rule replaces the listed
 project guidance files as the managed source of truth.
 
+## Git Worktrees
+
+A repository has one store, shared by every `git worktree` checkout. Commands
+run inside a linked worktree resolve to the main working tree's `.agentdir`, so
+evidence and memory from all worktrees stay searchable together instead of
+fragmenting into one store per branch.
+
+Each worktree still keeps its own active session, so parallel agents in
+different worktrees do not overwrite each other.
+
+Two cases keep a store inside the worktree instead:
+
+```bash
+# a store already present in the worktree always wins
+AGENTDIR_WORKTREE_STORE=local agentdir adopt   # or opt out explicitly
+```
+
+`agentdir doctor` warns when a worktree holds a store separate from the main
+one and names the command that joins them for search.
+
 ## Inspect A Session
 
 Most users will not need these commands every day, but they are the reason
@@ -307,6 +327,13 @@ Supported claim families:
 - build
 - doctor
 - release
+
+Claim detection is keyword-based, so ordinary phrasing such as "everything
+works" or "verified locally" matches no family. When recorded evidence failed
+and the text makes no checkable claim about it, the audit reports that family as
+`unreviewed` and is not `ok`, rather than passing because it found nothing to
+check. `claims_detected` reports how many claims were actually parsed, so
+"nothing to audit" is never mistaken for "audited and clean".
 
 ### Context Packs
 
