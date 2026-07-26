@@ -49,16 +49,38 @@ jobs:
       - run: python -m build
       - name: Check distribution metadata
         run: python -m twine check dist/*
-      - name: Check the Pi package version matches the Python package
+      - name: Check every shipped version string agrees with pyproject
         run: |
           python - <<'PY'
           import json, pathlib, re
-          pyproject = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
-          version = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+
+          version = re.search(
+              r'^version = "([^"]+)"',
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8"),
+              re.M,
+          ).group(1)
+
+          problems = []
+
           package = json.loads(pathlib.Path("package.json").read_text(encoding="utf-8"))
           if package["version"] != version:
+              problems.append(f"package.json version is {package['version']}")
+
+          init = pathlib.Path("src/agentdir/__init__.py").read_text(encoding="utf-8")
+          declared = re.search(r'__version__ = "([^"]+)"', init).group(1)
+          if declared != version:
+              problems.append(f"__init__.py __version__ is {declared}")
+
+          # The installer pins the release it downloads, so a stale default
+          # keeps shipping the previous version from the public curl | bash.
+          install = pathlib.Path("scripts/install.sh").read_text(encoding="utf-8")
+          pinned = re.search(r'AGENTDIR_VERSION="\$\{AGENTDIR_VERSION:-v([^"}]+)\}"', install).group(1)
+          if pinned != version:
+              problems.append(f"scripts/install.sh pins v{pinned}")
+
+          if problems:
               raise SystemExit(
-                  f"package.json version {package['version']} does not match pyproject {version}"
+                  f"pyproject declares {version} but: " + "; ".join(problems)
               )
           print(f"versions match: {version}")
           PY

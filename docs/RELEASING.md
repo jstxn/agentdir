@@ -6,6 +6,20 @@ the importable package and CLI remain `agentdir`. PyPI publishing happens
 automatically: the `publish.yml` workflow builds and uploads to PyPI via
 trusted publishing whenever a GitHub Release is published.
 
+## Bump The Version
+
+The version appears in several shipped files. CI fails when `pyproject.toml`,
+`package.json`, `src/agentdir/__init__.py`, and `scripts/install.sh` disagree,
+but the rest are not checked automatically:
+
+- `pyproject.toml` and `src/agentdir/__init__.py`
+- `package.json` (both `version` and the `pi.image` tag URL)
+- `scripts/install.sh` — the release the public `curl | bash` installer
+  downloads. A stale value here keeps shipping the previous version.
+- `scripts/rollback.sh` — set to the *previous* release
+- `README.md` and `docs/PI_PACKAGE.md` Pi install lines
+- `tests/test_pi_package.py` and `tests/test_agent_first.py`
+
 ## Preflight
 
 ```bash
