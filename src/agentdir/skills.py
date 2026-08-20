@@ -34,10 +34,30 @@ user when reporting evidence, blockers, or setup problems.
 
 ## Start
 
-- At the start of a coding task in a repository, run `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing and the task is non-trivial, run
-  `agentdir adopt --gitignore user` once so the local store stays out of Git
-  without changing the repository's `.gitignore`.
+- Before starting work in an unfamiliar checkout, run
+  `agentdir root --require --quiet`. Exit 0 means AgentDir found an initialized
+  project store, including a store shared from the main checkout of a linked
+  worktree. Do not decide whether AgentDir is set up from the presence of
+  `.agentdir` in this checkout.
+- If the probe exits 3 with `Not an AgentDir root`, run
+  `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked
+  in a restricted linked worktree, rerun it with `--no-hooks`.
+- Then run `agentdir work start "<short task>"` yourself.
+- Retrieval is automatic. A configured and available FastEmbed backend uses
+  fused semantic and lexical matching; otherwise AgentDir keeps the built-in
+  hybrid path. Use the default invocation without a retrieval flag during normal work.
+- Read the compact context briefing it prints. Briefing excerpts are previews.
+  Prefer the printed `agentdir work context --pack <pack-id> --expand <number>`
+  command before marking a source used when
+  implementation details, prior patterns, or exact evidence matter. Continue
+  bounded sources with `--page <number>`; expansion itself is not a decision.
+- After reading and any useful expansion, close the review with
+  `agentdir work context --use <number> --reason "<how it helps>"` for useful sources, or
+  `agentdir work context --none-relevant --reason "<why>"` when none help. If
+  review is impossible, use `--skip --reason "<why>"` so the final handoff keeps
+  the gap visible. No decision is needed when no sources are presented.
+- If the original output is unavailable, re-open the persisted briefing with
+  `agentdir work context --show` before deciding.
 - Prefer the default project store. It writes to the nearest repo `.agentdir`.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output.
 - If `doctor` reports secret-like persisted bodies, do not print the bodies.
@@ -68,19 +88,28 @@ user when reporting evidence, blockers, or setup problems.
 
 ## During Work
 
-- `agentdir work start "<task>" --emit-context` is the normal entry point. Use
+- `agentdir work start "<task>"` is the normal entry point. It retrieves and
+  records a bounded context briefing by default. Use
   lower-level context commands only when you need finer control.
+- `agentdir work context` is the normal read-and-decide path. Numbered briefing
+  sources are valid `--use` selectors, and every non-empty briefing must end in
+  a used, no-relevant, or skipped decision before `work finish`.
+- `agentdir work context --expand <number>` is the normal deep-read path for a
+  promising preview. Prefer expanding before use when the task depends on more
+  than the preview; integrity and read-before-use metrics remain visible in the handoff.
 - Use `agentdir context build "<task>" --emit` when the retrieved context should become an auditable context pack.
-- Use `agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff` when you rely on retrieved context.
-- Use `agentdir context cite --pack <pack-id>` or `agentdir audit context --pack <pack-id>` when reporting source lineage.
+- Use `agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff` only for lower-level explicit pack handling.
+- Cite only sources actually used. Use `agentdir context cite --pack <pack-id>` or `agentdir audit context --pack <pack-id>` when reporting source lineage.
 - Use `agentdir memory search "<task, error, or subsystem>"` and `agentdir memory explain "<same query>"` when you need to inspect retrieval.
+- `memory explain` follows the same resolved retrieval mode and reports the
+  actual mode plus component scores. Force `--retrieval` only for diagnostics.
 - Use `agentdir roots suggest` and `agentdir roots doctor` to inspect available
   cross-repo memory without mutating registrations.
 - Use `agentdir roots register <root-or-repo>` only when cross-repo memory has
   been explicitly requested or is clearly part of the task.
 - Prefer root groups for repeated cross-repo work, then use
   `agentdir memory search --group <name> "<query>"` or
-  `agentdir work start "<task>" --group <name> --emit-context`.
+  `agentdir work start "<task>" --group <name>`.
 - Emit important plans, blockers, diffs, review decisions, and final handoffs as immutable events.
 - Use `agentdir memory daemon status` to inspect warm indexing when repeated
   large-store or cross-repo work depends on fresh memory.
@@ -112,9 +141,28 @@ Use AgentDir as the local flight recorder for coding-agent work in this reposito
 The engineer should not have to run AgentDir commands during normal coding work.
 The agent owns the background recording flow:
 
-- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the
-  local store stays out of Git without changing the repository's `.gitignore`.
+- Before starting work in an unfamiliar checkout, run
+  `agentdir root --require --quiet`. Exit 0 means an initialized local or shared
+  worktree store is ready; do not decide whether AgentDir is set up from the
+  presence of `.agentdir` in this checkout.
+- If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`.
+  If hook installation is blocked in a restricted linked worktree, rerun it
+  with `--no-hooks`.
+- Then start non-trivial coding work with `agentdir work start "<short task>"`.
+- Retrieval is automatic. Configured FastEmbed stores use fused semantic and
+  lexical matching; other stores keep the built-in hybrid path. Use the default
+  invocation without a retrieval flag during normal work.
+- Read the printed context briefing, re-opening it with
+  `agentdir work context --show` when the original output is unavailable. Treat briefing excerpts as
+  previews. Prefer the printed
+  `agentdir work context --pack <pack-id> --expand <number>` command before marking a source
+  used when implementation details, prior patterns, or exact evidence matter.
+  Expansion is optional and does not replace the terminal review decision.
+- After reading and any useful expansion, record either useful numbered sources
+  with `agentdir work context --use <number> --reason "<how it helps>"` or a
+  reasoned `agentdir work context --none-relevant --reason "<why>"` decision.
+  Use `--skip --reason "<why>"` only when review is impossible; no decision is
+  needed when the briefing presents no sources.
 - Run evidence-bearing commands through `agentdir run -- <command>`.
 - Evidence-bearing commands include tests, lint, typecheck, build, release checks,
   reproduced failures, and diagnostics that support final claims.
@@ -714,8 +762,10 @@ def _integration_markers(name: str) -> tuple[str, str]:
 GUIDANCE_BODY = """AgentDir is agent-owned background instrumentation for this repository.
 The engineer installs or adopts it once; agents operate it during normal work.
 
-- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the local store stays out of Git without changing the repository's `.gitignore`.
+- Before starting work in an unfamiliar checkout, run `agentdir root --require --quiet`. Exit 0 means an initialized local or shared worktree store is ready; do not decide whether AgentDir is set up from the presence of `.agentdir` in this checkout.
+- If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked in a restricted linked worktree, rerun it with `--no-hooks`.
+- Then start non-trivial coding work with `agentdir work start "<short task>"`.
+- Read the printed context briefing, treat excerpts as previews, and prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before using a source when implementation details, prior patterns, or exact evidence matter. Then record either useful numbered sources with `agentdir work context --use <number> --reason "<how it helps>"` or `agentdir work context --none-relevant --reason "<why>"`. Use `--skip --reason "<why>"` only when review is impossible; no decision is needed when no sources are presented. Re-open lost output with `agentdir work context --show`.
 - Wrap evidence-bearing commands with `agentdir run -- <command>`.
 - Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
 - Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.

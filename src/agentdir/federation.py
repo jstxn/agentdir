@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer m
 
 from .fsutil import atomic_write_text
 from .index import rebuild_index, update_index
-from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_HYBRID, search_memory
+from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_AUTO, search_memory
 from .rendering import rich_root_diagnostics
 from .store import AgentDirError, paths_for, require_root, validate_id
 
@@ -135,7 +135,7 @@ def search_federated_memory(
     until: str | None = None,
     limit: int = 10,
     min_score: float = DEFAULT_MIN_SCORE,
-    retrieval_mode: str = RETRIEVAL_HYBRID,
+    retrieval_mode: str = RETRIEVAL_AUTO,
     rebuild: bool = True,
     group: str | None = None,
 ) -> list[dict[str, Any]]:

@@ -44,10 +44,15 @@ from .control import (
     adopt_repo,
     build_final_report,
     build_status,
+    expand_work_context,
     finish_work,
+    format_context_expansion_completion,
+    format_context_expansion_content,
     format_final_report,
     format_status,
     format_work_start,
+    review_work_context,
+    show_work_context,
     start_work,
 )
 from .daemon import format_memory_daemon_status, memory_daemon_status
@@ -77,7 +82,13 @@ from .hooks import (
     uninstall_hooks,
 )
 from .index import rebuild_index, update_index
-from .memory import DEFAULT_MIN_SCORE, RETRIEVAL_MODES, explain_memory_match, memory_backend_status
+from .memory import (
+    DEFAULT_MIN_SCORE,
+    RETRIEVAL_AUTO,
+    RETRIEVAL_MODES,
+    explain_memory_match,
+    memory_backend_status,
+)
 from .memory import configure_embeddings, configure_team_backend, configure_vector_backend
 from .memory import format_memory_explanation, format_memory_hits, memory_stats, search_memory
 from .query import query_messages
@@ -120,7 +131,7 @@ from .skills import (
     integration_plan,
     uninstall_integrations,
 )
-from .store import AgentDirError, init_root, resolve_root
+from .store import AgentDirError, init_root, require_root, resolve_root
 from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, upgrade_exit_code
 
 
@@ -145,10 +156,80 @@ def print_json(data: object) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
 
 
+class _ContextExpansionCliDelivery:
+    def __init__(
+        self,
+        *,
+        json_output: bool,
+        invocation: tuple[str, ...],
+        command_root: Path,
+    ) -> None:
+        self.json_output = json_output
+        self.invocation = invocation
+        self.command_root = command_root
+
+    def accept(self, result: dict[str, Any]) -> None:
+        if self.json_output:
+            base = {key: value for key, value in result.items() if key != "warnings"}
+            rendered = json.dumps(base, indent=2, sort_keys=True)
+            prefix, separator, _closing = rendered.rpartition("\n}")
+            if not separator:
+                raise AgentDirError("Context expansion JSON delivery could not be prepared")
+            sys.stdout.write(prefix)
+        else:
+            sys.stdout.write(
+                format_context_expansion_content(
+                    result,
+                    invocation=self.invocation,
+                    command_root=self.command_root,
+                )
+            )
+        sys.stdout.flush()
+
+    def complete(self, result: dict[str, Any]) -> None:
+        if self.json_output:
+            receipt = json.dumps(result["receipt"], indent=2, sort_keys=True).replace(
+                "\n", "\n  "
+            )
+            warnings = json.dumps(result.get("warnings") or [], indent=2).replace(
+                "\n", "\n  "
+            )
+            sys.stdout.write(f',\n  "receipt": {receipt},\n  "warnings": {warnings}\n}}\n')
+        else:
+            sys.stdout.write(format_context_expansion_completion(result))
+        sys.stdout.flush()
+
+
 def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
     root = command_root(args, create=False)
     environment = detect_environment()
     selection = resolve_setup_selection(args, environment)
+    already_adopted = bool(
+        mode == "adopt"
+        and getattr(args, "if_needed", False)
+        and (root / "VERSION").is_file()
+    )
+    if already_adopted:
+        return {
+            "mode": mode,
+            "dry_run": True,
+            "root": str(root),
+            "already_adopted": True,
+            "would_create_root": False,
+            "hooks": [],
+            "codex_skill": None,
+            "generic_guidance": None,
+            "integrations": [],
+            "gitignore": {
+                "target": "none",
+                "action": "none",
+                "changed": False,
+                "reason": "already_adopted",
+            },
+            "environment": environment,
+            "adjustments": [],
+            "warnings": [],
+        }
     skill_target = getattr(args, "codex_skill", getattr(args, "install_skill", "none"))
     codex_skill = None
     if skill_target != "none":
@@ -175,6 +256,7 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
         "mode": mode,
         "dry_run": True,
         "root": str(root),
+        "already_adopted": False,
         "would_create_root": not (root / "VERSION").is_file(),
         "hooks": [] if args.no_hooks else hooks_install_plan(force=args.force),
         "codex_skill": codex_skill,
@@ -196,6 +278,7 @@ def print_setup_plan(plan: dict[str, object]) -> None:
     print(f"mode={plan['mode']}")
     print(f"root={plan['root']}")
     print(f"dry_run={str(plan['dry_run']).lower()}")
+    print(f"already_adopted={str(plan.get('already_adopted', False)).lower()}")
     print(f"would_create_root={str(plan['would_create_root']).lower()}")
     print(f"hooks={len(plan['hooks'])}")  # type: ignore[arg-type]
     integrations = plan.get("integrations") or []
@@ -448,6 +531,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_root(args: argparse.Namespace) -> int:
     root = resolve_root(args.root_option, args.scope)
+    if args.require_initialized:
+        require_root(root)
     if args.json:
         print_json({"root": str(root), "scope": args.scope or "default"})
     else:
@@ -924,8 +1009,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_hooks_install(args: argparse.Namespace) -> int:
+    root = command_root(args, create=False)
     infos = install_hooks(
-        command_root(args, create=True),
+        root,
         hooks=args.hooks,
         force=args.force,
     )
@@ -1022,10 +1108,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         else:
             print_setup_plan(result)
         return 0
-    root = command_root(args, create=True)
+    root = command_root(args, create=False)
     environment = detect_environment()
     selection = resolve_setup_selection(args, environment)
-    hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
+    if args.no_hooks:
+        init_root(root)
+        hooks = []
+    else:
+        hooks = install_hooks(root, force=args.force)
     skill = None
     if args.codex_skill != "none":
         skill = install_codex_skill(root, target=args.codex_skill, force=args.force)
@@ -1075,10 +1165,48 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         else:
             print_setup_plan(result)
         return 0
-    root = command_root(args, create=True)
+    root = command_root(args, create=False)
     environment = detect_environment()
     selection = resolve_setup_selection(args, environment)
-    hooks = [] if args.no_hooks else install_hooks(root, force=args.force)
+    if args.if_needed and (root / "VERSION").is_file():
+        paths = require_root(root)
+        result = {
+            "root": str(paths.root),
+            "version": (paths.meta / "VERSION").read_text(encoding="utf-8").strip(),
+            "hooks": [],
+            "codex_skill": None,
+            "generic_guidance": None,
+            "integrations": [],
+            "gitignore": {
+                "target": "none",
+                "action": "none",
+                "changed": False,
+                "reason": "already_adopted",
+            },
+            "doctor": run_doctor(paths.root).as_dict(),
+            "next": 'agentdir work start "<task>"',
+            "environment": environment,
+            "adjustments": [],
+            "warnings": [],
+            "codex_skill_skipped": None,
+            "generic_guidance_skipped": None,
+            "already_adopted": True,
+            "changed": False,
+        }
+        if args.json:
+            print_json(result)
+        else:
+            print(f"root={result['root']}")
+            print("already_adopted=true")
+            print("changed=false")
+            print(f"doctor_ok={str(result['doctor']['ok']).lower()}")
+            print(f"next={result['next']}")
+        return 0
+    if args.no_hooks:
+        init_root(root)
+        hooks = []
+    else:
+        hooks = install_hooks(root, force=args.force)
     skill = None
     if args.install_skill != "none":
         skill = install_codex_skill(root, target=args.install_skill, force=args.force)
@@ -1159,8 +1287,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_work_start(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
     result = start_work(
-        command_root(args, create=True),
+        root,
         args.task,
         actor=args.actor,
         emit_context=args.emit_context,
@@ -1171,11 +1300,86 @@ def cmd_work_start(args: argparse.Namespace) -> int:
         recent_limit=args.recent_limit,
         min_score=args.min_score,
         retrieval_mode=args.retrieval,
+        invocation=args.invocation,
     )
     if args.json:
         print_json(result)
     else:
-        print(format_work_start(result), end="")
+        print(
+            format_work_start(
+                result,
+                invocation=args.invocation,
+                command_root=root,
+            ),
+            end="",
+        )
+    return 0
+
+
+def cmd_work_context(args: argparse.Namespace) -> int:
+    root = command_root(args)
+    if args.page is not None and not args.expand_source:
+        raise AgentDirError("--page requires --expand")
+    if args.expand_source:
+        page = 1 if args.page is None else args.page
+        if page < 1:
+            raise AgentDirError("Context expansion page must be at least 1")
+        delivery = _ContextExpansionCliDelivery(
+            json_output=args.json,
+            invocation=args.invocation,
+            command_root=root,
+        )
+        expand_work_context(
+            root,
+            source_selector=args.expand_source,
+            page=page,
+            actor=args.actor,
+            session_id=args.session,
+            pack_id=args.pack,
+            delivery=delivery,
+        )
+        return 0
+    if args.show:
+        result = show_work_context(
+            root,
+            session_id=args.session,
+            pack_id=args.pack,
+        )
+        if args.json:
+            print_json(result)
+        else:
+            print(
+                format_work_start(
+                    result,
+                    invocation=args.invocation,
+                    command_root=root,
+                ),
+                end="",
+            )
+        return 0
+    if not args.reason:
+        raise AgentDirError("Context review reason is required")
+    disposition = "used" if args.sources else "no_relevant" if args.none_relevant else "skipped"
+    result = review_work_context(
+        root,
+        disposition=disposition,
+        reason=args.reason,
+        source_selectors=args.sources,
+        purpose=args.purpose,
+        actor=args.actor,
+        session_id=args.session,
+        pack_id=args.pack,
+    )
+    if args.json:
+        print_json(result)
+    else:
+        print(f"context_reviewed={result['pack_id']}")
+        print(f"disposition={result['disposition']}")
+        print(f"reviewed={result['reviewed_count']}")
+        print(f"used={result['used_count']}")
+        print(f"dismissed={result['dismissed_count']}")
+        print(f"recorded={str(result['recorded']).lower()}")
+        print(f"reason={result['reason']}")
     return 0
 
 
@@ -1188,6 +1392,7 @@ def cmd_work_finish(args: argparse.Namespace) -> int:
         run_health_check=not args.no_doctor,
         end=not args.keep_session,
         claims_text=claims_text,
+        invocation=args.invocation,
     )
     if args.json:
         print_json({key: value for key, value in result.items() if key != "rendered"})
@@ -1310,6 +1515,7 @@ def cmd_memory_explain(args: argparse.Namespace) -> int:
         args.query,
         source_id=args.source,
         min_score=args.min_score,
+        retrieval_mode=args.retrieval,
     )
     if args.json:
         print_json(explanation)
@@ -1688,6 +1894,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     root = sub.add_parser("root")
     add_scope_args(root)
+    root.add_argument(
+        "--require",
+        dest="require_initialized",
+        action="store_true",
+        help="fail with exit 3 unless the resolved local or shared store is initialized",
+    )
     root.add_argument("--json", action="store_true")
     root.set_defaults(func=cmd_root)
 
@@ -1874,7 +2086,7 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--text")
     query.add_argument("--semantic")
     query.add_argument("--federated", action="store_true")
-    query.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    query.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
     query.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     query.add_argument("--since")
     query.add_argument("--until")
@@ -2000,6 +2212,11 @@ def build_parser() -> argparse.ArgumentParser:
     adopt.add_argument("--integration-target", choices=("project", "store"), default="project")
     adopt.add_argument("--gitignore", choices=GITIGNORE_CHOICES, default="ask")
     adopt.add_argument("--no-hooks", action="store_true")
+    adopt.add_argument(
+        "--if-needed",
+        action="store_true",
+        help="reuse an initialized local or linked-worktree store without refreshing setup files",
+    )
     adopt.add_argument("--dry-run", action="store_true")
     adopt.add_argument("--force", action="store_true")
     adopt.add_argument("--json", action="store_true")
@@ -2033,16 +2250,45 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(work_start)
     work_start.add_argument("task")
     work_start.add_argument("--actor", default="agent")
-    work_start.add_argument("--emit-context", action="store_true")
+    work_start.set_defaults(emit_context=True)
+    work_start.add_argument("--emit-context", dest="emit_context", action="store_true", help=argparse.SUPPRESS)
+    work_start.add_argument(
+        "--no-context",
+        dest="emit_context",
+        action="store_false",
+        help="skip retrieval and record a zero-source context opt-out marker",
+    )
     work_start.add_argument("--federated", action="store_true")
     work_start.add_argument("--group")
     work_start.add_argument("--memory-limit", type=int, default=8)
     work_start.add_argument("--evidence-limit", type=int, default=20)
     work_start.add_argument("--recent-limit", type=int, default=5)
     work_start.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
-    work_start.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    work_start.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
     work_start.add_argument("--json", action="store_true")
     work_start.set_defaults(func=cmd_work_start)
+    work_context = work_sub.add_parser("context")
+    add_scope_args(work_context)
+    disposition = work_context.add_mutually_exclusive_group(required=True)
+    disposition.add_argument("--show", action="store_true", help="re-open the persisted numbered briefing")
+    disposition.add_argument(
+        "--expand",
+        dest="expand_source",
+        metavar="SOURCE",
+        help="read a bounded page of one displayed source without deciding the pack",
+    )
+    disposition.add_argument("--use", action="append", dest="sources")
+    disposition.add_argument("--none-relevant", action="store_true")
+    disposition.add_argument("--skip", action="store_true")
+    work_context.add_argument("--reason")
+    work_context.add_argument("--purpose", choices=CONSUMPTION_PURPOSES, default="plan")
+    work_context.add_argument("--actor", default="agent")
+    work_context.add_argument("--page", type=int, help="1-based page for --expand")
+    context_target = work_context.add_mutually_exclusive_group()
+    context_target.add_argument("--session")
+    context_target.add_argument("--pack")
+    work_context.add_argument("--json", action="store_true")
+    work_context.set_defaults(func=cmd_work_context)
     work_finish = work_sub.add_parser("finish")
     add_scope_args(work_finish)
     work_finish.add_argument("--session")
@@ -2101,7 +2347,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--until")
     memory_search.add_argument("--limit", type=int, default=10)
     memory_search.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
-    memory_search.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    memory_search.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
     memory_search.add_argument("--federated", action="store_true")
     memory_search.add_argument("--group")
     memory_search.add_argument("--no-rebuild", action="store_true")
@@ -2112,6 +2358,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_explain.add_argument("query")
     memory_explain.add_argument("--source")
     memory_explain.add_argument("--min-score", type=float, default=0.0)
+    memory_explain.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
     memory_explain.add_argument("--no-rebuild", action="store_true")
     memory_explain.add_argument("--json", action="store_true")
     memory_explain.set_defaults(func=cmd_memory_explain)
@@ -2183,7 +2430,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_build.add_argument("--evidence-limit", type=int, default=20)
     context_build.add_argument("--recent-limit", type=int, default=5)
     context_build.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
-    context_build.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid")
+    context_build.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
     context_build.add_argument("--federated", action="store_true")
     context_build.add_argument("--group")
     context_build.add_argument("--output")
@@ -2278,9 +2525,24 @@ def add_scope_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def command_invocation(argv: list[str] | None = None) -> tuple[str, ...]:
+    """Return the executable prefix that actually entered this CLI process."""
+    if argv is not None:
+        return ("agentdir",)
+    original = list(getattr(sys, "orig_argv", []) or [])
+    for index in range(len(original) - 1):
+        if original[index] == "-m" and original[index + 1] == "agentdir":
+            return tuple(original[: index + 2])
+    invoked = Path(sys.argv[0])
+    if invoked.name == "agentdir":
+        return (str(invoked),)
+    return ("agentdir",)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.invocation = command_invocation(argv)
     wants_json = bool(getattr(args, "json", False) or getattr(args, "upgrade_json", False))
     if getattr(args, "quiet", False) and not wants_json:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")

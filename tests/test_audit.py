@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agentdir.context import build_context_manifest
+
 
 def find_project_root() -> Path:
     for candidate in Path(__file__).resolve().parents:
@@ -78,7 +80,7 @@ def test_audit_session_reports_advisory_gaps_without_strict_failure(tmp_path: Pa
     assert check(payload, "session_started")["status"] == "pass"
     assert check(payload, "session_finished")["status"] == "warn"
     assert check(payload, "evidence_present")["status"] == "warn"
-    assert check(payload, "context_pack_created")["status"] == "warn"
+    assert check(payload, "context_pack_created")["status"] == "pass"
 
 
 def test_audit_session_strict_fails_on_failed_tool_result(tmp_path: Path) -> None:
@@ -286,6 +288,165 @@ def test_work_start_context_excludes_current_session_self_hits(tmp_path: Path) -
         "retrieval_hint": 0,
         "summary": 0,
     }
+
+
+def test_work_start_does_not_treat_workspace_name_only_as_relevant_memory(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "agentdir")
+    body = tmp_path / "body.txt"
+    body.write_text("agentdir agentdir generic wheel build log", encoding="utf-8")
+    run_cli("session", "start", "--id", "prior-context", cwd=repo)
+    run_cli("emit", "--type", "agent.message", "--body", str(body), cwd=repo)
+    run_cli("session", "end", "--summary", str(body), cwd=repo)
+
+    started = run_cli(
+        "work",
+        "start",
+        "work on AgentDir",
+        "--json",
+        cwd=repo,
+    )
+    payload = json.loads(started.stdout)
+
+    assert payload["context"]["retrieval_query"] == ""
+    assert payload["context_pack"]["retrieval_query_state"] == "no_specific_terms"
+    assert payload["context"]["memory_hits"] == 0
+    assert payload["context_briefing"]["match_state"] == "no_strong_prior_context"
+    assert all(source["match_quality"] != "strong" for source in payload["context_briefing"]["sources"])
+
+
+def test_quality_policy_caps_score_only_document_matches_below_strong() -> None:
+    manifest = build_context_manifest(
+        {
+            "task": "checkout redirect callback",
+            "retrieval_query": "checkout redirect callback",
+            "retrieval_query_state": "specific_terms",
+            "session_id": "quality-test",
+            "retrieval_mode": "document",
+            "memory_hits": [
+                {
+                    "source_id": "message:unrelated",
+                    "body_text": "generic build output with no matching vocabulary",
+                    "memory_score": 0.99,
+                }
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    source = manifest["sources"][0]
+    policy = manifest["briefing"]["quality_policy"]
+    assert source["match_quality"] == "possible"
+    assert source["overlap_terms"] == []
+    assert policy["id"] == "agentdir.balanced.v3"
+    assert policy["retrieval_mode"] == "document"
+    assert policy["score_thresholds"]["semantic_only_strong"] is None
+    assert policy["briefing_limit"] == 5
+    assert policy["quality_order"][0] == "strong"
+
+
+def test_briefing_enforces_the_persisted_per_session_cap() -> None:
+    manifest = build_context_manifest(
+        {
+            "task": "checkout redirect callback",
+            "retrieval_query": "checkout redirect callback",
+            "retrieval_query_state": "specific_terms",
+            "session_id": "quality-test",
+            "retrieval_mode": "document",
+            "memory_hits": [
+                {
+                    "source_id": f"message:same-session-{index}",
+                    "session_id": "same-session",
+                    "body_text": f"checkout redirect callback record {index}",
+                    "memory_score": 0.9 - index / 100,
+                }
+                for index in range(5)
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    briefing = manifest["briefing"]
+    assert briefing["quality_policy"]["max_per_session"] == 2
+    assert briefing["presented_count"] == 2
+
+
+def test_briefing_prefers_substantive_sources_over_lifecycle_and_duplicate_reports() -> None:
+    task = "tenant callback retry policy"
+    same_session = "relevant-session"
+    rows = [
+        {
+            "source_id": "message:work-started",
+            "session_id": same_session,
+            "event_type": "work.started",
+            "body_text": f"{task} work lifecycle metadata",
+            "memory_score": 0.99,
+        },
+        {
+            "source_id": "message:final-report",
+            "session_id": same_session,
+            "event_type": "work.report.final",
+            "body_text": f"{task} redundant generated final report",
+            "memory_score": 0.98,
+        },
+        {
+            "source_id": "session:relevant-session:summary",
+            "source_kind": "session_summary",
+            "session_id": same_session,
+            "event_type": "summary.compacted",
+            "body_text": f"{task} derived session summary",
+            "memory_score": 0.97,
+        },
+        {
+            "source_id": "message:relevant-decision",
+            "session_id": same_session,
+            "event_type": "decision.recorded",
+            "body_text": f"{task} use tenant scoped delivery identity",
+            "memory_score": 0.90,
+        },
+        *[
+            {
+                "source_id": f"message:substantive-{index}",
+                "session_id": f"other-session-{index}",
+                "event_type": "decision.recorded" if index % 2 else "agent.message",
+                "body_text": f"{task} substantive alternative {index}",
+                "memory_score": 0.89 - index / 100,
+            }
+            for index in range(1, 5)
+        ],
+    ]
+
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "quality-test",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": rows,
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    source_ids = manifest["briefing"]["source_ids"]
+    policy = manifest["briefing"]["quality_policy"]
+    assert "message:relevant-decision" in source_ids
+    assert "message:work-started" not in source_ids
+    assert "message:final-report" not in source_ids
+    assert "session:relevant-session:summary" not in source_ids
+    assert policy["source_preference_order"][:3] == [
+        "current_evidence",
+        "decision",
+        "evidence",
+    ]
+    assert policy["source_selection_tiers"][1] == ["decision", "evidence"]
+    assert policy["redundant_with_decision_or_evidence_session"] == [
+        "lifecycle",
+        "final_report",
+        "summary",
+    ]
 
 
 def test_work_finish_keeps_git_dirty_visible_but_out_of_known_gaps(tmp_path: Path) -> None:

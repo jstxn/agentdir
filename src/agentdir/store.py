@@ -267,7 +267,7 @@ def require_root(root: str | Path) -> RootPaths:
     if not (paths.meta / "VERSION").is_file():
         raise AgentDirStateError(
             f"Not an AgentDir root: {paths.root}. "
-            "Run 'agentdir adopt' for one-time repository setup, "
+            "Run 'agentdir adopt --if-needed' for one-time repository setup, "
             "or 'agentdir init' to create an empty store."
         )
     return paths

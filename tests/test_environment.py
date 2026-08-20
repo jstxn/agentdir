@@ -89,7 +89,8 @@ def test_adopt_redirects_integrations_to_rulesync_source_rule(tmp_path: Path) ->
     assert 'targets: ["*"]' in rule_text
     assert "<!-- agentdir-managed-rulesync:start -->" in rule_text
     assert "agentdir work start" in rule_text
-    assert "agentdir adopt --gitignore user" in rule_text
+    assert "agentdir root --require --quiet" in rule_text
+    assert "agentdir adopt --if-needed --gitignore user" in rule_text
     assert not (repo / "CLAUDE.md").exists()
     assert not (repo / "AGENTS.md").exists()
     assert not (repo / ".cursor").exists()

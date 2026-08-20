@@ -21,9 +21,15 @@ This Pi package teaches Pi how to operate AgentDir. It does not install the `age
 
 At the start of a non-trivial coding task in a software repository:
 
-1. If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the local store stays out of Git without changing the repository's `.gitignore`.
-2. Start the session with `agentdir work start "<short task>" --emit-context`.
-3. Keep any returned context pack id/source ids if you plan to cite or consume retrieved context later.
+1. Probe with `agentdir root --require --quiet`. Exit 0 means AgentDir found an initialized local or shared linked-worktree store. Do not decide whether AgentDir is set up from the presence of `.agentdir` in this checkout.
+2. If the probe exits 3 with `Not an AgentDir root`, run `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked in a restricted linked worktree, rerun it with `--no-hooks`.
+3. Start the session yourself with `agentdir work start "<short task>"`; it records a bounded context briefing by default.
+   Retrieval is automatic: configured FastEmbed stores use fused semantic and
+   lexical matching, while other stores keep the built-in hybrid path. Use the
+   default invocation without a retrieval flag during normal work.
+4. Read its compact context briefing. If the original output is unavailable, re-open the persisted briefing with `agentdir work context --show` before deciding.
+5. Treat excerpts as previews. Prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before marking a source used when implementation details, prior patterns, or exact evidence matter. Continue long sources with `--page <number>`; expansion itself is not a decision.
+6. After reading and any useful expansion, record useful numbered sources with `agentdir work context --use <number> --reason "<how it helps>"`, or record `agentdir work context --none-relevant --reason "<why>"` when none help. Use `--skip --reason "<why>"` only when review is impossible. No decision is needed when no sources are presented.
 
 Use `agentdir status` when you need one compact view of the active session, evidence, memory, context, registered roots, and doctor health.
 
@@ -47,11 +53,16 @@ Use `agentdir evidence --brief` and `agentdir timeline` to skim what has been re
 
 ## Context And Memory
 
-- `agentdir work start "<task>" --emit-context` is the normal entry point.
+- `agentdir work start "<task>"` is the normal entry point.
+- `agentdir work context` is the normal read-and-decide path. Every non-empty briefing must end in a used, no-relevant, or skipped decision before `work finish`.
+- `agentdir work context --expand <number>` is the normal deep-read path for a promising preview. Prefer expanding before use when the task depends on more than the preview; integrity and read-before-use metrics remain visible in the handoff.
 - Use `agentdir context build "<task>" --emit` when retrieved context should become an auditable context pack.
-- Use `agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff` when you rely on retrieved context.
-- Use `agentdir context cite --pack <pack-id>` or `agentdir audit context --pack <pack-id>` when reporting source lineage.
+- Use `agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff` only for lower-level explicit pack handling.
+- Cite only sources actually used. Use `agentdir context cite --pack <pack-id>` or `agentdir audit context --pack <pack-id>` when reporting source lineage.
 - Use `agentdir memory search "<task, error, or subsystem>"` and `agentdir memory explain "<same query>"` when prior local work may help.
+- `memory explain` follows the same automatic retrieval mode as search and
+  reports the actual mode and component scores. Force `--retrieval` only when
+  comparing or diagnosing backends.
 - Use `agentdir roots suggest` and `agentdir roots doctor` to inspect cross-repo memory. Register roots only when cross-repo memory is explicitly requested or clearly part of the task.
 
 Emit important plans, blockers, diffs, review decisions, and final handoffs as immutable events when they matter for future replay or audit.

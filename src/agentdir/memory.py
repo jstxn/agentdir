@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -22,9 +23,27 @@ SOURCE_SESSION_SUMMARY = "session_summary"
 RETRIEVAL_HYBRID = "hybrid"
 RETRIEVAL_DOCUMENT = "document"
 RETRIEVAL_SEMANTIC = "semantic"
-RETRIEVAL_MODES = (RETRIEVAL_HYBRID, RETRIEVAL_DOCUMENT, RETRIEVAL_SEMANTIC)
+RETRIEVAL_AUTO = "auto"
+RETRIEVAL_SEMANTIC_HYBRID = "semantic-hybrid"
+RETRIEVAL_MODES = (
+    RETRIEVAL_AUTO,
+    RETRIEVAL_HYBRID,
+    RETRIEVAL_DOCUMENT,
+    RETRIEVAL_SEMANTIC,
+)
+RETRIEVAL_EXECUTION_MODES = (*RETRIEVAL_MODES, RETRIEVAL_SEMANTIC_HYBRID)
+SEMANTIC_FUSION_SUPPORT_WEIGHT = 0.1
 MEMORY_CONFIG_FILE = "memory-backends.json"
+MEMORY_EXCLUDED_EVENT_TYPES = frozenset({"context.sources.expanded"})
+MEMORY_EXCLUDED_HEADER_NAMES = frozenset(
+    {
+        "x-agentdir-context-view-pack-id",
+        "x-agentdir-context-view-id",
+        "x-agentdir-context-view-source-id",
+    }
+)
 DEFAULT_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+AGENTDIR_CACHE_ENV = "AGENTDIR_CACHE_DIR"
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_+#.:-]{1,}", re.IGNORECASE)
 STOPWORDS = {
     "about",
@@ -228,14 +247,20 @@ def index_session_summaries(
         session_id = session["session_id"]
         if only_sessions is not None and session_id not in only_sessions:
             continue
+        header_marks = ",".join("?" for _ in MEMORY_EXCLUDED_HEADER_NAMES)
         rows = conn.execute(
-            """
-            select *
-            from messages
-            where session_id = ?
-            order by coalesce(date_utc, indexed_at), coalesce(created_ns, 0), file_path, id
+            f"""
+            select m.*,
+              exists (
+                select 1 from headers h
+                where h.message_rowid = m.id
+                  and lower(h.name) in ({header_marks})
+              ) as memory_excluded_by_header
+            from messages m
+            where m.session_id = ?
+            order by coalesce(m.date_utc, m.indexed_at), coalesce(m.created_ns, 0), m.file_path, m.id
             """,
-            (session_id,),
+            (*sorted(MEMORY_EXCLUDED_HEADER_NAMES), session_id),
         ).fetchall()
         if not rows:
             continue
@@ -281,7 +306,12 @@ def session_memory_summary(session_id: str, rows: list[dict[str, Any]]) -> str:
             tools.append(f"{tool} exit={exit_code}")
             if exit_code not in (None, 0):
                 failures.append(f"{tool} exit={exit_code}")
-        body = _excerpt(row.get("body_text") or "", 180)
+        body = (
+            ""
+            if event_type in MEMORY_EXCLUDED_EVENT_TYPES
+            or row.get("memory_excluded_by_header")
+            else _excerpt(row.get("body_text") or "", 180)
+        )
         if body and len(excerpts) < 8:
             excerpts.append(f"- {event_type}: {body}")
 
@@ -427,9 +457,10 @@ def search_memory(
     until: str | None = None,
     limit: int = 10,
     min_score: float = DEFAULT_MIN_SCORE,
-    retrieval_mode: str = RETRIEVAL_HYBRID,
+    retrieval_mode: str = RETRIEVAL_AUTO,
+    source_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    if retrieval_mode not in RETRIEVAL_MODES:
+    if retrieval_mode not in RETRIEVAL_EXECUTION_MODES:
         raise AgentDirError(
             f"Unknown retrieval mode {retrieval_mode!r}; expected one of {', '.join(RETRIEVAL_MODES)}"
         )
@@ -437,7 +468,28 @@ def search_memory(
     if token_count == 0 or not query_vector:
         raise AgentDirError("Memory search query must contain searchable text")
 
-    if retrieval_mode == RETRIEVAL_HYBRID:
+    effective_mode = resolve_retrieval_mode(root, retrieval_mode)
+    if effective_mode == RETRIEVAL_SEMANTIC_HYBRID:
+        hits = _search_memory_semantic_hybrid(
+            root,
+            query,
+            query_vector=query_vector,
+            session_id=session_id,
+            event_type=event_type,
+            actor=actor,
+            task_id=task_id,
+            tool=tool,
+            git_head=git_head,
+            workspace=workspace,
+            since=since,
+            until=until,
+            limit=limit,
+            min_score=min_score,
+            source_id=source_id,
+        )
+        return _annotate_requested_retrieval(hits, retrieval_mode)
+
+    if effective_mode == RETRIEVAL_HYBRID:
         hits = _search_memory_hybrid(
             root,
             query,
@@ -453,12 +505,13 @@ def search_memory(
             until=until,
             limit=limit,
             min_score=min_score,
+            source_id=source_id,
         )
         if hits:
-            return hits
+            return _annotate_requested_retrieval(hits, retrieval_mode)
 
-    if retrieval_mode == RETRIEVAL_SEMANTIC:
-        return _search_memory_semantic(
+    if effective_mode == RETRIEVAL_SEMANTIC:
+        hits = _search_memory_semantic(
             root,
             query,
             session_id=session_id,
@@ -472,9 +525,11 @@ def search_memory(
             until=until,
             limit=limit,
             min_score=min_score,
+            source_id=source_id,
         )
+        return _annotate_requested_retrieval(hits, retrieval_mode)
 
-    return _search_memory_documents(
+    hits = _search_memory_documents(
         root,
         query_vector=query_vector,
         session_id=session_id,
@@ -488,7 +543,95 @@ def search_memory(
         until=until,
         limit=limit,
         min_score=min_score,
+        source_id=source_id,
     )
+    return _annotate_requested_retrieval(hits, retrieval_mode)
+
+
+def resolve_retrieval_mode(root: str | Path, retrieval_mode: str = RETRIEVAL_AUTO) -> str:
+    """Resolve one requested mode into the retrieval engine AgentDir will run."""
+    if retrieval_mode not in RETRIEVAL_EXECUTION_MODES:
+        raise AgentDirError(
+            f"Unknown retrieval mode {retrieval_mode!r}; expected one of {', '.join(RETRIEVAL_MODES)}"
+        )
+    if retrieval_mode != RETRIEVAL_AUTO:
+        return retrieval_mode
+    config = read_memory_config(root)
+    embeddings = config.get("embeddings") or {}
+    if embeddings.get("provider") == "fastembed" and _module_available("fastembed"):
+        return RETRIEVAL_SEMANTIC_HYBRID
+    return RETRIEVAL_HYBRID
+
+
+def _search_memory_semantic_hybrid(
+    root: str | Path,
+    query: str,
+    *,
+    query_vector: dict[int, float],
+    session_id: str | None = None,
+    event_type: str | None = None,
+    actor: str | None = None,
+    task_id: str | None = None,
+    tool: str | None = None,
+    git_head: str | None = None,
+    workspace: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 10,
+    min_score: float = DEFAULT_MIN_SCORE,
+    source_id: str | None = None,
+) -> list[dict[str, Any]]:
+    candidate_limit = max(limit * 3, limit + 8)
+    common = {
+        "session_id": session_id,
+        "event_type": event_type,
+        "actor": actor,
+        "task_id": task_id,
+        "tool": tool,
+        "git_head": git_head,
+        "workspace": workspace,
+        "since": since,
+        "until": until,
+        "limit": candidate_limit,
+        "min_score": min_score,
+        "source_id": source_id,
+    }
+    semantic_hits = _search_memory_semantic(root, query, **common)
+    hybrid_hits = _search_memory_hybrid(root, query, query_vector=query_vector, **common)
+    semantic_by_source = {str(hit["source_id"]): hit for hit in semantic_hits}
+    hybrid_by_source = {str(hit["source_id"]): hit for hit in hybrid_hits}
+    source_ids = set(semantic_by_source) | set(hybrid_by_source)
+    fused: list[dict[str, Any]] = []
+    for candidate_source_id in source_ids:
+        semantic = semantic_by_source.get(candidate_source_id)
+        hybrid = hybrid_by_source.get(candidate_source_id)
+        payload = {**(semantic or {}), **(hybrid or {})}
+        semantic_score = float(semantic["memory_score"]) if semantic else 0.0
+        hybrid_score = float(hybrid["memory_score"]) if hybrid else 0.0
+        score = min(
+            1.0,
+            max(semantic_score, hybrid_score)
+            + (SEMANTIC_FUSION_SUPPORT_WEIGHT * min(semantic_score, hybrid_score)),
+        )
+        if score < min_score:
+            continue
+        payload["memory_score"] = round(score, 6)
+        payload["semantic_score"] = round(semantic_score, 6) if semantic else None
+        payload["hybrid_score"] = round(hybrid_score, 6) if hybrid else None
+        payload["fusion_support_weight"] = SEMANTIC_FUSION_SUPPORT_WEIGHT
+        payload["retrieval_mode"] = RETRIEVAL_SEMANTIC_HYBRID
+        fused.append(payload)
+    fused.sort(key=_hit_sort_key)
+    return fused[:limit]
+
+
+def _annotate_requested_retrieval(
+    hits: list[dict[str, Any]],
+    requested_mode: str,
+) -> list[dict[str, Any]]:
+    for hit in hits:
+        hit["requested_retrieval_mode"] = requested_mode
+    return hits
 
 
 def _search_memory_documents(
@@ -506,6 +649,7 @@ def _search_memory_documents(
     until: str | None = None,
     limit: int = 10,
     min_score: float = DEFAULT_MIN_SCORE,
+    source_id: str | None = None,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -521,6 +665,7 @@ def _search_memory_documents(
         workspace=workspace,
         since=since,
         until=until,
+        source_id=source_id,
     )
 
     sql = """
@@ -544,6 +689,8 @@ def _search_memory_documents(
             payload = _public_memory_row(dict(row))
             payload.pop("vector_json", None)
             payload["memory_score"] = round(score, 6)
+            payload["document_score"] = round(score, 6)
+            payload["retrieval_mode"] = RETRIEVAL_DOCUMENT
             hits.append(payload)
     hits.sort(key=_hit_sort_key)
     return hits[:limit]
@@ -564,6 +711,7 @@ def _search_memory_semantic(
     until: str | None = None,
     limit: int = 10,
     min_score: float = DEFAULT_MIN_SCORE,
+    source_id: str | None = None,
 ) -> list[dict[str, Any]]:
     config = read_memory_config(root)
     embeddings = config.get("embeddings") or {}
@@ -586,6 +734,7 @@ def _search_memory_semantic(
         workspace=workspace,
         since=since,
         until=until,
+        source_id=source_id,
     )
     sql = "select md.* from memory_documents md"
     if clauses:
@@ -598,8 +747,8 @@ def _search_memory_semantic(
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
         if not rows:
             return []
-        query_vector = _fastembed_vectors(model_name, [query])[0]
-        document_vectors = _semantic_vectors_for_rows(conn, model_name, rows)
+        query_vector = _fastembed_vectors(root, model_name, [query])[0]
+        document_vectors = _semantic_vectors_for_rows(root, conn, model_name, rows)
 
     hits: list[dict[str, Any]] = []
     for row, vector in zip(rows, document_vectors, strict=True):
@@ -610,6 +759,7 @@ def _search_memory_semantic(
             continue
         payload = _public_memory_row(row)
         payload["memory_score"] = round(score, 6)
+        payload["semantic_score"] = round(score, 6)
         payload["retrieval_mode"] = RETRIEVAL_SEMANTIC
         hits.append(payload)
     hits.sort(key=_hit_sort_key)
@@ -632,6 +782,7 @@ def _search_memory_hybrid(
     until: str | None = None,
     limit: int = 10,
     min_score: float = DEFAULT_MIN_SCORE,
+    source_id: str | None = None,
 ) -> list[dict[str, Any]]:
     query_terms = sorted(set(_tokens(query)))
     if not query_terms:
@@ -651,6 +802,7 @@ def _search_memory_hybrid(
         workspace=workspace,
         since=since,
         until=until,
+        source_id=source_id,
     )
     candidate_limit = max(limit * 24, 64)
     sql = f"""
@@ -690,6 +842,7 @@ def _search_memory_hybrid(
             payload = _public_memory_row(dict(row))
             payload.pop("passage_vector_json", None)
             payload["memory_score"] = round(score, 6)
+            payload["hybrid_score"] = round(score, 6)
             payload["passage_score"] = round(vector_score, 6)
             payload["lexical_score"] = round(lexical_score, 6)
             payload["retrieval_mode"] = RETRIEVAL_HYBRID
@@ -710,6 +863,20 @@ def memory_stats(root: str | Path) -> dict[str, Any]:
             """
             select
               (select count(*) from messages) as messages,
+              (
+                select count(*)
+                from messages
+                where (event_type is null or event_type != 'context.sources.expanded')
+                  and not exists (
+                    select 1 from headers h
+                    where h.message_rowid = messages.id
+                      and lower(h.name) in (
+                        'x-agentdir-context-view-pack-id',
+                        'x-agentdir-context-view-id',
+                        'x-agentdir-context-view-source-id'
+                      )
+                  )
+              ) as eligible_messages,
               count(*) as memory_documents,
               min(vector_dim) as min_vector_dim,
               max(vector_dim) as max_vector_dim,
@@ -734,14 +901,16 @@ def memory_stats(root: str | Path) -> dict[str, Any]:
             """
         ).fetchone()
     messages = int(totals["messages"] or 0)
+    eligible_messages = int(totals["eligible_messages"] or 0)
     documents = int(totals["memory_documents"] or 0)
     message_documents = kinds.get(SOURCE_MESSAGE, 0)
     return {
         "messages": messages,
+        "eligible_messages": eligible_messages,
         "memory_documents": documents,
         "message_documents": message_documents,
         "session_summary_documents": kinds.get(SOURCE_SESSION_SUMMARY, 0),
-        "coverage": message_documents / messages if messages else 1.0,
+        "coverage": message_documents / eligible_messages if eligible_messages else 1.0,
         "vector_dim": totals["max_vector_dim"] or DEFAULT_VECTOR_DIM,
         "min_vector_dim": totals["min_vector_dim"],
         "max_vector_dim": totals["max_vector_dim"],
@@ -762,7 +931,7 @@ def memory_backend_status(root: str | Path) -> dict[str, Any]:
     embeddings = config.get("embeddings", {})
     configured_embedding_provider = embeddings.get("provider")
     semantic_enabled = configured_embedding_provider == "fastembed" and fastembed_available
-    active = "semantic-local" if semantic_enabled else "local-hybrid"
+    active = RETRIEVAL_SEMANTIC_HYBRID if semantic_enabled else "local-hybrid"
     return {
         "active": active,
         "source_of_truth": "immutable envelopes",
@@ -881,21 +1050,29 @@ def explain_memory_match(
     *,
     source_id: str | None = None,
     min_score: float = 0.0,
+    retrieval_mode: str = RETRIEVAL_AUTO,
 ) -> dict[str, Any]:
-    query_vector, token_count = vectorize(query)
-    if token_count == 0 or not query_vector:
-        raise AgentDirError("Memory explain query must contain searchable text")
-
     if source_id:
-        row = _memory_document(root, source_id)
-        score = cosine_similarity(query_vector, deserialize_vector(row["vector_json"]))
-        if score < min_score:
+        _memory_document(root, source_id)
+        hits = search_memory(
+            root,
+            query,
+            limit=1,
+            min_score=min_score,
+            retrieval_mode=retrieval_mode,
+            source_id=source_id,
+        )
+        if not hits:
             raise AgentDirError(f"Memory source did not meet score threshold: {source_id}")
-        hit = _public_memory_row(row)
-        hit["memory_score"] = round(score, 6)
-        hit.update(_best_passage_for_document(root, int(row["id"]), query_vector))
+        hit = hits[0]
     else:
-        hits = search_memory(root, query, limit=1, min_score=min_score)
+        hits = search_memory(
+            root,
+            query,
+            limit=1,
+            min_score=min_score,
+            retrieval_mode=retrieval_mode,
+        )
         if not hits:
             raise AgentDirError("No memory hits to explain")
         hit = hits[0]
@@ -913,6 +1090,12 @@ def explain_memory_match(
         "subject": hit.get("subject"),
         "file_path": hit.get("file_path"),
         "memory_score": hit.get("memory_score"),
+        "retrieval_mode": hit.get("retrieval_mode"),
+        "requested_retrieval_mode": hit.get("requested_retrieval_mode") or retrieval_mode,
+        "semantic_score": hit.get("semantic_score"),
+        "hybrid_score": hit.get("hybrid_score"),
+        "document_score": hit.get("document_score"),
+        "fusion_support_weight": hit.get("fusion_support_weight"),
         "overlap_terms": overlap,
         "query_terms": query_terms,
         "document_terms_sample": document_terms[:30],
@@ -930,7 +1113,12 @@ def format_memory_explanation(explanation: dict[str, Any]) -> str:
         f"query={explanation['query']}",
         f"source_id={explanation['source_id']}",
         f"source_kind={explanation['source_kind']}",
+        f"retrieval_mode={explanation.get('retrieval_mode') or ''}",
+        f"requested_retrieval_mode={explanation.get('requested_retrieval_mode') or ''}",
         f"score={explanation['memory_score']}",
+        f"semantic_score={explanation.get('semantic_score') if explanation.get('semantic_score') is not None else ''}",
+        f"hybrid_score={explanation.get('hybrid_score') if explanation.get('hybrid_score') is not None else ''}",
+        f"document_score={explanation.get('document_score') if explanation.get('document_score') is not None else ''}",
         f"session={explanation.get('session_id') or ''}",
         "overlap=" + ", ".join(explanation["overlap_terms"]),
         f"passage_id={explanation.get('passage_id') or ''}",
@@ -996,6 +1184,7 @@ def _public_memory_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _semantic_vectors_for_rows(
+    root: str | Path,
     conn: sqlite3.Connection,
     model_name: str,
     rows: list[dict[str, Any]],
@@ -1017,7 +1206,7 @@ def _semantic_vectors_for_rows(
             vectors.append(None)
             missing.append(row)
     if missing:
-        embedded = _fastembed_vectors(model_name, [row["body_text"] for row in missing])
+        embedded = _fastembed_vectors(root, model_name, [row["body_text"] for row in missing])
         now = now_iso()
         for row, vector in zip(missing, embedded, strict=True):
             conn.execute(
@@ -1041,17 +1230,52 @@ def _semantic_vectors_for_rows(
     return [vector for vector in vectors if vector is not None]
 
 
-_FASTEMBED_MODELS: dict[str, Any] = {}
+_FASTEMBED_MODELS: dict[tuple[str, str], Any] = {}
 
 
-def _fastembed_vectors(model_name: str, texts: list[str]) -> list[list[float]]:
-    model = _FASTEMBED_MODELS.get(model_name)
+def _fastembed_vectors(
+    root: str | Path,
+    model_name: str,
+    texts: list[str],
+) -> list[list[float]]:
+    del root  # The runtime cache is machine-local and shared across AgentDir stores.
+    cache_dir = _fastembed_cache_dir()
+    model_key = (model_name, str(cache_dir))
+    model = _FASTEMBED_MODELS.get(model_key)
     if model is None:
+        _prepare_onnx_runtime()
         from fastembed import TextEmbedding
 
-        model = TextEmbedding(model_name=model_name)
-        _FASTEMBED_MODELS[model_name] = model
+        model = TextEmbedding(model_name=model_name, cache_dir=str(cache_dir))
+        _FASTEMBED_MODELS[model_key] = model
     return [[float(value) for value in vector] for vector in model.embed(texts)]
+
+
+def _fastembed_cache_dir() -> Path:
+    configured = os.environ.get(AGENTDIR_CACHE_ENV)
+    if configured:
+        base = Path(configured).expanduser().resolve()
+    else:
+        from platformdirs import user_cache_path
+
+        base = Path(user_cache_path("agentdir"))
+    cache_dir = base / "fastembed"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _prepare_onnx_runtime() -> None:
+    # ONNX Runtime telemetry has created a literal ``:memory:.ses`` file in the
+    # process working directory on macOS. Disable it before FastEmbed imports
+    # ONNX and reinforces the policy through the public runtime API when present.
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+    try:
+        import onnxruntime
+    except ImportError:
+        return
+    disable = getattr(onnxruntime, "disable_telemetry_events", None)
+    if callable(disable):
+        disable()
 
 
 def dense_cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -1156,7 +1380,11 @@ def _append_memory_filters(
     workspace: str | None = None,
     since: str | None = None,
     until: str | None = None,
+    source_id: str | None = None,
 ) -> None:
+    if source_id:
+        clauses.append("md.source_id = ?")
+        params.append(source_id)
     if session_id:
         clauses.append("md.session_id = ?")
         params.append(session_id)

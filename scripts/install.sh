@@ -151,7 +151,7 @@ main() {
     fail "agentdir executable was not found on PATH after pipx install"
   fi
   log "installed AgentDir $AGENTDIR_VERSION"
-  log "next: from a repository, run: agentdir adopt --gitignore user"
+  log "next: from a repository, run: agentdir adopt --if-needed --gitignore user"
   log "use --gitignore project for a repo-local rule, or --gitignore none to leave ignore files unchanged"
 }
 

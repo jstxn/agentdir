@@ -35,6 +35,9 @@ def test_agentdir_pi_skill_frontmatter_and_workflow() -> None:
     assert len(description.group(1)) <= 1024
     assert re.search(r"^compatibility: ", frontmatter, re.MULTILINE)
     assert "agentdir work start" in text
-    assert "agentdir adopt --gitignore user" in text
+    assert "agentdir work context --use <number>" in text
+    assert "agentdir work context --none-relevant" in text
+    assert "agentdir root --require --quiet" in text
+    assert "agentdir adopt --if-needed --gitignore user" in text
     assert "agentdir run --" in text
     assert "agentdir work finish --json" in text

@@ -8,8 +8,10 @@ trigger: always_on
 AgentDir is agent-owned background instrumentation for this repository.
 The engineer installs or adopts it once; agents operate it during normal work.
 
-- Start non-trivial coding work with `agentdir work start "<short task>" --emit-context`.
-- If `.agentdir` is missing, run `agentdir adopt --gitignore user` once so the local store stays out of Git without changing the repository's `.gitignore`.
+- Before starting work in an unfamiliar checkout, run `agentdir root --require --quiet`. Exit 0 means an initialized local or shared worktree store is ready; do not decide whether AgentDir is set up from the presence of `.agentdir` in this checkout.
+- If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked in a restricted linked worktree, rerun it with `--no-hooks`.
+- Then start non-trivial coding work with `agentdir work start "<short task>"`.
+- Read the printed context briefing, treat excerpts as previews, and prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before using a source when implementation details, prior patterns, or exact evidence matter. Then record either useful numbered sources with `agentdir work context --use <number> --reason "<how it helps>"` or `agentdir work context --none-relevant --reason "<why>"`. Use `--skip --reason "<why>"` only when review is impossible; no decision is needed when no sources are presented. Re-open lost output with `agentdir work context --show`.
 - Wrap evidence-bearing commands with `agentdir run -- <command>`.
 - Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
 - Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.

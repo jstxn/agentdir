@@ -18,7 +18,13 @@ except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer m
 
 from .envelope import header_value, parse_envelope, validate_required
 from .mailbox import iter_records
-from .memory import index_memory_document, index_session_summaries, memory_schema_sql
+from .memory import (
+    MEMORY_EXCLUDED_EVENT_TYPES,
+    MEMORY_EXCLUDED_HEADER_NAMES,
+    index_memory_document,
+    index_session_summaries,
+    memory_schema_sql,
+)
 from .store import AgentDirError, RootPaths, discover_mailboxes, paths_for, require_root
 
 SCHEMA = """
@@ -185,6 +191,41 @@ def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
 
     result = IndexResult()
     affected_sessions: set[str] = set()
+
+    # Forward-clean telemetry that an older AgentDir version may have indexed
+    # before it knew these events were intentionally excluded from memory.
+    if MEMORY_EXCLUDED_EVENT_TYPES or MEMORY_EXCLUDED_HEADER_NAMES:
+        event_marks = ",".join("?" for _ in MEMORY_EXCLUDED_EVENT_TYPES)
+        header_marks = ",".join("?" for _ in MEMORY_EXCLUDED_HEADER_NAMES)
+        excluded_params = (
+            *sorted(MEMORY_EXCLUDED_EVENT_TYPES),
+            *sorted(MEMORY_EXCLUDED_HEADER_NAMES),
+        )
+        excluded_rows = conn.execute(
+            f"""
+            select id, session_id from messages
+            where event_type in ({event_marks})
+               or exists (
+                 select 1 from headers h
+                 where h.message_rowid = messages.id
+                   and lower(h.name) in ({header_marks})
+               )
+            """,
+            excluded_params,
+        ).fetchall()
+        excluded_ids = [row["id"] for row in excluded_rows]
+        if excluded_ids:
+            id_marks = ",".join("?" for _ in excluded_ids)
+            conn.execute(
+                f"""
+                delete from memory_documents
+                where message_rowid in ({id_marks})
+                """,
+                excluded_ids,
+            )
+            affected_sessions.update(
+                row["session_id"] for row in excluded_rows if row["session_id"]
+            )
 
     removed_ids = [existing[path] for path in existing.keys() - on_disk.keys()]
     for start in range(0, len(removed_ids), 500):
@@ -431,26 +472,31 @@ def _insert_record(
         )
     except sqlite3.DatabaseError:
         pass
-    index_memory_document(
-        conn,
-        message_rowid=rowid,
-        message_id=message_id,
-        session_id=session_id,
-        event_type=event_type,
-        subject=subject,
-        from_actor=from_actor,
-        to_actor=to_actor,
-        task_id=task_id,
-        tool=tool,
-        tool_exit_code=tool_exit_code,
-        workspace=workspace,
-        git_head=git_head,
-        date_header=date_header,
-        date_utc=date_utc,
-        file_path=relative_file,
-        body_text=body_text,
-        indexed_at=indexed_at,
+    memory_excluded_by_header = bool(
+        msg is not None
+        and any(msg.get_all(name, []) for name in MEMORY_EXCLUDED_HEADER_NAMES)
     )
+    if event_type not in MEMORY_EXCLUDED_EVENT_TYPES and not memory_excluded_by_header:
+        index_memory_document(
+            conn,
+            message_rowid=rowid,
+            message_id=message_id,
+            session_id=session_id,
+            event_type=event_type,
+            subject=subject,
+            from_actor=from_actor,
+            to_actor=to_actor,
+            task_id=task_id,
+            tool=tool,
+            tool_exit_code=tool_exit_code,
+            workspace=workspace,
+            git_head=git_head,
+            date_header=date_header,
+            date_utc=date_utc,
+            file_path=relative_file,
+            body_text=body_text,
+            indexed_at=indexed_at,
+        )
     return rowid, message_id, malformed
 
 
