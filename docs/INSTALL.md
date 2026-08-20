@@ -32,7 +32,7 @@ The installer does not modify Git configuration or ignore files. It prints a
 post-install command that agents can use from a repository:
 
 ```bash
-agentdir adopt --gitignore user
+agentdir adopt --if-needed --gitignore user
 ```
 
 This appends `.agentdir/` to the configured user-level Git excludes file. Use
@@ -159,12 +159,13 @@ surface. `team` adds optional shared-memory backend clients.
 
 ### When The Semantic Extra Is Worth It
 
-The default retrieval backend (`local-hybrid`) combines lexical passage
-matching with lightweight hashed vectors. It needs no model download and is
-usually enough when memory queries reuse the project's own vocabulary: error
-strings, subsystem names, command names, file paths.
+Retrieval defaults to `auto`. Without the semantic extra, automatic retrieval
+uses `local-hybrid`, combining lexical passage matching with lightweight hashed
+vectors and requiring no model download. That path is usually enough when
+queries reuse the project's own vocabulary: error strings, subsystem names,
+command names, and file paths.
 
-Install the `semantic` extra and opt in when retrieval quality matters more
+Install and configure the `semantic` extra when paraphrase quality matters more
 than setup weight:
 
 ```bash
@@ -172,6 +173,14 @@ pipx inject agentdir-cli 'agentdir-cli[semantic]'
 agentdir memory embeddings configure fastembed   # one-time model download
 agentdir memory backend configure sqlite-vec     # optional: faster large stores
 ```
+
+Once FastEmbed is configured and importable, normal automatic callers fuse its
+semantic score with the built-in lexical score. No `--retrieval semantic` flag
+is needed for agent-owned `work start`. `memory explain` uses the same resolved
+mode and reports semantic, hybrid, and fused scores. AgentDir disables ONNX
+Runtime telemetry before model initialization and stores model downloads in the
+machine-local AgentDir cache, never in the current checkout. Set
+`AGENTDIR_CACHE_DIR` only when that cache needs an explicit machine-local base.
 
 Reach for it when:
 
@@ -181,8 +190,8 @@ Reach for it when:
 - the store has grown past tens of thousands of passages and `sqlite-vec`
   lookup speed starts to matter.
 
-Skip it for single-repo stores with recent, literally-worded memory - the
-default backend retrieves those well without the model download.
+Skip it for single-repo stores with recent, literally-worded memory; automatic
+retrieval will continue using the built-in backend without a model download.
 `agentdir memory backend status` shows which backends are active.
 
 ## Store Location Scopes
@@ -316,6 +325,9 @@ AgentDir's git recording.
 
 Adoption now defends against that:
 
+- adopt preflights the complete hook target before creating an AgentDir store or
+  writing agent guidance, so a restricted linked worktree fails cleanly without
+  partial setup; use `--no-hooks` there and keep session recording enabled;
 - adopt and `agentdir hooks install` detect lefthook, husky, pre-commit, and a
   configured `core.hooksPath`, and warn about the overwrite behavior up front;
 - installed shims are recorded in `.agentdir/hooks.json`, and `agentdir

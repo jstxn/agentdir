@@ -404,7 +404,9 @@ agentdir setup [--codex-skill user|project|store|none]
 agentdir init [<root>] [--scope <scope>]
 agentdir root [--scope <scope>]
 agentdir status [--json]
-agentdir work start <task> [--emit-context] [--federated] [--group <name>]
+agentdir work start <task> [--no-context] [--federated] [--group <name>]
+agentdir work context --show [--session <id> | --pack <id>]
+agentdir work context (--use <number> | --none-relevant | --skip) --reason <text> [--purpose plan|tool|answer|handoff] [--session <id> | --pack <id>]
 agentdir work finish [--keep-session] [--json]
 agentdir report final [--format md|json]
 agentdir session ensure [--id <id>] [--title <title>]
@@ -446,6 +448,7 @@ agentdir memory search --group <name> <query>
 agentdir context build <task> [--emit]
 agentdir context build <task> --federated [--emit]
 agentdir context build <task> --group <name> [--emit]
+agentdir work context --pack <pack-id> --expand <number> [--page <n>]
 agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff
 agentdir context cite --pack <pack-id> [--source <source-id>] [--format md|json]
 agentdir audit context --pack <pack-id>
@@ -456,15 +459,53 @@ agentdir doctor [--root <root>] [--scope <scope>]
 ```
 
 `work start` is the agent-owned path. It ensures a session, emits a work-start
-event, builds task context, and can emit an auditable context pack. `status`
-gives the engineer and the agent one health view for the active session,
-evidence, memory, roots, and doctor state. `work finish` emits a final report,
-records a work-finished event, and closes the session by default.
+event, and emits an auditable context pack with a persisted at-most-five-source
+briefing by default. `--no-context` skips retrieval while persisting a
+zero-source opt-out marker. `work context --show` re-opens the persisted
+briefing. Decisions resolve the active session's latest pack, or an explicit
+session/pack target, and record one terminal, reasoned used, no-relevant, or
+skipped decision.
+
+`work context --expand` is the nonterminal deep-read seam. `ContextExpansion`
+maps only the exact sources reconstructed by the persisted briefing, then
+dispatches to local envelope, derived-summary, federated-root, or manifest-
+excerpt resolution. It validates captured identities and digests before
+delivery, applies secret redaction to every representation, and slices the
+result into deterministic 4096-byte UTF-8 pages. Direct pack reads may locate
+retained archived envelopes, but archives remain outside the active SQLite
+query and memory indexes.
+
+Canonical reads in the active pack-owning session emit a deterministic
+`context.sources.expanded` envelope under pointer, session, and pack lifecycle
+locks. Its headers contain only pack/source identity, hashes, page ranges,
+integrity, extent, redaction count, and decision phase; its body contains no
+source text. The receipt uses `X-AgentDir-Context-View-Pack-Id` rather than the
+terminal `X-AgentDir-Pack-Id`, so older readers ignore it. Indexing retains the
+raw event for audit while excluding it from memory documents and session-
+summary excerpts. Expansion receipt validation is nested and nonblocking: it
+can create an attention warning but never mutates decision or finish state.
+`status` gives the engineer and the agent one health view for the active
+session, evidence, the context funnel, memory, roots, and doctor state. `work
+finish` leaves a review-required session open while any pack decision is pending,
+then emits a final report, records a work-finished event, and closes the session
+by default.
 
 Context pack emission is also agent-owned. `context build --emit` writes a
-manifest artifact and emits `context.pack.created`; `context consume`,
-`context cite`, and `audit context` preserve advisory source lineage without
-claiming hard proof of model attention.
+manifest artifact and emits `context.pack.created`; used work-context decisions
+project through `context.pack.consumed`, while no-relevant and skipped decisions
+emit `context.pack.reviewed`. A session lifecycle lock linearizes pack emission
+with final audit and session end; a post-end emitter is rejected. A per-pack lock
+plus stable decision ID makes identical concurrent decisions idempotent and
+incompatible transitions visible.
+`context cite` defaults only to sources already used for new review-aware packs;
+legacy packs remain audit-compatible. `audit context` folds the append-only
+events chronologically into retrieved, presented, reviewed, used, dismissed,
+pending, cited, additional-consumed, invalid-citation, and expansion chronology
+metrics without
+claiming hard proof of model attention. Malformed terminal events fail lineage
+validation instead of being certified by their headers. Content-addressed
+manifest digests and schemas, creation-event header/body identity, and all
+consumed or cited source references are validated fail closed.
 
 Federation is explicit and derived. `roots register` stores registered root
 metadata in `state/registered-roots.json` under the controller root. `roots
@@ -476,11 +517,16 @@ root-qualified source IDs, and copies only metadata, scores, excerpts, and
 source references into the result surface. The child root remains the canonical
 store.
 
-`memory backend list` exposes the active local hybrid backend plus optional
-vector-extra lanes. Optional backend configuration records operator intent in
-state, checks dependency availability, and never replaces envelopes as the
-canonical store. Semantic retrieval requires explicit fastembed configuration
-and optional dependencies; otherwise the local hybrid retriever remains active.
+`memory backend list` exposes the active automatic retrieval backend plus
+optional vector-extra lanes. Optional backend configuration records operator
+intent in state, checks dependency availability, and never replaces envelopes
+as the canonical store. Automatic mode resolves to local hybrid unless
+FastEmbed is configured and importable; when ready, it fuses semantic and
+lexical scores and persists the requested mode, actual mode, and component
+scores. Explain uses that same seam instead of recomputing a different vector.
+FastEmbed models live in the machine-local AgentDir cache, and ONNX Runtime
+telemetry is disabled before initialization so inference cannot dirty a
+checkout.
 
 The memory daemon is an opt-in warm indexer. It records process state under
 `state/memory-daemon.json`, rebuilds the local index and selected registered

@@ -30,7 +30,7 @@ agentdir adopt
 For agent-driven, non-interactive setup, make the ignore destination explicit:
 
 ```bash
-agentdir adopt --gitignore user
+agentdir adopt --if-needed --gitignore user
 ```
 
 This keeps `.agentdir/` out of Git across repositories without changing a
@@ -62,11 +62,22 @@ The user should not have to operate AgentDir during a normal coding session. Onc
 
 Agent responsibilities:
 
-- run `agentdir work start "<task>" --emit-context` when coding work begins
-- run `agentdir adopt --gitignore user` once if the repository has not been prepared yet
+- probe with `agentdir root --require --quiet`; a zero exit means an initialized
+  local or shared linked-worktree store is ready, even if this checkout has no
+  physical `.agentdir`
+- if the probe exits 3, run `agentdir adopt --if-needed --gitignore user`; add
+  `--no-hooks` if a restricted linked worktree cannot write the shared Git hooks
+  directory
+- run `agentdir work start "<task>"` when coding work begins; it persists a bounded context briefing by default
+- read its bounded context briefing and record either useful numbered sources
+  or a reasoned no-relevant decision with `agentdir work context`
+- treat briefing excerpts as previews; prefer `agentdir work context --expand
+  <number>` before marking a source used when implementation details, patterns,
+  or exact evidence matter
 - use `agentdir status` when a single health view is needed
-- emit context packs when retrieved context materially informs the work
-- record which context sources were consumed and cited when reporting lineage
+- use `--skip --reason` only when the context briefing cannot be reviewed, so
+  the final handoff keeps the gap visible
+- cite only context sources actually used when reporting lineage
 - wrap evidence-bearing commands with `agentdir run`
 - use plain shell commands for routine exploration and file reads
 - record important blockers, decisions, and handoffs
@@ -96,10 +107,46 @@ agentdir memory backend list
 agentdir memory daemon status
 ```
 
-`agentdir memory search` incrementally updates the index by default (new and deleted envelopes only; pass `--no-rebuild` to skip even that), then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
+`agentdir memory search` incrementally updates the index by default (new and deleted envelopes only; pass `--no-rebuild` to skip even that), then ranks matching envelopes and derived session summaries by vector similarity. `agentdir memory explain` shows why a hit matched. `work start` removes generic task words and the workspace name from its retrieval query, diversifies candidates, and prints at most five sources with match quality. Full IDs, scores, and match reasons remain in JSON. `agentdir context build` combines memory, current-session evidence, and recent session summaries into an agent-ready context pack. The raw Maildir envelopes remain the source of truth, so the memory layer can always be deleted and rebuilt.
 
-When retrieved context materially influences a plan, tool call, answer, or handoff,
-emit an auditable context pack:
+The normal read-and-decide flow is:
+
+```bash
+agentdir work start "checkout failure tests"
+agentdir work context --expand 1
+# continue a long source: agentdir work context --expand 1 --page 2
+agentdir work context --use 1 --reason "prior checkout failure constrains the plan"
+# or: agentdir work context --none-relevant --reason "only generic matches"
+# after a restart or lost output: agentdir work context --show
+```
+
+The briefing source numbers are pack-local selectors; full source IDs stay in
+JSON, and retrieved-but-omitted IDs stay on the lower-level interface. A used decision reviews
+the entire bounded briefing, records selected sources as used, and marks the
+other presented sources dismissed. A no-relevant decision reviews and dismisses
+the entire briefing without manufacturing consumption or citation. A non-empty
+briefing remains pending until one of those decisions, or an explicit skipped
+review, is recorded. The terminal decision is serialized and idempotent, so
+concurrent identical declarations produce one record and conflicting later
+declarations are rejected.
+
+Expansion is a nonterminal read, not a disposition. It maps the exact displayed
+ordinal back to the persisted manifest, resolves local messages, derived
+summaries, or currently registered federated roots, checks captured hashes,
+redacts the delivered representation, and returns at most 4096 UTF-8 bytes per
+page. A changed or unavailable source falls back to the stored manifest preview
+with an explicit integrity state instead of silently showing current content as
+captured history.
+
+Canonical reads made while the pack's session is active emit deterministic,
+metadata-only `context.sources.expanded` receipts. Repeating a page is
+idempotent; ended and archived pack reads remain read-only. Receipt bodies never
+contain source content, are excluded from vector memory and summary excerpts,
+and cannot change review status, decision IDs, lineage validity, or finish
+eligibility. The audit funnel adds expansion counts before and after the
+decision plus used sources that had no prior expansion.
+
+For lower-level explicit pack handling:
 
 ```bash
 agentdir context build "checkout failure tests" --emit --json
@@ -108,10 +155,20 @@ agentdir context cite --pack <pack-id> --source <source-id>
 agentdir audit context --pack <pack-id>
 ```
 
-The emitted pack stores a JSON source manifest as a content-addressed artifact.
-Consumption and citation events are append-only records that connect retrieval to
-later work. This is an advisory audit trail for cooperative agents; evidence
-claims still need evidence rows and fresh verification.
+Consuming every presented source through this lower-level path satisfies the
+compatibility review. Partial legacy consumption can finish with a visible
+`compatibility_partial` warning instead of requiring false use. New review-aware
+packs reject cite-before-use; legacy v1 packs keep their historical citation
+behavior without turning old sessions into new strict-audit failures.
+
+The emitted pack stores a JSON source manifest and its bounded presentation as a
+content-addressed artifact. Review, consumption, and citation events are
+append-only records. Audits, status, and handoffs expose retrieved, presented,
+reviewed, used, dismissed, pending, and cited counts; consumption outside the
+bounded briefing is reported separately. Citation defaults only to
+used sources and remains optional. This is an advisory audit trail for
+cooperative agents; evidence claims still need evidence rows and fresh
+verification.
 
 For cross-repo memory, register roots explicitly:
 
@@ -133,7 +190,7 @@ For repeated cross-repo work, create a group and use it as the memory plane:
 ```bash
 agentdir roots group create product-work --member root-abc123def456
 agentdir memory search --group product-work "checkout failure tests"
-agentdir work start "checkout failure tests" --group product-work --emit-context
+agentdir work start "checkout failure tests" --group product-work
 ```
 
 Warm indexing is opt-in. Use it when repeated cross-repo or large-store work
@@ -145,16 +202,20 @@ agentdir memory daemon status
 agentdir memory daemon stop
 ```
 
-Optional semantic retrieval is also opt-in:
+Optional semantic retrieval is configuration-gated:
 
 ```bash
 agentdir memory embeddings configure fastembed --model BAAI/bge-small-en-v1.5
 agentdir memory backend configure sqlite-vec
-agentdir memory search --retrieval semantic "checkout failure tests"
+agentdir memory search "checkout failure tests"
 ```
 
-If the optional dependencies are missing, AgentDir reports that clearly and keeps
-the default local hybrid retriever active.
+After configuration, automatic `work start`, context building, memory search,
+and memory explanation fuse semantic and lexical signals. Use
+`--retrieval semantic`, `--retrieval hybrid`, or `--retrieval document` only to
+force a diagnostic comparison. If optional dependencies are missing, automatic
+mode keeps the local hybrid retriever active; an explicitly forced semantic
+request still reports the missing dependency clearly.
 
 ## Capturing Tool Calls And Results
 
@@ -262,7 +323,7 @@ Hook records use the active session when one exists. If no session is active, Ag
 
 ## Agent Guidance
 
-The generated Codex skill and project guidance tell coding agents that AgentDir is their responsibility, not a user checklist. They instruct agents to start with `work start`, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, audit session quality and final claims when useful, and close with `work finish` when practical.
+The generated Codex skill and project guidance tell coding agents that AgentDir is their responsibility, not a user checklist. They instruct agents to probe the resolved store instead of checking for a physical `.agentdir`, adopt only when needed, start with `work start`, read and decide on the bounded briefing, use `status`, search and explain memory, wrap commands with `agentdir run`, emit important evidence, audit session quality and final claims when useful, and close with `work finish` when practical.
 
 ```bash
 agentdir integrations install all --target project

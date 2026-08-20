@@ -48,7 +48,7 @@ AgentDir gives those answers a local, durable home.
 | Replayable sessions | Inspect the task, decisions, commands, outputs, blockers, summaries, and handoffs after the fact. |
 | Local-first storage | Records live in the repo-local `.agentdir` directory by default. No hosted service is required. |
 | Rebuildable memory | Raw event files are the source of truth. SQLite search and memory indexes can be rebuilt. |
-| Context lineage | Agents can emit context packs, then record which retrieved sources were consumed or cited. |
+| Context lineage | Agents review a bounded briefing, then record which sources were used, dismissed, skipped, or cited. |
 | Cross-repo memory | Explicitly registered AgentDir roots can be searched together without moving canonical records. |
 | Secret-aware persistence | Common secret-like patterns are redacted before storage, with scan and cleanup commands for older records. |
 
@@ -74,7 +74,9 @@ Use AgentDir only when you want the trail.
 The agent handles the recording surface:
 
 ```bash
-agentdir work start "fix checkout failure" --emit-context
+agentdir work start "fix checkout failure"
+agentdir work context --expand 1
+agentdir work context --use 1 --reason "prior checkout pattern informs the plan"
 agentdir run -- pytest -q
 agentdir audit session
 agentdir work finish --json
@@ -150,7 +152,7 @@ Coding agents use the non-interactive form below so `.agentdir/` is ignored at
 the user level without creating a repository `.gitignore` change:
 
 ```bash
-agentdir adopt --gitignore user
+agentdir adopt --if-needed --gitignore user
 ```
 
 This is intentionally boring setup. It prepares the repository once, then agents
@@ -241,6 +243,19 @@ fragmenting into one store per branch.
 
 Each worktree still keeps its own active session, so parallel agents in
 different worktrees do not overwrite each other.
+
+Agents should probe the resolved store instead of checking whether the current
+checkout contains a physical `.agentdir`:
+
+```bash
+agentdir root --require --quiet
+```
+
+A zero exit means the local or shared store is ready. Exit 3 means the agent can
+run `agentdir adopt --if-needed --gitignore user`. In a restricted linked
+worktree that cannot write the shared Git hooks directory, it can retry with
+`--no-hooks`; adoption preflights the hook target before creating the store or
+writing guidance files.
 
 Two cases keep a store inside the worktree instead:
 
@@ -395,7 +410,52 @@ and checked against evidence like any other.
 
 ### Context Packs
 
-Agents can package retrieved context into auditable source manifests:
+`work start` retrieves, persists, and prints a bounded briefing by default, with
+numbered sources, excerpts, source classes, and match quality. `--no-context`
+skips retrieval but still persists a zero-source opt-out marker, so a new task
+cannot inherit an older task's context. The agent must then record one honest
+decision:
+
+```bash
+# when the preview looks useful but is too short:
+agentdir work context --expand 1
+agentdir work context --expand 1 --page 2
+# then record the decision:
+agentdir work context --use 1 --reason "prior failure constrains the repair"
+# or, when the briefing does not help:
+agentdir work context --none-relevant --reason "only generic build logs matched"
+# after a restart or lost output:
+agentdir work context --show
+```
+
+`work finish` keeps every non-empty briefing in the session open until the agent
+records used sources, no relevant context, or an explicit skipped review. A
+newer pack cannot hide an older pending pack. Status, audits, and handoffs
+report the funnel as retrieved, presented, reviewed, used, dismissed, pending,
+and cited, including invalid cite-before-use lineage. Lower-level consumption
+of omitted sources is reported separately so `used` never exceeds `reviewed`.
+Citation remains optional and separate from use. Printed review commands are
+bound to the displayed pack, so reopening an older briefing cannot accidentally
+decide a newer one.
+
+Briefing excerpts are labeled previews. `work context --expand <number>` reads
+the retained canonical source through the same pack-local number without making
+a review decision. Output is redacted and capped to 4096 UTF-8 bytes per page;
+plain and JSON output identify integrity (`verified`, `legacy_unverified`,
+`changed`, or `unavailable`) and extent (`full`, `bounded`, or
+`stored_excerpt`). Digest drift or an unavailable federated root returns only
+the immutable, redacted manifest preview rather than presenting changed text as
+historical truth.
+
+While the pack-owning session is active, a successful canonical expansion emits
+one idempotent, metadata-only receipt. The source body is never copied into the
+receipt or searchable memory. Expansion remains optional and never changes the
+terminal decision or blocks `work finish`; audits, status, and handoffs report
+expanded-before-decision, expanded-after-decision, and used-without-prior-
+expansion counts. Retained ended or archived packs can still be read directly,
+but historical reads do not append new receipts or re-enter active search.
+
+The lower-level context interface remains available for explicit packs:
 
 ```bash
 agentdir context build "checkout failure" --emit
@@ -404,8 +464,18 @@ agentdir context cite --pack <pack-id>
 agentdir audit context --pack <pack-id>
 ```
 
-This does not prove a model paid attention, but it does make cooperative agent
-behavior visible.
+Consuming every presented source through the lower-level interface completes a
+compatibility review. A partial legacy consume can finish with a visible
+`compatibility_partial` warning rather than forcing false consumption. A
+terminal `work context` decision cannot be changed by a later lower-level
+consume. Session-scoped lifecycle locking makes pack creation linearize before
+the finish audit; an emitter that loses the race to an ended session is rejected.
+Manifest digests, creation-event identities, decision integrity headers, and
+source references are validated before lineage can be certified.
+
+AgentDir cannot prove model attention. It can show what was presented, the
+agent's reasoned decision, which sources were actually used, and whether those
+used sources were later cited.
 
 ### Local Agent Memory
 
@@ -419,8 +489,12 @@ agentdir memory explain "release evidence"
 agentdir context build "release evidence" --emit
 ```
 
-Optional semantic extras exist, but the default path does not require a vector
-database or external embedding service.
+Retrieval mode defaults to `auto`. Without optional dependencies it keeps the
+built-in local hybrid path. When FastEmbed is installed and configured for the
+store, the same `work start`, `context build`, `memory search`, and
+`memory explain` commands automatically fuse semantic and lexical scores while
+preserving both components in JSON output. Explicit `--retrieval` modes remain
+available for diagnostics and comparisons.
 
 ### Federated Memory
 
