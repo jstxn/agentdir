@@ -76,7 +76,7 @@ Useful variants:
 ```bash
 agentdir update --install-skill none
 agentdir update --no-adopt
-agentdir update --version v0.7.8
+agentdir update --version v0.8.0
 agentdir update --dry-run
 ```
 
@@ -110,13 +110,13 @@ agentdir work finish --json --brief
 If you already have the wheel asset:
 
 ```bash
-AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.8-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_WHEEL=/path/to/agentdir_cli-0.9.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 To force the virtual environment installer even when `pipx` is present:
 
 ```bash
-AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.7.8-py3-none-any.whl bash scripts/install.sh
+AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.9.0-py3-none-any.whl bash scripts/install.sh
 ```
 
 ## Roll Back To The Previous Release
@@ -133,13 +133,13 @@ curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollbac
 To choose a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.7.7
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/rollback.sh | bash -s -- v0.8.0
 ```
 
 The equivalent manual rollback is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.7.7 bash
+curl -fsSL https://raw.githubusercontent.com/jstxn/agentdir/main/scripts/install.sh | AGENTDIR_VERSION=v0.8.0 bash
 ```
 
 ## Optional Extras
