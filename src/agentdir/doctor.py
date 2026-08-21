@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections import defaultdict
@@ -7,13 +8,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .artifacts import artifact_path
-from .envelope import header_value, parse_envelope, validate_required
+from .envelope import ParsedEnvelope, header_value, parse_envelope, validate_required
 from .git import git_common_root
 from .hooks import hooks_manifest_issues
 from .mailbox import iter_records
 from .redaction import looks_secret_bearing
 from .secrets import scan_secret_records
 from .store import CONFIG_DIR, discover_mailboxes, require_root
+
+
+_CONTEXT_EXPANSION_EVENT = "context.sources.expanded"
+_CONTEXT_EXPANSION_IDENTITY_HEADERS = (
+    "X-AgentDir-Context-View-Pack-Id",
+    "X-AgentDir-Context-View-Id",
+    "X-AgentDir-Context-View-Source-Id",
+)
 
 
 @dataclass
@@ -46,19 +55,40 @@ def run_doctor(root: str | Path) -> DoctorReport:
             report.add_error(f"missing required path: {required}")
 
     seen: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    verified_artifacts: set[str] = set()
     for _kind, mailbox in discover_mailboxes(root):
         for record in iter_records(mailbox):
             try:
                 parsed = parse_envelope(record.path)
                 missing = validate_required(parsed)
                 if missing:
-                    report.add_error(f"{record.path}: missing headers {', '.join(missing)}")
+                    message = f"{record.path}: missing headers {', '.join(missing)}"
+                    if _is_context_expansion_receipt(parsed):
+                        # Expansion receipts are optional telemetry. Their own
+                        # audit reports malformed envelopes and can put a
+                        # handoff into needs_attention, but a broken receipt
+                        # must not become a denial-of-finish vector.
+                        report.add_warning(f"optional context expansion receipt: {message}")
+                    else:
+                        report.add_error(message)
                 relative_path = str(record.path.relative_to(paths.root))
                 if parsed.message_id:
                     seen[parsed.message_id].append((relative_path, parsed.body_sha256))
                 for sha in parsed.headers("X-AgentDir-Blob-SHA256"):
-                    if not artifact_path(root, sha).exists():
+                    blob = artifact_path(root, sha)
+                    if not blob.exists():
                         report.add_error(f"{record.path}: missing artifact blob {sha}")
+                    elif sha not in verified_artifacts:
+                        try:
+                            actual_sha = hashlib.sha256(blob.read_bytes()).hexdigest()
+                        except OSError as exc:
+                            report.add_error(f"{record.path}: unreadable artifact blob {sha}: {exc}")
+                        else:
+                            if actual_sha != sha:
+                                report.add_error(
+                                    f"{record.path}: artifact blob digest mismatch {sha}"
+                                )
+                            verified_artifacts.add(sha)
             except Exception as exc:
                 report.add_error(f"{record.path}: parse error: {exc}")
 
@@ -104,6 +134,12 @@ def run_doctor(root: str | Path) -> DoctorReport:
             "Artifact lookups against those rows will not match; run 'agentdir index rebuild'"
         )
     return report
+
+
+def _is_context_expansion_receipt(parsed: ParsedEnvelope) -> bool:
+    return parsed.header("X-AgentDir-Event-Type") == _CONTEXT_EXPANSION_EVENT or any(
+        parsed.headers(name) for name in _CONTEXT_EXPANSION_IDENTITY_HEADERS
+    )
 
 
 def _split_worktree_store(root: Path) -> str | None:

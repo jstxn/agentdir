@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,6 +74,72 @@ def hook_status(cwd: str | Path | None = None, hooks: list[str] | None = None) -
     return statuses
 
 
+def preflight_install_hooks(
+    *,
+    cwd: str | Path | None = None,
+    hooks: list[str] | None = None,
+    force: bool = False,
+) -> Path:
+    """Validate the entire hook install before AgentDir mutates repository state."""
+    hooks_dir = resolve_git_hooks_dir(cwd)
+    if hooks_dir.exists() and not hooks_dir.is_dir():
+        raise AgentDirError(
+            f"Git hooks path is not a directory: {hooks_dir}. "
+            "Use --no-hooks in a restricted worktree, or adopt from a checkout "
+            "that can write the Git hooks directory."
+        )
+
+    for name in hooks or list(DEFAULT_HOOKS):
+        target = hooks_dir / name
+        original = hooks_dir / f"{name}.agentdir-original"
+        if target.exists() and not target.is_file():
+            raise AgentDirError(f"Git hook target is not a file: {target}")
+        if original.exists() and not original.is_file():
+            raise AgentDirError(f"AgentDir hook backup is not a file: {original}")
+        if not target.exists():
+            continue
+        existing = target.read_text(encoding="utf-8", errors="ignore")
+        if MANAGED_MARKER in existing or not original.exists():
+            continue
+        backup = original.read_text(encoding="utf-8", errors="ignore")
+        if not force and not can_refresh_manager_hook_backup(existing, backup):
+            raise AgentDirError(f"Refusing to overwrite existing hook and backup: {target}")
+
+    probe_dir = hooks_dir
+    while not probe_dir.exists() and probe_dir.parent != probe_dir:
+        probe_dir = probe_dir.parent
+    if not probe_dir.is_dir():
+        raise AgentDirError(
+            f"Cannot create Git hooks directory {hooks_dir}: nearest existing path "
+            f"is not a directory: {probe_dir}"
+        )
+
+    descriptor = -1
+    probe_path: Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=".agentdir-hook-preflight-", dir=probe_dir)
+        probe_path = Path(name)
+        os.close(descriptor)
+        descriptor = -1
+        probe_path.unlink()
+        probe_path = None
+    except OSError as exc:
+        raise AgentDirError(
+            f"Cannot install AgentDir hooks in {hooks_dir}: {exc}. "
+            "Use --no-hooks in a restricted worktree, or adopt from a checkout "
+            "that can write the Git hooks directory."
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if probe_path is not None:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return hooks_dir
+
+
 def install_hooks(
     root: str | Path,
     *,
@@ -78,8 +147,9 @@ def install_hooks(
     hooks: list[str] | None = None,
     force: bool = False,
 ) -> list[HookInfo]:
+    hooks_dir = preflight_install_hooks(cwd=cwd, hooks=hooks, force=force)
     init_root(root)
-    hooks_dir = git_hooks_dir(cwd)
+    hooks_dir.mkdir(parents=True, exist_ok=True)
     installed: list[HookInfo] = []
     for name in hooks or list(DEFAULT_HOOKS):
         target = hooks_dir / name
@@ -101,7 +171,10 @@ def install_hooks(
                         raise AgentDirError(f"Refusing to overwrite existing hook and backup: {target}")
                     original.unlink()
                 target.rename(original)
-        target.write_text(_hook_script(name, original), encoding="utf-8")
+        target.write_text(
+            _hook_script(name, original, paths_for(root).root),
+            encoding="utf-8",
+        )
         target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         installed.append(
             HookInfo(
@@ -320,10 +393,33 @@ def record_hook_event(
         )
 
 
-def _hook_script(name: str, original: Path) -> str:
+def _hook_script(name: str, original: Path, root: Path) -> str:
+    fallback_root = shlex.quote(str(root.resolve()))
     return f"""#!/bin/sh
 {MANAGED_MARKER}: {name}
 hook_name="{name}"
+agentdir_root={fallback_root}
+worktree_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$worktree_root" ]; then
+  agentdir_root=""
+  if [ "${{AGENTDIR_WORKTREE_STORE:-shared}}" = "local" ]; then
+    if [ -f "$worktree_root/.agentdir/VERSION" ]; then
+      agentdir_root="$worktree_root/.agentdir"
+    fi
+  elif [ -f "$worktree_root/.agentdir/VERSION" ]; then
+    agentdir_root="$worktree_root/.agentdir"
+  else
+    common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir 2>/dev/null || true)"
+    case "$common_dir" in
+      /*) ;;
+      *) common_dir="$worktree_root/$common_dir" ;;
+    esac
+    common_root="$(dirname "$common_dir")"
+    if [ -f "$common_root/.agentdir/VERSION" ]; then
+      agentdir_root="$common_root/.agentdir"
+    fi
+  fi
+fi
 stdin_file="$(mktemp "${{TMPDIR:-/tmp}}/agentdir-hook.XXXXXX")" || stdin_file=""
 if [ -n "$stdin_file" ]; then
   cat > "$stdin_file"
@@ -340,11 +436,11 @@ if [ -x "$original" ]; then
   original_status=$?
 fi
 
-if command -v agentdir >/dev/null 2>&1; then
+if [ -n "$agentdir_root" ] && command -v agentdir >/dev/null 2>&1; then
   if [ -n "$stdin_file" ]; then
-    agentdir hooks record --hook "$hook_name" --original-exit-code "$original_status" --stdin-file "$stdin_file" -- "$@" >/dev/null 2>&1 || true
+    agentdir hooks record --root "$agentdir_root" --hook "$hook_name" --original-exit-code "$original_status" --stdin-file "$stdin_file" -- "$@" >/dev/null 2>&1 || true
   else
-    agentdir hooks record --hook "$hook_name" --original-exit-code "$original_status" -- "$@" >/dev/null 2>&1 || true
+    agentdir hooks record --root "$agentdir_root" --hook "$hook_name" --original-exit-code "$original_status" -- "$@" >/dev/null 2>&1 || true
   fi
 fi
 

@@ -23,6 +23,8 @@ TIMEOUT_EXIT_CODE = 124
 class CapturedText:
     text: str = ""
     truncated: bool = False
+    had_output: bool = False
+    ended_with_newline: bool = True
 
 
 @dataclass(frozen=True)
@@ -34,9 +36,13 @@ class RunToolResult:
     truncated_streams: tuple[str, ...] = ()
     timed_out: bool = False
     event_path: str | None = None
+    stderr_needs_newline: bool = False
 
 
 def _append_limited(capture: CapturedText, chunk: str, max_bytes: int) -> None:
+    if chunk:
+        capture.had_output = True
+        capture.ended_with_newline = chunk.endswith("\n")
     if capture.truncated:
         return
     current = len(capture.text.encode("utf-8", errors="replace"))
@@ -131,7 +137,7 @@ def run_tool(
             event_type="tool.result",
             subject=f"tool.result {tool} exit 127",
             from_actor="agent",
-            body=f"command={command_text}\nexit_code=127\nstderr:\n{message}",
+            body=f"argv={argv!r}\ncommand={command_text}\nexit_code=127\nstderr:\n{message}",
             workspace=workspace,
             git_head=head,
             tool=tool,
@@ -205,6 +211,7 @@ def run_tool(
 
     body = "\n".join(
         [
+            f"argv={argv!r}",
             f"command={command_text}",
             f"exit_code={exit_code}",
             f"duration_ms={duration_ms}",
@@ -247,4 +254,7 @@ def run_tool(
         truncated_streams=tuple(truncated_streams),
         timed_out=timed_out,
         event_path=str(delivered.path),
+        stderr_needs_newline=(
+            stderr_capture.had_output and not stderr_capture.ended_with_newline
+        ),
     )

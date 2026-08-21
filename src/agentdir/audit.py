@@ -6,9 +6,17 @@ from typing import Any
 
 from .claims import OUTCOME_PASSED, recorded_claims
 from .context import audit_context_pack
+from .context_expansion import audit_context_expansion_inventory
+from .context_repository import list_context_packs
 from .doctor import run_doctor
 from .git import git_status_short
-from .review import EVIDENCE_FAMILIES, evidence_rows, evidence_truncated, summarize_session
+from .review import (
+    EVIDENCE_FAMILIES,
+    evidence_failure_state,
+    evidence_rows,
+    evidence_truncated,
+    summarize_session,
+)
 from .sessions import read_current_session
 from .store import AgentDirError
 
@@ -103,6 +111,7 @@ def audit_session(
     latest_pack: dict[str, Any] | None | object = _MISSING,
     context_audit: dict[str, Any] | None | object = _MISSING,
     doctor: dict[str, Any] | None | object = _MISSING,
+    expansion_inventory: dict[str, Any] | object = _MISSING,
 ) -> dict[str, Any]:
     if summary is None:
         summary = summarize_session(root, session_id, rebuild=rebuild)
@@ -119,9 +128,22 @@ def audit_session(
         context_audit = _safe_context_audit(root, latest_pack, rebuild=rebuild)
     if doctor is _MISSING:
         doctor = run_doctor(root).as_dict() if run_health_check else None
+    if expansion_inventory is _MISSING:
+        try:
+            expansion_inventory = audit_context_expansion_inventory(root, resolved)
+        except AgentDirError as exc:
+            expansion_inventory = {
+                "event_count": 0,
+                "claimable_event_count": 0,
+                "orphan_event_count": 0,
+                "receipts_valid": False,
+                "validation_errors": [str(exc)],
+            }
     current = read_current_session(root)
     is_current = bool(current and current.session_id == resolved and current.status == "active")
-    failed_evidence = [row for row in evidence if row.get("event_type") == "tool.result" and row.get("tool_exit_code") not in (None, 0)]
+    failure_state = evidence_failure_state(evidence)
+    failed_evidence = failure_state["unresolved"]
+    resolved_failed_evidence = failure_state["resolved"]
     truncated_evidence = [
         row
         for row in evidence
@@ -149,7 +171,16 @@ def audit_session(
         _check(
             "failed_tool_results",
             CHECK_FAIL if failed_evidence else CHECK_PASS,
-            f"{len(failed_evidence)} failed tool result(s)" if failed_evidence else "no failed tool results",
+            f"{len(failed_evidence)} unresolved failed tool result(s)"
+            if failed_evidence
+            else "no unresolved failed tool results",
+        ),
+        _check(
+            "resolved_failed_tool_results",
+            CHECK_PASS if resolved_failed_evidence else CHECK_NOT_APPLICABLE,
+            f"{len(resolved_failed_evidence)} historical failed tool result(s) resolved by newer passing evidence"
+            if resolved_failed_evidence
+            else "no resolved historical tool failures",
         ),
         _check(
             "truncated_evidence",
@@ -163,8 +194,11 @@ def audit_session(
             CHECK_PASS if latest_pack else CHECK_WARN,
             f"context pack {latest_pack['pack_id']} recorded" if latest_pack else "no context pack recorded",
         ),
-        _context_check("context_sources_consumed", context_audit, "consumed_count", latest_pack),
-        _context_check("context_sources_cited", context_audit, "cited_count", latest_pack),
+        _context_review_check(context_audit, latest_pack),
+        _context_use_check(context_audit, latest_pack),
+        _context_citation_check(context_audit, latest_pack),
+        _context_expansion_check(context_audit, latest_pack),
+        _context_expansion_inventory_check(expansion_inventory),
         _doctor_check(doctor),
         _check(
             "git_dirty",
@@ -453,25 +487,135 @@ def _check(
     return payload
 
 
-def _context_check(
-    check_id: str,
+def _context_review_check(
     context_audit: dict[str, Any] | None,
-    count_key: str,
     latest_pack: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    check_id = "context_review_completed"
     if latest_pack is None:
         return _check(check_id, CHECK_NOT_APPLICABLE, "no context pack recorded")
     if context_audit is None:
         return _check(check_id, CHECK_WARN, "context audit unavailable")
     if context_audit.get("error"):
-        return _check(check_id, CHECK_WARN, f"context audit failed: {context_audit['error']}")
-    count = int(context_audit.get(count_key) or 0)
-    action = "consumed" if count_key == "consumed_count" else "cited"
+        return _check(check_id, CHECK_FAIL, f"context audit failed: {context_audit['error']}")
+    status = context_audit.get("review_status")
+    if status == "not_applicable":
+        return _check(check_id, CHECK_NOT_APPLICABLE, "context pack presented no sources")
+    if status == "legacy":
+        return _check(check_id, CHECK_NOT_APPLICABLE, "legacy context pack has no review requirement")
+    if status == "complete":
+        return _check(
+            check_id,
+            CHECK_PASS,
+            f"{context_audit.get('reviewed_count', 0)} presented context source(s) reviewed",
+        )
+    if status == "conflict":
+        return _check(
+            check_id,
+            CHECK_FAIL,
+            "context has an invalid transition, malformed decision, or conflicting terminal decisions",
+        )
+    if status == "compatibility_partial":
+        return _check(
+            check_id,
+            CHECK_WARN,
+            "legacy lower-level consumption recorded use without a complete briefing disposition",
+        )
     return _check(
         check_id,
-        CHECK_PASS if count else CHECK_WARN,
-        f"{count} context source(s) {action}" if count else f"no context sources {action}",
+        CHECK_FAIL,
+        "context review was skipped" if status == "skipped" else "context review decision is pending",
     )
+
+
+def _context_use_check(
+    context_audit: dict[str, Any] | None,
+    latest_pack: dict[str, Any] | None,
+) -> dict[str, Any]:
+    check_id = "context_sources_consumed"
+    if latest_pack is None:
+        return _check(check_id, CHECK_NOT_APPLICABLE, "no context pack recorded")
+    if context_audit is None or context_audit.get("error"):
+        return _check(check_id, CHECK_NOT_APPLICABLE, "context use unavailable")
+    count = int(context_audit.get("used_count") or 0)
+    if count:
+        return _check(check_id, CHECK_PASS, f"{count} context source(s) used")
+    if context_audit.get("decision") == "no_relevant":
+        return _check(check_id, CHECK_NOT_APPLICABLE, "review found no relevant context to use")
+    return _check(check_id, CHECK_NOT_APPLICABLE, "context use is not required without a relevant source")
+
+
+def _context_citation_check(
+    context_audit: dict[str, Any] | None,
+    latest_pack: dict[str, Any] | None,
+) -> dict[str, Any]:
+    check_id = "context_sources_cited"
+    if latest_pack is None:
+        return _check(check_id, CHECK_NOT_APPLICABLE, "no context pack recorded")
+    if context_audit is None or context_audit.get("error"):
+        return _check(check_id, CHECK_NOT_APPLICABLE, "context citation unavailable")
+    invalid = int(context_audit.get("cited_without_use_count") or 0)
+    if invalid and context_audit.get("cited_without_use_enforced", True):
+        return _check(check_id, CHECK_FAIL, f"{invalid} context source(s) cited without use")
+    if invalid:
+        return _check(
+            check_id,
+            CHECK_NOT_APPLICABLE,
+            f"legacy context pack cited {invalid} source(s) before recorded use",
+        )
+    count = int(context_audit.get("cited_count") or 0)
+    if count:
+        return _check(check_id, CHECK_PASS, f"{count} used context source(s) cited")
+    return _check(check_id, CHECK_NOT_APPLICABLE, "citation is optional and no sources were cited")
+
+
+def _context_expansion_check(
+    context_audit: dict[str, Any] | None,
+    latest_pack: dict[str, Any] | None,
+) -> dict[str, Any]:
+    check_id = "context_expansion_receipts"
+    if latest_pack is None:
+        return _check(check_id, CHECK_NOT_APPLICABLE, "no context pack recorded")
+    if context_audit is None or context_audit.get("error"):
+        return _check(check_id, CHECK_NOT_APPLICABLE, "context expansion audit unavailable")
+    expansion = context_audit.get("expansion") or {}
+    if not expansion.get("receipts_valid", True):
+        invalid = int(expansion.get("invalid_receipt_count") or 0)
+        return _check(
+            check_id,
+            CHECK_WARN,
+            f"{invalid} invalid optional context expansion receipt(s); review completion is unaffected",
+            details={"validation_errors": expansion.get("validation_errors") or []},
+        )
+    count = int(expansion.get("receipt_event_count") or 0)
+    if count:
+        return _check(check_id, CHECK_PASS, f"{count} context expansion receipt(s) validated")
+    return _check(
+        check_id,
+        CHECK_NOT_APPLICABLE,
+        "context expansion is optional and no sources were expanded",
+    )
+
+
+def _context_expansion_inventory_check(inventory: dict[str, Any]) -> dict[str, Any]:
+    check_id = "context_expansion_receipt_inventory"
+    if not inventory.get("receipts_valid", True):
+        count = int(inventory.get("orphan_event_count") or 0)
+        return _check(
+            check_id,
+            CHECK_WARN,
+            f"{count} optional context expansion receipt(s) cannot be attributed to an owning pack",
+            details=inventory,
+        )
+    count = int(inventory.get("event_count") or 0)
+    if count:
+        return _check(
+            check_id,
+            CHECK_PASS,
+            f"{count} context expansion receipt claim(s) attributed to owning packs",
+            details=inventory,
+        )
+    return _check(check_id, CHECK_NOT_APPLICABLE, "no context expansion receipts recorded")
 
 
 def _doctor_check(doctor: dict[str, Any] | None) -> dict[str, Any]:
@@ -486,15 +630,38 @@ def _doctor_check(doctor: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _latest_context_pack(root: str | Path, session_id: str, *, rebuild: bool = True) -> dict[str, Any] | None:
-    from .control import latest_context_pack
-
-    return latest_context_pack(root, session_id, rebuild=rebuild)
+    packs = list_context_packs(root, session_id, rebuild=rebuild)
+    attention_pack = None
+    for pack in packs:
+        audit = _safe_context_audit(root, pack, rebuild=False)
+        if audit and not audit.get("finish_allowed", False):
+            return pack
+        expansion = (audit or {}).get("expansion") or {}
+        if (
+            audit
+            and (
+                not audit.get("lineage_valid", False)
+                or not expansion.get("receipts_valid", True)
+            )
+            and attention_pack is None
+        ):
+            attention_pack = pack
+    return attention_pack or (packs[-1] if packs else None)
 
 
 def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None | object, *, rebuild: bool = True) -> dict[str, Any] | None:
     if latest_pack is _MISSING or latest_pack is None:
         return None
     pack_id = latest_pack["pack_id"]
+    if latest_pack.get("identity_error"):
+        return {
+            "error": latest_pack["identity_error"],
+            "pack_id": pack_id,
+            "review_status": "error",
+            "decision_complete": False,
+            "finish_allowed": False,
+            "lineage_valid": False,
+        }
     try:
         return audit_context_pack(root, pack_id, rebuild=rebuild)
     except AgentDirError as exc:

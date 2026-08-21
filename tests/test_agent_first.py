@@ -2,11 +2,28 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
+
+from agentdir.cli import command_invocation
+from agentdir.context_expansion import (
+    HEADER_VIEW_ID,
+    HEADER_VIEW_SOURCE_SHA256,
+    _expansion_events,
+    _receipt_body,
+    _resolve_session_summary,
+    _validate_receipt,
+    _view_id,
+    _view_payload,
+    expand_context_source,
+)
+from agentdir.control import brief_work_finish
 
 
 def find_project_root() -> Path:
@@ -18,6 +35,11 @@ def find_project_root() -> Path:
 
 PROJECT_ROOT = find_project_root()
 SRC_ROOT = PROJECT_ROOT / "src"
+CLI_INVOCATION = shlex.join((sys.executable, "-m", "agentdir"))
+
+
+def scoped_work_context_invocation(root: Path) -> str:
+    return f"{CLI_INVOCATION} work context --root {shlex.quote(str(root.resolve()))}"
 
 
 def run_cli(
@@ -66,10 +88,32 @@ def query_rows(root: Path, event_type: str | None = None) -> list[dict[str, obje
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
+def displayed_source_ref(payload: dict[str, object], *, event_type: str = "agent.message") -> str:
+    manifest = payload["context_pack"]
+    briefing = payload["context_briefing"]
+    assert isinstance(manifest, dict)
+    assert isinstance(briefing, dict)
+    source_by_id = {
+        source["source_id"]: source
+        for source in manifest["sources"]
+        if isinstance(source, dict)
+    }
+    for index, source_id in enumerate(briefing["source_ids"], start=1):
+        if source_by_id[source_id].get("event_type") == event_type:
+            return str(index)
+    raise AssertionError(f"no displayed {event_type} source in context pack")
+
+
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.8.0"
+    assert result.stdout.strip() == "agentdir 0.9.0"
+
+
+def test_module_invocation_uses_the_runtime_interpreter(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "orig_argv", ["/different/python-launcher", "-m", "agentdir"])
+
+    assert command_invocation() == (sys.executable, "-m", "agentdir")
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
@@ -111,6 +155,59 @@ def test_session_ensure_creates_and_reuses_active_session(tmp_path: Path) -> Non
     assert current_payload["session_id"] == created_payload["session_id"]
     assert created_payload["title"] == "Hands Off Agent Work"
     assert len(rows) == 1
+
+
+def test_explicit_session_ids_cannot_be_reused_after_end(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("session", "start", "--id", "immutable-session", cwd=repo)
+    run_cli("session", "end", cwd=repo)
+
+    rejected = run_cli(
+        "session",
+        "start",
+        "--id",
+        "immutable-session",
+        "--json",
+        cwd=repo,
+        expected_returncode=3,
+    )
+
+    assert "already exists and cannot be reused" in rejected.stderr
+    run_cli("session", "current", cwd=repo, expected_returncode=2)
+
+
+def test_session_id_is_reserved_when_started_event_is_suppressed(tmp_path: Path) -> None:
+    from agentdir.sessions import read_current_session, start_session
+    from agentdir.store import AgentDirStateError
+
+    repo = init_repo(tmp_path / "repo")
+    store = repo / ".agentdir"
+    first = start_session(
+        store,
+        session_id="reserved-session",
+        title="first owner",
+        cwd=repo,
+        emit_started=False,
+    )
+
+    try:
+        start_session(
+            store,
+            session_id="reserved-session",
+            title="second owner",
+            cwd=repo,
+            emit_started=False,
+        )
+    except AgentDirStateError as exc:
+        assert "already exists and cannot be reused" in str(exc)
+    else:
+        raise AssertionError("an eventless session id was reused")
+
+    current = read_current_session(store)
+    assert current is not None
+    assert current.session_id == first.session_id
+    assert current.title == "first owner"
+    assert (store / "sessions" / first.session_id).is_dir()
 
 
 def test_run_wraps_tool_call_result_exit_code_and_redacted_output(tmp_path: Path) -> None:
@@ -322,14 +419,30 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     assert skill_path.is_file()
     skill_text = skill_path.read_text(encoding="utf-8")
     assert "The user should not have to run AgentDir commands during normal coding work." in skill_text
-    assert "agentdir adopt --gitignore user" in skill_text
-    assert 'agentdir work start "<short task>" --emit-context' in skill_text
+    assert "agentdir root --require --quiet" in skill_text
+    assert "agentdir adopt --if-needed --gitignore user" in skill_text
+    assert "do not decide whether agentdir is set up" in skill_text.lower()
+    assert "`.agentdir`" in skill_text
+    assert 'agentdir work start "<subsystem: distinctive behavior or constraint>"' in skill_text
+    assert "Keep the title concise but retrieval-specific" in skill_text
+    assert "name the subsystem plus a" in skill_text
+    assert "distinctive behavior or constraint" in skill_text
+    assert "yourself" in skill_text
+    assert (
+        'agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"'
+        in skill_text
+    )
+    assert (
+        "Repeat `--use` in that command for every useful source"
+        in " ".join(skill_text.split())
+    )
+    assert 'agentdir work context --none-relevant --reason "<why>"' in skill_text
     assert "agentdir status" in skill_text
     assert "agentdir run -- <command>" in skill_text
     assert "agentdir context consume --pack <pack-id>" in skill_text
     assert "agentdir roots suggest" in skill_text
     assert "agentdir memory search --group <name>" in skill_text
-    assert "agentdir work finish" in skill_text
+    assert "agentdir work finish --json --brief" in skill_text
     assert "Do not wrap routine exploration commands" in skill_text
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
 
@@ -392,6 +505,56 @@ def test_adopt_installs_skill_runs_doctor_and_reports_next_step(tmp_path: Path) 
     codex_check = next(check for check in doctor["checks"] if check["name"] == "codex")
     assert codex_check["state"] == "installed"
     assert codex_check["effective_target"] == "user"
+
+
+def test_adopt_preflights_hooks_before_creating_store_or_guidance(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    blocked_hooks = tmp_path / "blocked-hooks"
+    blocked_hooks.write_text("not a directory\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(blocked_hooks)],
+        cwd=repo,
+        check=True,
+    )
+
+    result = run_cli(
+        "adopt",
+        "--install-skill",
+        "store",
+        "--gitignore",
+        "project",
+        "--json",
+        cwd=repo,
+        expected_returncode=2,
+    )
+
+    assert "hook" in result.stderr.lower()
+    assert not (repo / ".agentdir").exists()
+    assert not (repo / ".gitignore").exists()
+    assert not (repo / "AGENTS.md").exists()
+    assert not (repo / "CLAUDE.md").exists()
+    assert not (repo / ".github").exists()
+    assert not (repo / ".cursor").exists()
+    assert not (repo / ".windsurf").exists()
+
+    recovered = json.loads(
+        run_cli(
+            "adopt",
+            "--install-skill",
+            "store",
+            "--gitignore",
+            "project",
+            "--no-hooks",
+            "--json",
+            cwd=repo,
+        ).stdout
+    )
+
+    assert recovered["doctor"]["ok"] is True
+    assert (repo / ".agentdir" / "VERSION").is_file()
+    assert (repo / "AGENTS.md").is_file()
+    assert (repo / ".gitignore").read_text(encoding="utf-8").splitlines() == [".agentdir/"]
+    assert blocked_hooks.read_text(encoding="utf-8") == "not a directory\n"
 
 
 def test_adopt_can_add_agentdir_to_project_gitignore(tmp_path: Path) -> None:
@@ -582,7 +745,17 @@ def test_generated_agent_guidance_uses_user_gitignore(tmp_path: Path) -> None:
     ]
     for path in guidance_paths:
         text = path.read_text(encoding="utf-8")
-        assert "agentdir adopt --gitignore user" in text, path
+        assert "agentdir root --require --quiet" in text, path
+        assert "agentdir adopt --if-needed --gitignore user" in text, path
+        assert "do not decide whether agentdir is set up" in text.lower(), path
+        assert "`.agentdir`" in text, path
+        assert (
+            'agentdir work start "<subsystem: distinctive behavior or constraint>"' in text
+        ), path
+        assert "Keep the title concise but retrieval-specific" in text, path
+        assert "name the subsystem plus a" in text, path
+        assert "distinctive behavior or constraint" in text, path
+        assert "yourself" in text, path
 
 
 def test_integrations_install_all_store_target(tmp_path: Path) -> None:
@@ -645,6 +818,487 @@ def test_work_start_status_report_and_finish_are_agent_owned_flow(tmp_path: Path
     assert "work.report.final" in event_types
     assert "work.finished" in event_types
     assert "session.ended" in event_types
+
+
+def test_work_finish_brief_json_returns_handoff_without_forensic_payload(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    sentinel = "LARGE_CHILD_OUTPUT_SHOULD_NOT_BE_REPEATED_" * 200
+    run_cli("work", "start", "compact final agent handoff", "--json", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        f"print({sentinel!r})",
+        cwd=repo,
+    )
+
+    finished = run_cli("work", "finish", "--json", "--brief", cwd=repo)
+    payload = json.loads(finished.stdout)
+
+    assert payload["agent_handoff"]["verification"][0]["family"] == "test"
+    assert payload["ended_session"]["status"] == "completed"
+    assert payload["event_path"]
+    assert "report" not in payload
+    assert "evidence" not in payload
+    assert "context" not in payload
+    assert sentinel not in finished.stdout
+    assert len(finished.stdout.encode("utf-8")) < 20_000
+
+
+def test_work_finish_brief_bounds_failure_history_without_mutating_full_report() -> None:
+    def failure_ref(family: str, index: int) -> dict[str, object]:
+        return {
+            "family": family,
+            "path": f"sessions/s/Maildir/new/{family}-{index}",
+            "subject": f"{family} failure {index}",
+            "failed": True,
+        }
+
+    unresolved = [failure_ref("test", index) for index in range(20)] + [
+        failure_ref("build", index) for index in range(12)
+    ]
+    historical = [failure_ref("test", index) for index in range(40)]
+    resolved = [failure_ref("lint", index) for index in range(30)]
+    handoff = {
+        "status": "needs_attention",
+        "failed_evidence": unresolved,
+        "unresolved_failed_evidence": unresolved,
+        "historical_failed_evidence": historical,
+        "resolved_failed_evidence": resolved,
+    }
+    result = {
+        "report": {
+            "task": "bounded handoff",
+            "agent_handoff": handoff,
+            "git": {"head": "abc"},
+            "health": {"ok": True},
+        },
+        "event_path": "sessions/s/report",
+        "ended_session": {"session_id": "s"},
+    }
+
+    payload = brief_work_finish(result)
+    brief_handoff = payload["agent_handoff"]
+
+    assert [item["path"] for item in brief_handoff["failed_evidence"]] == [
+        "sessions/s/Maildir/new/test-19",
+        "sessions/s/Maildir/new/build-11",
+    ]
+    assert brief_handoff["unresolved_failed_evidence"] == brief_handoff["failed_evidence"]
+    assert brief_handoff["historical_failed_evidence"] == historical[-5:]
+    assert brief_handoff["resolved_failed_evidence"] == resolved[-5:]
+    assert brief_handoff["failure_evidence_counts"] == {
+        "unresolved_total": 32,
+        "unresolved_presented": 2,
+        "historical_total": 40,
+        "historical_presented": 5,
+        "resolved_total": 30,
+        "resolved_presented": 5,
+    }
+    assert len(handoff["failed_evidence"]) == 32
+    assert len(handoff["historical_failed_evidence"]) == 40
+    assert len(handoff["resolved_failed_evidence"]) == 30
+    assert len(json.dumps(payload).encode("utf-8")) < 20_000
+
+
+def test_work_finish_brief_byte_bounds_user_controlled_nested_strings() -> None:
+    oversized = "USER_CONTROLLED_VALUE_" * 12_000
+    failure = {
+        "family": "test",
+        "tool": oversized,
+        "subject": oversized,
+        "path": oversized,
+        "failed": True,
+    }
+    handoff = {
+        "status": "needs_attention",
+        "verification": [{"family": "test", "latest": failure}],
+        "failed_evidence": [failure],
+        "unresolved_failed_evidence": [failure],
+        "historical_failed_evidence": [failure],
+        "resolved_failed_evidence": [],
+        "claim_support": {"claims": [{"family": "test", "message": oversized}]},
+        "context_lineage": {"ok": True, "decision_reason": oversized},
+        "known_gaps": [oversized],
+        "recommended_agent_actions": [oversized],
+        "final_response_guidance": [oversized],
+    }
+    result = {
+        "report": {
+            "task": oversized,
+            "agent_handoff": handoff,
+            "git": {"head": "abc"},
+            "health": {"ok": False, "errors": [oversized], "warnings": [oversized]},
+        },
+        "event_path": oversized,
+        "ended_session": {"session_id": "s", "title": oversized},
+    }
+
+    payload = brief_work_finish(result)
+    rendered = json.dumps(payload, indent=2)
+
+    assert len(rendered.encode("utf-8")) < 20_000
+    assert payload["brief_projection"]["truncated_strings"] >= 10
+    assert payload["brief_projection"]["max_string_chars"] == 128
+    assert len(handoff["failed_evidence"][0]["subject"]) == len(oversized)
+    assert oversized not in rendered
+
+
+def test_work_finish_records_the_ending_git_head_in_completed_session(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial state"], cwd=repo, check=True)
+    initial_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    run_cli("work", "start", "record completed session git head", "--json", cwd=repo)
+    tracked.write_text("implemented\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Implement change"], cwd=repo, check=True)
+    final_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
+    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
+    run_cli("index", "rebuild", cwd=repo)
+    ended_rows = query_rows(repo / ".agentdir", event_type="session.ended")
+
+    assert finished["report"]["session"]["git_head"] == initial_sha
+    assert finished["report"]["git"]["head"] == final_sha
+    assert finished["ended_session"]["git_head"] == final_sha
+    assert status["session"]["latest"]["git_head"] == final_sha
+    assert ended_rows[-1]["git_head"] == final_sha
+
+
+def test_explicit_root_finish_does_not_take_git_head_from_the_callers_repo(
+    tmp_path: Path,
+) -> None:
+    owner = init_repo(tmp_path / "owner")
+    owner_file = owner / "tracked.txt"
+    owner_file.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=owner, check=True)
+    subprocess.run(["git", "commit", "-m", "Owner initial"], cwd=owner, check=True)
+    owner_start_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=owner, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    run_cli("work", "start", "explicit root ending state", "--json", cwd=owner)
+    owner_file.write_text("implemented\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=owner, check=True)
+    subprocess.run(["git", "commit", "-m", "Owner final"], cwd=owner, check=True)
+    owner_final_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=owner, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    caller_parent = tmp_path / "unrelated"
+    caller_parent.mkdir()
+    caller = init_repo(caller_parent / "owner")
+    caller_file = caller / "caller.txt"
+    caller_file.write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "add", "caller.txt"], cwd=caller, check=True)
+    subprocess.run(["git", "commit", "-m", "Caller state"], cwd=caller, check=True)
+    caller_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=caller, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    finished = json.loads(
+        run_cli(
+            "work",
+            "finish",
+            "--root",
+            str(owner / ".agentdir"),
+            "--json",
+            cwd=caller,
+        ).stdout
+    )
+    run_cli("index", "rebuild", "--root", str(owner / ".agentdir"), cwd=caller)
+    final_rows = [
+        row
+        for row in query_rows(owner / ".agentdir")
+        if row["event_type"] in {"work.report.final", "work.finished", "session.ended"}
+    ]
+
+    assert caller_sha != owner_start_sha
+    assert owner_final_sha != owner_start_sha
+    assert finished["report"]["git"]["head"] == owner_final_sha
+    assert finished["ended_session"]["git_head"] == owner_final_sha
+    assert len(final_rows) == 3
+    assert {row["git_head"] for row in final_rows} == {owner_final_sha}
+
+
+def test_explicit_root_start_uses_the_store_owners_checkout(tmp_path: Path) -> None:
+    owner_parent = tmp_path / "owner-parent"
+    caller_parent = tmp_path / "caller-parent"
+    owner_parent.mkdir()
+    caller_parent.mkdir()
+    owner = init_repo(owner_parent / "agentdir")
+    owner_file = owner / "owner.txt"
+    owner_file.write_text("owner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "owner.txt"], cwd=owner, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Owner state"],
+        cwd=owner,
+        check=True,
+        capture_output=True,
+    )
+    owner_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=owner,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    run_cli("init", cwd=owner)
+
+    caller = init_repo(caller_parent / "agentdir")
+    caller_file = caller / "caller.txt"
+    caller_file.write_text("caller\n", encoding="utf-8")
+    subprocess.run(["git", "add", "caller.txt"], cwd=caller, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Caller state"],
+        cwd=caller,
+        check=True,
+        capture_output=True,
+    )
+    caller_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=caller,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    started = json.loads(
+        run_cli(
+            "work",
+            "start",
+            "explicit root starting state",
+            "--root",
+            str(owner / ".agentdir"),
+            "--no-context",
+            "--json",
+            cwd=caller,
+        ).stdout
+    )
+
+    assert owner_sha != caller_sha
+    assert started["session"]["workspace"] == owner.name
+    assert started["session"]["git_head"] == owner_sha
+
+
+def test_work_context_records_used_briefing_and_handoff_funnel(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    prior = tmp_path / "prior.txt"
+    prior.write_text(
+        "checkout redirect callback state regression was fixed by preserving the callback state",
+        encoding="utf-8",
+    )
+    run_cli("session", "start", "--id", "prior-context", cwd=repo)
+    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
+    run_cli("session", "end", "--summary", str(prior), cwd=repo)
+
+    started = run_cli(
+        "work",
+        "start",
+        "checkout redirect callback state regression",
+        "--emit-context",
+        cwd=repo,
+    )
+
+    assert "context_match=strong_prior_context" in started.stdout
+    assert "[1] strong" in started.stdout
+    rendered_pack_id = next(
+        line.split("=", 1)[1]
+        for line in started.stdout.splitlines()
+        if line.startswith("context_pack=")
+    )
+    assert (
+        f"context_use={scoped_work_context_invocation(repo / '.agentdir')} "
+        f"--pack {rendered_pack_id} --use <number>"
+        in started.stdout
+    )
+    first = json.loads(
+        run_cli(
+            "work",
+            "context",
+            "--use",
+            "1",
+            "--reason",
+            "the callback-state pattern constrains the repair plan",
+            "--json",
+            cwd=repo,
+        ).stdout
+    )
+    repeated = json.loads(
+        run_cli(
+            "work",
+            "context",
+            "--use",
+            "s1",
+            "--reason",
+            "the callback-state pattern constrains the repair plan",
+            "--json",
+            cwd=repo,
+        ).stdout
+    )
+    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
+    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
+    lineage = finished["report"]["agent_handoff"]["context_lineage"]
+
+    assert first["recorded"] is True
+    assert repeated["recorded"] is False
+    assert status["context"]["audit"]["review_status"] == "complete"
+    assert status["context"]["audit"]["used_count"] == 1
+    assert lineage["retrieved"] >= lineage["presented"] == lineage["reviewed"]
+    assert lineage["used"] == 1
+    assert lineage["dismissed"] == lineage["presented"] - 1
+    assert lineage["cited"] == 0
+    assert lineage["review_status"] == "complete"
+    assert lineage["ok"] is True
+
+
+def test_work_context_no_relevant_completes_review_without_use_or_citation(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    prior = tmp_path / "prior.txt"
+    prior.write_text("generic historical build output context marker", encoding="utf-8")
+    run_cli("session", "start", "--id", "prior-context", cwd=repo)
+    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
+    run_cli("session", "end", "--summary", str(prior), cwd=repo)
+    started = json.loads(
+        run_cli(
+            "work",
+            "start",
+            "historical build output context marker",
+            "--emit-context",
+            "--json",
+            cwd=repo,
+        ).stdout
+    )
+
+    decision = json.loads(
+        run_cli(
+            "work",
+            "context",
+            "--none-relevant",
+            "--reason",
+            "the returned build record does not constrain this task",
+            "--json",
+            cwd=repo,
+        ).stdout
+    )
+    audit = json.loads(
+        run_cli("audit", "context", "--pack", started["context_pack"]["pack_id"], "--json", cwd=repo).stdout
+    )
+
+    assert decision["disposition"] == "no_relevant"
+    assert audit["review_status"] == "complete"
+    assert audit["reviewed_count"] == audit["presented_count"]
+    assert audit["used_count"] == 0
+    assert audit["dismissed_count"] == audit["presented_count"]
+    assert audit["cited_count"] == 0
+    assert audit["decision_reason"] == "the returned build record does not constrain this task"
+    run_cli("work", "finish", "--json", cwd=repo)
+
+
+def test_redacted_review_reasons_keep_used_and_no_relevant_decisions_stable(tmp_path: Path) -> None:
+    for disposition in ("used", "no-relevant"):
+        repo = init_repo(tmp_path / disposition)
+        prior = tmp_path / f"prior-{disposition}.txt"
+        prior.write_text(
+            f"checkout redirect redacted decision marker {disposition}",
+            encoding="utf-8",
+        )
+        run_cli("session", "start", "--id", f"prior-{disposition}", cwd=repo)
+        run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
+        run_cli("session", "end", "--summary", str(prior), cwd=repo)
+        started = json.loads(
+            run_cli(
+                "work",
+                "start",
+                f"checkout redirect redacted decision marker {disposition}",
+                "--json",
+                cwd=repo,
+            ).stdout
+        )
+        pack_id = started["context_pack"]["pack_id"]
+        decision_args = ("--use", "1") if disposition == "used" else ("--none-relevant",)
+        command = (
+            "work",
+            "context",
+            "--pack",
+            pack_id,
+            *decision_args,
+            "--reason",
+            "token=abcdefghijklmnop is not context evidence",
+            "--json",
+        )
+
+        first = json.loads(run_cli(*command, cwd=repo).stdout)
+        repeated = json.loads(run_cli(*command, cwd=repo).stdout)
+        audit = json.loads(
+            run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout
+        )
+        finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
+
+        assert first["recorded"] is True
+        assert repeated["recorded"] is False
+        assert first["decision_id"] == repeated["decision_id"] == audit["decision_id"]
+        assert first["reason"] == "<redacted:key-value-secret> is not context evidence"
+        assert "abcdefghijklmnop" not in json.dumps(first)
+        assert audit["review_status"] == "complete"
+        assert audit["decision_validation_errors"] == []
+        assert any(
+            event["headers"].get("X-AgentDir-Redactions") == "1"
+            for event in audit["events"]
+        )
+        assert finished["report"]["agent_handoff"]["context_lineage"]["ok"] is True
+
+
+def test_work_start_records_context_by_default_and_keeps_plain_briefing_compact(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    prior = tmp_path / "prior.txt"
+    prior.write_text("checkout redirect callback state regression marker", encoding="utf-8")
+    run_cli("session", "start", "--id", "prior-context", cwd=repo)
+    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
+    run_cli("session", "end", "--summary", str(prior), cwd=repo)
+
+    started = run_cli("work", "start", "checkout redirect callback state regression", cwd=repo)
+    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
+
+    assert "context_pack=ctx-" in started.stdout
+    pack_id = status["context"]["latest_pack"]["pack_id"]
+    context_invocation = scoped_work_context_invocation(repo / ".agentdir")
+    assert f"context_expand={context_invocation} --pack {pack_id} --expand <number>" in started.stdout
+    assert f"context_use={context_invocation} --pack {pack_id} --use <number>" in started.stdout
+    assert "source=" not in started.stdout
+    assert len(started.stdout.splitlines()) <= 25
+    assert status["context"]["latest_pack"] is not None
+    assert status["context"]["audit"]["review_status"] == "pending"
+
+    printed_expand = next(
+        line.split("=", 1)[1]
+        for line in started.stdout.splitlines()
+        if line.startswith("context_expand=")
+    ).replace("<number>", "1")
+    copied = subprocess.run(
+        shlex.split(printed_expand),
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(SRC_ROOT)},
+        text=True,
+        capture_output=True,
+    )
+    assert copied.returncode == 0, copied.stderr
+    assert f"context_pack={pack_id}" in copied.stdout
 
 
 def test_build_final_report_rebuilds_index_once(tmp_path: Path, monkeypatch) -> None:

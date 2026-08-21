@@ -226,6 +226,17 @@ def test_context_cite_json(tmp_path: Path) -> None:
     emitted = json.loads(run_cli("context", "build", "cite json", "--emit", "--json", cwd=repo).stdout)
     pack_id = emitted["manifest"]["pack_id"]
     source_id = emitted["manifest"]["sources"][0]["source_id"]
+    run_cli(
+        "context",
+        "consume",
+        "--pack",
+        pack_id,
+        "--source",
+        source_id,
+        "--purpose",
+        "answer",
+        cwd=repo,
+    )
 
     citation = json.loads(
         run_cli("context", "cite", "--pack", pack_id, "--source", source_id, "--json", cwd=repo).stdout

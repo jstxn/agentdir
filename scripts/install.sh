@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.8.0}"
+AGENTDIR_VERSION="${AGENTDIR_VERSION:-v0.9.0}"
 AGENTDIR_REPO="${AGENTDIR_REPO:-jstxn/agentdir}"
 AGENTDIR_PACKAGE_VERSION="${AGENTDIR_VERSION#v}"
 # Releases after v0.7.4 ship the wheel under the agentdir-cli distribution
@@ -151,7 +151,7 @@ main() {
     fail "agentdir executable was not found on PATH after pipx install"
   fi
   log "installed AgentDir $AGENTDIR_VERSION"
-  log "next: from a repository, run: agentdir adopt --gitignore user"
+  log "next: from a repository, run: agentdir adopt --if-needed --gitignore user"
   log "use --gitignore project for a repo-local rule, or --gitignore none to leave ignore files unchanged"
 }
 

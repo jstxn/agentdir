@@ -139,11 +139,15 @@ A derived similarity layer built from indexed envelope metadata and body text. I
 
 ### Context Pack
 
-An agent-ready briefing generated from semantic memory hits, current-session evidence, and recent session summaries. A context pack can also be emitted as an immutable event with a JSON source manifest artifact.
+An agent-ready briefing generated from ranked memory hits, current-session evidence, and recent session summaries. The persisted briefing presents at most five diversified sources with quality and match reasons while retaining the full immutable JSON source manifest.
 
 ### Context Audit
 
-Append-only context events that record which pack sources a cooperative agent consumed and cited. The audit is advisory: it records source lineage, but it does not prove model attention.
+Append-only context events that record which pack sources a cooperative agent reviewed, used, dismissed, skipped, and cited. The audit is advisory: it records source lineage and a reasoned disposition, but it does not prove model attention.
+
+### Context Expansion
+
+A bounded, integrity-labeled read of one source that was actually displayed in a context briefing. Expansion is nonterminal and optional: it can make deep reading observable without claiming model attention or changing the pack's review decision.
 
 ## 9. User Stories
 
@@ -255,7 +259,9 @@ agentdir emit --type <type> --body <file>
 The CLI must let agents ensure, inspect, start, and end the active session. Normal coding agents should use the workbench path so humans are not asked to start sessions, build context, or finish evidence reports by hand.
 
 ```text
-agentdir work start <task> [--emit-context] [--group <name>]
+agentdir work start <task> [--no-context] [--group <name>]
+agentdir work context --show [--session <id> | --pack <id>]
+agentdir work context (--use <number> | --none-relevant | --skip) --reason <text> [--session <id> | --pack <id>]
 agentdir work finish [--keep-session]
 agentdir report final [--format md|json]
 agentdir status [--json]
@@ -339,6 +345,10 @@ agentdir context build <task>
 agentdir context build <task> --federated
 agentdir context build <task> --group <name>
 agentdir context build <task> --emit
+agentdir work context --show [--session <id> | --pack <id>]
+agentdir work context --use <number> --reason <text> [--purpose plan|tool|answer|handoff] [--session <id> | --pack <id>]
+agentdir work context --none-relevant --reason <text>
+agentdir work context --skip --reason <text>
 agentdir context consume --pack <pack-id> --source <source-id> --purpose plan|tool|answer|handoff
 agentdir context cite --pack <pack-id> [--source <source-id>] [--format md|json]
 agentdir audit context --pack <pack-id>
@@ -349,8 +359,22 @@ Acceptance criteria:
 - `agentdir index rebuild` creates memory documents in the SQLite sidecar.
 - `agentdir index rebuild` creates passage and term indexes derived from memory documents.
 - `agentdir memory search <text>` works without installing a separate vector database.
-- `agentdir memory search --retrieval semantic <text>` requires explicit embedding configuration and optional dependencies.
-- `agentdir memory explain <text>` shows the matching source, overlap terms, document score, passage score, and excerpt.
+- Retrieval defaults to `auto`: it uses local hybrid retrieval without optional
+  dependencies and fused semantic-plus-lexical retrieval when FastEmbed is both
+  configured and available.
+- `agentdir memory search --retrieval semantic <text>` remains an explicit
+  semantic-only diagnostic and requires embedding configuration plus optional
+  dependencies.
+- `agentdir memory explain <text>` resolves through the same retrieval mode as
+  search and preserves the actual mode, component scores, and fused score.
+- Automatic context selection prefers current evidence, decisions, and prior
+  evidence over derived reports and lifecycle metadata, while keeping bounded
+  per-session diversity.
+- Local embedding initialization disables ONNX Runtime telemetry and uses a
+  machine-local cache so retrieval never creates runtime files in a checkout.
+- `agentdir memory explain <text>` shows the matching source, actual retrieval
+  mode, semantic/hybrid/document score components, overlap terms, passage
+  details, and excerpt.
 - `agentdir query --semantic <text>` returns vector-ranked records and honors existing filters.
 - `agentdir roots register` only adds explicit roots and does not discover or import private stores automatically.
 - `agentdir roots suggest` discovers nearby AgentDir roots without mutating the registry.
@@ -365,9 +389,27 @@ Acceptance criteria:
 - `agentdir context build <task> --federated` can include root-qualified sources while keeping child roots canonical.
 - `agentdir context build <task> --group <name>` can scope cross-root retrieval to a named group.
 - `agentdir context build <task> --emit` stores a context pack manifest artifact and emits `context.pack.created`.
-- `agentdir context consume` emits `context.pack.consumed` for selected sources and an explicit purpose.
-- `agentdir context cite` emits `context.sources.cited` and renders a source manifest.
-- `agentdir audit context` reports retrieved, consumed, cited, and evidence-backed source counts.
+- `agentdir work start` emits and prints the persisted bounded briefing by default; `--no-context` skips retrieval and persists a zero-source opt-out marker.
+- `agentdir work context --show` re-opens the persisted numbered briefing after a restart or lost output.
+- `agentdir work context --expand <number> [--page <n>]` returns a redacted, bounded page of the exact displayed source without deciding the pack.
+- Expansion resolves retained local and archived envelopes by stable identity and digest; federated sources resolve only through their current registered root and group.
+- Expansion reports integrity and extent separately. Changed or unavailable sources return only the redacted manifest preview and never masquerade as verified canonical history.
+- Successful canonical expansion in the active owning session emits one idempotent metadata-only receipt per source page. Historical reads emit no new receipt.
+- Expansion receipts use an orthogonal pack header, contain no source body, and remain excluded from searchable memory and session-summary key excerpts.
+- Receipt validation and expansion metrics are visible but cannot change the terminal decision, `finish_allowed`, or review-lineage validity.
+- Every command printed with a briefing includes that briefing's pack target, so recovered or older briefings cannot decide a newer pack by accident.
+- Plain output stays compact with numbered selectors, source class, match quality, and excerpts; JSON persists full IDs, scores, and match reasons.
+- Workspace-name-only and generic task-word overlap cannot make a context source a strong match; presentation is diversified by session and source type under a persisted, retrieval-mode-specific quality policy.
+- A second `work start` cannot replace any review-required pack in the session whose disposition is still pending.
+- `agentdir work context --use` records selected presented sources as used and the other presented sources as dismissed.
+- `agentdir work context --none-relevant` records a reasoned review without manufacturing consumption or citation.
+- A pack has one terminal, revisioned decision; concurrent identical writes are idempotent and conflicting transitions are rejected or audited as conflicts.
+- Context-pack emission and session finish share a session lifecycle lock: emission either becomes visible to the finish audit or is rejected after the session ends.
+- `agentdir work finish` leaves a review-required session active until a used, no-relevant, or explicit skipped disposition exists.
+- `agentdir context consume` emits `context.pack.consumed` for selected sources and an explicit purpose; consuming every presented source completes the compatibility review, while partial legacy consumption can finish with a visible compatibility warning.
+- Manifest digest/schema failures, malformed or duplicate creation identities, missing decision integrity headers, and source references outside the manifest fail closed as visible audit errors.
+- New review-aware packs emit `context.sources.cited` only for already-used sources; legacy v1 packs retain their historical citation semantics without new strict failures.
+- `agentdir audit context` reports retrieved, presented, reviewed, used, dismissed, pending, cited, cited-without-use, additional consumption outside the briefing, terminal-decision validity, evidence-backed source counts, expanded sources before and after decision, and used sources without prior expansion.
 
 ### FR7: Replay Session
 
@@ -408,7 +450,7 @@ agentdir skills install codex --target user|project|store
 Acceptance criteria:
 
 - Generated agent guidance states that users should not have to run AgentDir commands during normal coding work.
-- Generated agent guidance tells coding agents to run `agentdir work start`, use `agentdir status`, wrap evidence commands, and close with `agentdir work finish` when practical.
+- Generated agent guidance tells coding agents to run `agentdir work start`, read and decide on every non-empty briefing, use `agentdir status`, wrap evidence commands, and close with `agentdir work finish` when practical.
 - Adopt remains safe to rerun and should be the only command a human normally needs inside a repository.
 
 ### FR10: Review Session Evidence
@@ -514,8 +556,29 @@ X-AgentDir-Pack-Id: <pack-id>
 X-AgentDir-Context-Query: <query>
 X-AgentDir-Context-Scope: <scope>
 X-AgentDir-Source-Id: <source-id>
+X-AgentDir-Reviewed-Source-Id: <source-id>
+X-AgentDir-Used-Source-Id: <source-id>
+X-AgentDir-Dismissed-Source-Id: <source-id>
+X-AgentDir-Context-Disposition: used|no_relevant|skipped
+X-AgentDir-Context-Decision-Id: <stable-decision-id>
+X-AgentDir-Context-Decision-Revision: <integer>
 X-AgentDir-Consumption-Purpose: plan|tool|answer|handoff
 X-AgentDir-Enforcement-Mode: advisory
+```
+
+Context expansion receipt headers are deliberately orthogonal to terminal pack
+events and do not include `X-AgentDir-Pack-Id`:
+
+```text
+X-AgentDir-Protocol: agentdir.context-view.v1
+X-AgentDir-Context-View-Pack-Id: <pack-id>
+X-AgentDir-Context-View-Id: <stable-view-id>
+X-AgentDir-Context-View-Source-Id: <source-id>
+X-AgentDir-Context-View-Source-Ref: <displayed-number>
+X-AgentDir-Context-View-Integrity: verified|legacy_unverified
+X-AgentDir-Context-View-Extent: full|bounded
+X-AgentDir-Context-View-Page: <integer>
+X-AgentDir-Context-View-Decision-Phase: before_decision|after_decision
 ```
 
 ## 13. Event Types
@@ -529,6 +592,7 @@ Initial event taxonomy:
 - `tool.call`
 - `tool.result`
 - `file.diff`
+- `context.sources.expanded`
 - `artifact.added`
 - `task.created`
 - `task.claimed`
@@ -542,6 +606,7 @@ Initial event taxonomy:
 - `summary.compacted`
 - `context.pack.created`
 - `context.pack.consumed`
+- `context.pack.reviewed`
 - `context.sources.cited`
 
 ## 14. MVP Scope
