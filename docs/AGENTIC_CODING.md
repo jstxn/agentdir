@@ -83,7 +83,7 @@ Agent responsibilities:
 - record important blockers, decisions, and handoffs
 - use `agentdir evidence --brief` and `agentdir timeline` to skim the trail
 - use `agentdir report final --format json` to preview the agent handoff object
-- use `agentdir work finish --json` before final claims when practical
+- use `agentdir work finish --json --brief` before final claims when practical
 
 Human responsibilities:
 
@@ -293,7 +293,7 @@ agentdir replay --session "$(agentdir session current)"
 Agents should end the session when the task is done:
 
 ```bash
-agentdir work finish --json
+agentdir work finish --json --brief
 ```
 
 ## Store Hygiene

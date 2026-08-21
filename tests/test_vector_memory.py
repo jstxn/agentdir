@@ -526,6 +526,12 @@ def test_automatic_retrieval_defaults_are_used_by_agent_entry_points() -> None:
     assert parser.parse_args(["context", "build", "test task"]).retrieval == "auto"
     assert parser.parse_args(["memory", "search", "test task"]).retrieval == "auto"
     assert parser.parse_args(["memory", "explain", "test task"]).retrieval == "auto"
+    assert (
+        parser.parse_args(
+            ["memory", "explain", "test task", "--retrieval", "semantic-hybrid"]
+        ).retrieval
+        == "semantic-hybrid"
+    )
 
 
 def test_context_pack_candidate_selection_does_not_spend_slots_on_lifecycle_noise(
@@ -575,6 +581,821 @@ def test_context_pack_candidate_selection_does_not_spend_slots_on_lifecycle_nois
     assert [row["event_type"] for row in pack["memory_hits"]] == [
         "decision.recorded",
     ] * 5
+
+
+def test_context_pack_omits_untargeted_operational_noise_and_duplicate_reports(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    task = "start deployment profile inheritance rollback policy"
+    rows = [
+        {
+            "source_id": "message:decision",
+            "session_id": "relevant-session",
+            "event_type": "decision.recorded",
+            "body_text": f"{task}: nested maps merge and lists replace",
+            "memory_score": 0.82,
+        },
+        {
+            "source_id": "message:verification",
+            "session_id": "verification-session",
+            "event_type": "tool.result",
+            "body_text": f"verified {task} with focused tests",
+            "memory_score": 0.79,
+        },
+        {
+            "source_id": "message:duplicate-report",
+            "session_id": "relevant-session",
+            "event_type": "work.report.final",
+            "body_text": f"final report repeats {task}",
+            "memory_score": 0.99,
+        },
+        {
+            "source_id": "message:standalone-report",
+            "session_id": "standalone-report-session",
+            "event_type": "work.report.final",
+            "body_text": f"another final report repeats {task}",
+            "memory_score": 0.995,
+        },
+        {
+            "source_id": "message:hook-noise",
+            "session_id": "hook-session",
+            "event_type": "git.hook.pre-commit",
+            "subject": "pre-commit hook passed",
+            "body_text": task,
+            "memory_score": 0.98,
+        },
+        {
+            "source_id": "message:claim-noise",
+            "session_id": "claim-session",
+            "event_type": "claim.recorded",
+            "subject": "test claim passed",
+            "body_text": task,
+            "memory_score": 0.97,
+        },
+        {
+            "source_id": "message:lifecycle-noise",
+            "session_id": "lifecycle-session",
+            "event_type": "work.started",
+            "body_text": task,
+            "memory_score": 0.96,
+        },
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    pack = build_context_pack(
+        root,
+        task,
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+
+    assert [row["event_type"] for row in pack["memory_hits"]] == [
+        "decision.recorded",
+        "tool.result",
+    ]
+
+
+def test_context_pack_uses_final_report_only_as_last_resort(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    task = "deployment profile inheritance rollback policy"
+    rows = [
+        {
+            "source_id": "message:only-report",
+            "session_id": "report-session",
+            "event_type": "work.report.final",
+            "subject": "deployment profile implementation handoff",
+            "body_text": f"{task}: nested mappings merge and lists replace",
+            "memory_score": 0.88,
+        },
+        {
+            "source_id": "message:hook-noise",
+            "session_id": "hook-session",
+            "event_type": "git.hook.pre-commit",
+            "body_text": task,
+            "memory_score": 0.99,
+        },
+        {
+            "source_id": "message:claim-noise",
+            "session_id": "claim-session",
+            "event_type": "claim.recorded",
+            "body_text": task,
+            "memory_score": 0.98,
+        },
+        {
+            "source_id": "message:lifecycle-noise",
+            "session_id": "lifecycle-session",
+            "event_type": "work.started",
+            "body_text": task,
+            "memory_score": 0.97,
+        },
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    pack = build_context_pack(
+        root,
+        task,
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+    manifest = build_context_manifest(pack)
+
+    assert [row["source_id"] for row in pack["memory_hits"]] == [
+        "message:only-report"
+    ]
+    assert manifest["briefing"]["source_ids"] == ["message:only-report"]
+    assert manifest["sources"][0]["source_class"] == "retrieval_hint"
+    assert manifest["sources"][0]["source_role"] == "final_report"
+
+
+def test_strong_final_report_fallback_beats_weak_recent_summary() -> None:
+    task = "deployment profile inheritance rollback policy"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "message:strong-report",
+                    "session_id": "report-session",
+                    "event_type": "work.report.final",
+                    "body_text": f"{task}: nested mappings merge and lists replace",
+                    "memory_score": 0.82,
+                    "retrieval_mode": "semantic-hybrid",
+                }
+            ],
+            "recent_session_summaries": [
+                {
+                    "source_id": "session:recent:summary",
+                    "source_kind": "session_summary",
+                    "session_id": "recent",
+                    "event_type": "summary.compacted",
+                    "body_text": "unrelated dashboard color palette cleanup",
+                }
+            ],
+            "evidence": [],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == ["message:strong-report"]
+    assert sum(
+        source["source_role"] == "final_report"
+        for source in manifest["sources"]
+        if source["source_id"] in manifest["briefing"]["source_ids"]
+    ) == 1
+
+
+def test_briefing_does_not_backfill_weak_summaries_after_strong_decision() -> None:
+    task = "deployment profile inheritance rollback policy"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "message:strong-decision",
+                    "session_id": "decision-session",
+                    "event_type": "decision.recorded",
+                    "body_text": f"{task}: nested mappings merge and lists replace",
+                    "memory_score": 0.82,
+                    "retrieval_mode": "semantic-hybrid",
+                }
+            ],
+            "recent_session_summaries": [
+                {
+                    "source_id": f"session:weak-{index}:summary",
+                    "source_kind": "session_summary",
+                    "session_id": f"weak-{index}",
+                    "event_type": "summary.compacted",
+                    "body_text": f"unrelated dashboard palette cleanup {index}",
+                }
+                for index in range(5)
+            ],
+            "evidence": [],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == ["message:strong-decision"]
+
+
+def test_lifecycle_only_session_summary_cannot_reenter_the_briefing() -> None:
+    task = "ordered multi parent profile inheritance leaf provenance explain api"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "message:strong-decision",
+                    "session_id": "decision-session",
+                    "event_type": "decision.recorded",
+                    "body_text": f"{task}: lists replace and mappings merge",
+                    "memory_score": 0.82,
+                },
+                {
+                    "source_id": "session:hook-only:summary",
+                    "source_kind": "session_summary",
+                    "session_id": "hook-only",
+                    "event_type": "summary.compacted",
+                    "body_text": (
+                        "Session summary: hook-only\n"
+                        "Events: 3\n"
+                        "Event counts: git.hook.post-commit=1, session.ended=1, "
+                        "session.started=1\n"
+                        "Key records:\n- session.started: Git hook post-commit"
+                    ),
+                    "memory_score": 0.426,
+                },
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    source_by_id = {source["source_id"]: source for source in manifest["sources"]}
+    assert manifest["briefing"]["source_ids"] == ["message:strong-decision"]
+    assert source_by_id["session:hook-only:summary"]["source_class"] == "summary"
+    assert source_by_id["session:hook-only:summary"]["source_role"] == "lifecycle"
+
+
+def test_session_summary_with_substantive_events_remains_eligible() -> None:
+    task = "ordered multi parent profile inheritance leaf provenance explain api"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "session:substantive:summary",
+                    "source_kind": "session_summary",
+                    "session_id": "substantive",
+                    "event_type": "summary.compacted",
+                    "body_text": (
+                        "Session summary: substantive\n"
+                        "Events: 3\n"
+                        "Event counts: agent.message=1, session.ended=1, "
+                        "session.started=1\n"
+                        f"Key records:\n- agent.message: {task}"
+                    ),
+                    "memory_score": 0.72,
+                }
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == ["session:substantive:summary"]
+    assert manifest["sources"][0]["source_class"] == "summary"
+    assert manifest["sources"][0]["source_role"] == "summary"
+
+
+def test_malformed_zero_count_summary_fails_open_as_substantive() -> None:
+    task = "ordered multi parent profile inheritance leaf provenance explain api"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "session:legacy-malformed:summary",
+                    "source_kind": "session_summary",
+                    "session_id": "legacy-malformed",
+                    "event_type": "summary.compacted",
+                    "body_text": (
+                        "Session summary: legacy-malformed\n"
+                        "Events: 2\n"
+                        "Event counts: session.started=0, session.ended=0\n"
+                        f"Key records:\n- agent.message: {task}"
+                    ),
+                    "memory_score": 0.72,
+                }
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == ["session:legacy-malformed:summary"]
+    assert manifest["sources"][0]["source_class"] == "summary"
+    assert manifest["sources"][0]["source_role"] == "summary"
+
+
+def test_malformed_summary_count_structure_fails_open_as_substantive() -> None:
+    task = "ordered multi parent profile inheritance leaf provenance explain api"
+    oversized_count = "9" * 5000
+    malformed_bodies = (
+        (
+            "Session summary: inconsistent-total\n"
+            "Events: 3\n"
+            "Event counts: session.started=1, session.ended=1\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+        (
+            "Session summary: duplicate-type\n"
+            "Events: 2\n"
+            "Event counts: session.started=1, session.started=1\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+        (
+            "Session summary: unicode-total\n"
+            "Events: ²\n"
+            "Event counts: session.started=1\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+        (
+            "Session summary: unicode-count\n"
+            "Events: 1\n"
+            "Event counts: session.started=²\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+        (
+            "Session summary: oversized-total\n"
+            f"Events: {oversized_count}\n"
+            "Event counts: session.started=1\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+        (
+            "Session summary: oversized-count\n"
+            "Events: 1\n"
+            f"Event counts: session.started={oversized_count}\n"
+            f"Key records:\n- agent.message: {task}"
+        ),
+    )
+
+    for index, body in enumerate(malformed_bodies):
+        source_id = f"session:legacy-malformed-{index}:summary"
+        manifest = build_context_manifest(
+            {
+                "task": task,
+                "retrieval_query": task,
+                "retrieval_query_state": "specific_terms",
+                "session_id": "current-session",
+                "retrieval_mode": "semantic-hybrid",
+                "memory_hits": [
+                    {
+                        "source_id": source_id,
+                        "source_kind": "session_summary",
+                        "session_id": f"legacy-malformed-{index}",
+                        "event_type": "summary.compacted",
+                        "body_text": body,
+                        "memory_score": 0.72,
+                    }
+                ],
+                "recent_session_summaries": [],
+                "evidence": [],
+            }
+        )
+
+        assert manifest["briefing"]["source_ids"] == [source_id]
+        assert manifest["sources"][0]["source_role"] == "summary"
+
+
+def test_briefing_does_not_let_unmatched_historical_tool_evidence_displace_hints() -> None:
+    task = "explainable multi base environment composition"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "message:dashboard-decision",
+                    "session_id": "dashboard-session",
+                    "event_type": "decision.recorded",
+                    "body_text": "dashboard decision for environment composition",
+                    "memory_score": 0.628,
+                },
+                {
+                    "source_id": "message:merge-decision",
+                    "session_id": "merge-session",
+                    "event_type": "decision.recorded",
+                    "body_text": "nested mappings merge while arrays replace",
+                    "memory_score": 0.609,
+                },
+                {
+                    "source_id": "message:pytest-call",
+                    "session_id": "pytest-session",
+                    "event_type": "tool.call",
+                    "subject": "tool.call pytest",
+                    "body_text": "tool=pytest argv=['tests/test_context.py']",
+                    "memory_score": 0.699,
+                },
+                {
+                    "source_id": "message:error-hint",
+                    "session_id": "error-session",
+                    "event_type": "agent.message",
+                    "body_text": "environment errors include the resolved layer path",
+                    "memory_score": 0.668,
+                },
+                {
+                    "source_id": "message:loader-hint",
+                    "session_id": "loader-session",
+                    "event_type": "agent.message",
+                    "body_text": "environment loaders resolve the ordered inputs",
+                    "memory_score": 0.646,
+                },
+                {
+                    "source_id": "message:cache-hint",
+                    "session_id": "cache-session",
+                    "event_type": "agent.message",
+                    "body_text": "environment cache keys include every resolved input",
+                    "memory_score": 0.637,
+                },
+            ],
+            "recent_session_summaries": [],
+            "evidence": [],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == [
+        "message:dashboard-decision",
+        "message:merge-decision",
+        "message:error-hint",
+        "message:loader-hint",
+        "message:cache-hint",
+    ]
+
+
+def test_context_pack_retains_unmatched_tool_evidence_outside_the_briefing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    task = "explainable multi base environment composition"
+    rows = [
+        {
+            "source_id": "message:pytest-call",
+            "session_id": "pytest-session",
+            "event_type": "tool.call",
+            "subject": "tool.call pytest",
+            "body_text": "tool=pytest argv=['tests/test_context.py']",
+            "memory_score": 0.699,
+        },
+        {
+            "source_id": "message:cache-hint",
+            "session_id": "cache-session",
+            "event_type": "agent.message",
+            "body_text": "environment cache keys include every resolved input",
+            "memory_score": 0.637,
+        },
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    pack = build_context_pack(
+        root,
+        task,
+        memory_limit=2,
+        evidence_limit=0,
+        recent_limit=0,
+        rebuild=False,
+    )
+    manifest = build_context_manifest(pack)
+
+    assert {source["source_id"] for source in manifest["sources"]} == {
+        "message:pytest-call",
+        "message:cache-hint",
+    }
+    assert manifest["briefing"]["source_ids"] == ["message:cache-hint"]
+
+
+def test_context_pack_fills_candidate_budget_before_historical_tool_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    task = "explainable multi base environment composition"
+    rows = [
+        {
+            "source_id": "message:dashboard-decision",
+            "session_id": "dashboard-session",
+            "event_type": "decision.recorded",
+            "body_text": "dashboard decision for environment composition",
+            "memory_score": 0.628,
+        },
+        {
+            "source_id": "message:merge-decision",
+            "session_id": "merge-session",
+            "event_type": "decision.recorded",
+            "body_text": "nested mappings merge while arrays replace",
+            "memory_score": 0.609,
+        },
+        {
+            "source_id": "message:pytest-call",
+            "session_id": "pytest-session",
+            "event_type": "tool.call",
+            "body_text": "tool=pytest argv=['tests/test_context.py']",
+            "memory_score": 0.699,
+        },
+        *[
+            {
+                "source_id": f"message:{name}-hint",
+                "session_id": f"{name}-session",
+                "event_type": "agent.message",
+                "body_text": f"environment {name} preserves every resolved input",
+                "memory_score": score,
+            }
+            for name, score in (("error", 0.668), ("loader", 0.646), ("cache", 0.637))
+        ],
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    pack = build_context_pack(
+        root,
+        task,
+        memory_limit=5,
+        evidence_limit=0,
+        recent_limit=0,
+        rebuild=False,
+    )
+    manifest = build_context_manifest(pack)
+    expected = [
+        "message:dashboard-decision",
+        "message:merge-decision",
+        "message:error-hint",
+        "message:loader-hint",
+        "message:cache-hint",
+    ]
+
+    assert [row["source_id"] for row in pack["memory_hits"]] == expected
+    assert manifest["briefing"]["source_ids"] == expected
+
+
+def test_briefing_keeps_current_and_strong_paraphrased_tool_evidence_privileged() -> None:
+    task = "explainable multi base environment composition"
+    manifest = build_context_manifest(
+        {
+            "task": task,
+            "retrieval_query": task,
+            "retrieval_query_state": "specific_terms",
+            "session_id": "current-session",
+            "retrieval_mode": "semantic-hybrid",
+            "memory_hits": [
+                {
+                    "source_id": "message:paraphrased-result",
+                    "session_id": "prior-session",
+                    "event_type": "tool.result",
+                    "body_text": "resolved layers retain provenance across inherited inputs",
+                    "memory_score": 0.75,
+                },
+                {
+                    "source_id": "message:high-score-hint",
+                    "session_id": "hint-session",
+                    "event_type": "agent.message",
+                    "body_text": f"{task} cache hint",
+                    "memory_score": 0.95,
+                },
+            ],
+            "recent_session_summaries": [],
+            "evidence": [
+                {
+                    "source_id": "message:current-pytest",
+                    "session_id": "current-session",
+                    "event_type": "tool.call",
+                    "body_text": "tool=pytest argv=['tests/test_context.py']",
+                }
+            ],
+        }
+    )
+
+    assert manifest["briefing"]["source_ids"] == [
+        "message:current-pytest",
+        "message:paraphrased-result",
+        "message:high-score-hint",
+    ]
+    assert manifest["briefing"]["quality_policy"]["historical_tool_evidence"] == {
+        "evidence_tier_requires": "specific_task_overlap_or_strong_match",
+        "unmatched_manifest_tier": "historical_tool_fallback",
+        "unmatched_briefing_eligibility": "omitted",
+        "current_session_tier": "current_evidence",
+    }
+
+
+def test_briefing_caps_weak_only_exploration_with_deterministic_diversity() -> None:
+    task = "deployment profile inheritance rollback policy"
+    pack = {
+        "task": task,
+        "retrieval_query": task,
+        "retrieval_query_state": "specific_terms",
+        "session_id": "current-session",
+        "retrieval_mode": "document",
+        "memory_hits": [
+            {
+                "source_id": f"message:weak-{index}",
+                "session_id": f"memory-{index}",
+                "event_type": "agent.message",
+                "body_text": f"unrelated dashboard palette cleanup {index}",
+                "memory_score": 0.2 - index / 100,
+            }
+            for index in range(4)
+        ],
+        "recent_session_summaries": [
+            {
+                "source_id": f"session:summary-{index}:summary",
+                "source_kind": "session_summary",
+                "session_id": f"summary-{index}",
+                "event_type": "summary.compacted",
+                "body_text": f"unrelated widget color cleanup {index}",
+            }
+            for index in range(3)
+        ],
+        "evidence": [],
+    }
+
+    first = build_context_manifest(pack)
+    second = build_context_manifest(pack)
+
+    assert first["briefing"]["source_ids"] == [
+        "message:weak-0",
+        "session:summary-0:summary",
+    ]
+    assert second["briefing"]["source_ids"] == first["briefing"]["source_ids"]
+
+
+def test_context_pack_retains_only_explicitly_targeted_work_lifecycle_event(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    rows = [
+        {
+            "source_id": "message:work-started",
+            "session_id": "start-session",
+            "event_type": "work.started",
+            "body_text": "work start context recovery",
+            "memory_score": 0.91,
+        },
+        {
+            "source_id": "message:work-finished",
+            "session_id": "finish-session",
+            "event_type": "work.finished",
+            "body_text": "work finish context recovery",
+            "memory_score": 0.90,
+        },
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    start_pack = build_context_pack(
+        root,
+        "diagnose work start context recovery",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+    finish_pack = build_context_pack(
+        root,
+        "diagnose work finish context recovery",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+
+    assert [row["event_type"] for row in start_pack["memory_hits"]] == ["work.started"]
+    assert [row["event_type"] for row in finish_pack["memory_hits"]] == [
+        "work.finished"
+    ]
+    assert build_context_manifest(start_pack)["briefing"]["source_ids"] == [
+        "message:work-started"
+    ]
+    assert build_context_manifest(finish_pack)["briefing"]["source_ids"] == [
+        "message:work-finished"
+    ]
+
+
+def test_context_pack_does_not_promote_ordinary_start_or_finish_tasks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    rows = [
+        {
+            "source_id": "message:work-started",
+            "session_id": "start-session",
+            "event_type": "work.started",
+            "body_text": "start server parser",
+            "memory_score": 0.91,
+        },
+        {
+            "source_id": "message:work-finished",
+            "session_id": "finish-session",
+            "event_type": "work.finished",
+            "body_text": "finish parser implementation",
+            "memory_score": 0.90,
+        },
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    start_pack = build_context_pack(
+        root,
+        "start server parser",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+    finish_pack = build_context_pack(
+        root,
+        "finish parser implementation",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+    start_work_pack = build_context_pack(
+        root,
+        "start work on parser implementation",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+    finish_work_pack = build_context_pack(
+        root,
+        "finish work on parser implementation",
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+
+    assert start_pack["memory_hits"] == []
+    assert finish_pack["memory_hits"] == []
+    assert start_work_pack["memory_hits"] == []
+    assert finish_work_pack["memory_hits"] == []
+
+
+def test_context_pack_retains_operational_source_when_task_targets_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    run_cli("index", "update", "--root", str(root))
+    task = "diagnose pre-commit hook capture"
+    rows = [
+        {
+            "source_id": "message:hook",
+            "session_id": "hook-session",
+            "event_type": "git.hook.pre-commit",
+            "subject": "pre-commit hook capture",
+            "body_text": "hook capture failed before commit",
+            "memory_score": 0.91,
+        }
+    ]
+    monkeypatch.setattr(context_module, "search_memory", lambda *_args, **_kwargs: rows)
+
+    pack = build_context_pack(
+        root,
+        task,
+        memory_limit=5,
+        recent_limit=0,
+        rebuild=False,
+    )
+
+    assert [row["event_type"] for row in pack["memory_hits"]] == [
+        "git.hook.pre-commit"
+    ]
+    manifest = build_context_manifest(pack)
+    assert manifest["briefing"]["source_ids"] == ["message:hook"]
+    assert manifest["sources"][0]["source_class"] == "evidence"
+    assert manifest["sources"][0]["source_role"] == "operational"
+    assert manifest["briefing"]["quality_policy"][
+        "low_signal_omitted_unless_task_targeted"
+    ] == ["lifecycle", "operational"]
+    assert manifest["briefing"]["quality_policy"]["final_report_fallback"] == (
+        "only_when_no_higher_signal_source_survives"
+    )
 
 
 def test_fastembed_runtime_disables_telemetry_and_uses_store_cache(
@@ -650,1239 +1471,3 @@ def test_query_semantic_uses_vector_memory_with_existing_filters(tmp_path: Path)
     assert [row["session_id"] for row in rows] == ["backend"]
     assert "sqlite index rebuild" in rows[0]["body_text"]
     assert rows[0]["memory_score"] > 0
-
-
-def test_context_build_creates_agent_ready_context_pack(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    message = write_body(tmp_path / "message.txt", "auth login task context marker")
-    evidence = write_body(tmp_path / "evidence.txt", "pytest auth login evidence passed")
-
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(message))
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--type",
-        "tool.result",
-        "--tool",
-        "pytest",
-        "--tool-exit-code",
-        "0",
-        "--body",
-        str(evidence),
-    )
-
-    result = run_cli("context", "build", "--root", str(root), "--session", "context-session", "auth login")
-    output = tmp_path / "context.md"
-    written = run_cli(
-        "context",
-        "build",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--output",
-        str(output),
-        "auth login",
-    )
-
-    assert "# AgentDir Context Pack" in result.stdout
-    assert "auth login task context marker" in result.stdout
-    assert "tool.result pytest exit=0" in result.stdout
-    assert "Session summary: context-session" in result.stdout
-    assert written.stdout.strip() == str(output)
-    assert "# AgentDir Context Pack" in output.read_text(encoding="utf-8")
-
-
-def test_context_build_emit_creates_manifest_artifact_and_event(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    message = write_body(tmp_path / "message.txt", "auth login context marker")
-    evidence = write_body(tmp_path / "evidence.txt", "pytest auth login evidence passed")
-
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(message))
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--type",
-        "tool.result",
-        "--tool",
-        "pytest",
-        "--tool-exit-code",
-        "0",
-        "--body",
-        str(evidence),
-    )
-
-    result = run_cli(
-        "context",
-        "build",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--emit",
-        "--json",
-        "work on AgentDir auth login",
-    )
-    payload = json.loads(result.stdout)
-    manifest = payload["manifest"]
-    event_path = Path(payload["event_path"])
-    artifact_path = artifact_blob(root, payload["artifact"]["sha256"])
-    event_message = parse_message(event_path)
-    stored_manifest = json.loads(artifact_path.read_text(encoding="utf-8"))
-
-    assert manifest["protocol"] == "agentdir.context-pack.v1"
-    assert manifest["pack_id"].startswith("ctx-")
-    assert manifest["enforcement_boundary"].startswith("advisory:")
-    assert manifest["source_counts"]["evidence"] >= 1
-    assert stored_manifest["pack_id"] == manifest["pack_id"]
-    assert event_message["X-AgentDir-Event-Type"] == "context.pack.created"
-    assert event_message["X-AgentDir-Protocol"] == "agentdir.context-pack.v1"
-    assert event_message["X-AgentDir-Pack-Id"] == manifest["pack_id"]
-    assert event_message["X-AgentDir-Context-Query"] == manifest["retrieval_query"]
-    assert event_message["X-AgentDir-Context-Query"] != manifest["task"]
-    assert event_message["X-AgentDir-Enforcement-Mode"] == "advisory"
-    assert event_message.get_all("X-AgentDir-Source-Id")
-
-
-def test_context_consume_cite_and_audit_track_source_lineage(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    message = write_body(tmp_path / "message.txt", "checkout auth redirect context")
-    evidence = write_body(tmp_path / "evidence.txt", "pytest checkout auth redirect passed")
-
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(message))
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--type",
-        "tool.result",
-        "--tool",
-        "pytest",
-        "--tool-exit-code",
-        "0",
-        "--body",
-        str(evidence),
-    )
-    pack_result = run_cli(
-        "context",
-        "build",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--emit",
-        "--json",
-        "checkout auth redirect",
-    )
-    manifest = json.loads(pack_result.stdout)["manifest"]
-    pack_id = manifest["pack_id"]
-    evidence_source = next(source for source in manifest["sources"] if source["source_class"] == "evidence")
-
-    consumed = run_cli(
-        "context",
-        "consume",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--source",
-        evidence_source["source_id"],
-        "--purpose",
-        "answer",
-        "--json",
-    )
-    cited = run_cli(
-        "context",
-        "cite",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--format",
-        "json",
-    )
-    audit = run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json")
-
-    consumed_payload = json.loads(consumed.stdout)
-    cited_payload = json.loads(cited.stdout)
-    audit_payload = json.loads(audit.stdout)
-
-    assert consumed_payload["source_ids"] == [evidence_source["source_id"]]
-    assert consumed_payload["purpose"] == "answer"
-    assert cited_payload["sources"][0]["source_class"] == "evidence"
-    assert cited_payload["source_counts"]["evidence"] == 1
-    assert audit_payload["retrieved_count"] == len(manifest["sources"])
-    assert audit_payload["consumed_count"] == 1
-    assert audit_payload["cited_count"] == 1
-    assert audit_payload["evidence_backed_count"] == 1
-    assert audit_payload["consumed_source_ids"] == [evidence_source["source_id"]]
-    assert audit_payload["cited_source_ids"] == [evidence_source["source_id"]]
-
-
-def test_context_cite_without_used_or_explicit_sources_is_rejected(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth redirect context")
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(body))
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "context-session",
-            "--emit",
-            "--json",
-            "checkout auth redirect",
-        ).stdout
-    )
-
-    rejected = run_cli(
-        "context",
-        "cite",
-        "--root",
-        str(root),
-        "--pack",
-        emitted["manifest"]["pack_id"],
-        expected_returncode=3,
-    )
-
-    assert "No used context sources to cite" in rejected.stderr
-
-
-def test_context_cite_rejects_an_explicit_source_before_use_without_emitting(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth redirect context")
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(body))
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "context-session",
-            "--emit",
-            "--json",
-            "checkout auth redirect",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    source_id = emitted["manifest"]["briefing"]["source_ids"][0]
-
-    rejected = run_cli(
-        "context",
-        "cite",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--source",
-        source_id,
-        expected_returncode=3,
-    )
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-
-    assert "Cannot cite context before use" in rejected.stderr
-    assert audit["cited_count"] == 0
-    assert audit["cited_without_use_count"] == 0
-
-
-def test_legacy_v1_pack_citation_remains_compatible_and_is_not_strictly_enforced(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth redirect legacy citation")
-    run_cli("session", "start", "--root", str(root), "--id", "legacy-context")
-    run_cli("emit", "--root", str(root), "--session", "legacy-context", "--type", "agent.message", "--body", str(body))
-    pack = build_context_pack(
-        root,
-        "checkout auth redirect",
-        session_id="legacy-context",
-    )
-    legacy_manifest = build_context_manifest(pack)
-    legacy_manifest.pop("briefing")
-    legacy_manifest.pop("retrieval_query_state", None)
-    for source in legacy_manifest["sources"]:
-        source.pop("text_sha256", None)
-        source.pop("body_sha256", None)
-    legacy_path = tmp_path / "legacy-context-manifest.json"
-    legacy_path.write_text(
-        json.dumps(legacy_manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    pack_id = legacy_manifest["pack_id"]
-    emit_event(
-        root,
-        session_id="legacy-context",
-        event_type="context.pack.created",
-        subject=f"context pack: {legacy_manifest['task']}",
-        body=(
-            f"pack_id={pack_id}\n"
-            f"protocol={legacy_manifest['protocol']}\n"
-            f"task={legacy_manifest['task']}\n"
-            "session_id=legacy-context\n"
-            f"sources={len(legacy_manifest['sources'])}"
-        ),
-        artifact=legacy_path,
-        extra_headers={
-            "X-AgentDir-Protocol": legacy_manifest["protocol"],
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Context-Query": legacy_manifest["retrieval_query"],
-            "X-AgentDir-Source-Id": [
-                source["source_id"] for source in legacy_manifest["sources"]
-            ],
-        },
-    )
-
-    legacy_briefing = brief_context_manifest(legacy_manifest)
-    message_ref = next(
-        source["ref"]
-        for source in legacy_briefing["sources"]
-        if source.get("event_type") == "agent.message"
-    )
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--root",
-            str(root),
-            "--pack",
-            pack_id,
-            "--expand",
-            message_ref,
-            "--json",
-        ).stdout
-    )
-
-    citation = json.loads(
-        run_cli(
-            "context",
-            "cite",
-            "--root",
-            str(root),
-            "--pack",
-            pack_id,
-            "--format",
-            "json",
-        ).stdout
-    )
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    session_audit = json.loads(
-        run_cli(
-            "audit",
-            "session",
-            "--root",
-            str(root),
-            "--session",
-            "legacy-context",
-            "--strict",
-            "--json",
-        ).stdout
-    )
-    citation_check = next(
-        check for check in session_audit["checks"] if check["id"] == "context_sources_cited"
-    )
-
-    assert len(citation["sources"]) == len(legacy_manifest["sources"])
-    assert expanded["integrity"] == "legacy_unverified"
-    assert expanded["receipt"]["status"] == "recorded"
-    assert audit["review_status"] == "legacy"
-    assert audit["expansion"]["expanded_source_count"] == 1
-    assert audit["expansion"]["receipts_valid"] is True
-    assert audit["cited_without_use_count"] == len(legacy_manifest["sources"])
-    assert audit["cited_without_use_enforced"] is False
-    assert citation_check["status"] == "not_applicable"
-
-
-def test_legacy_v1_cross_session_actions_remain_compatible(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth legacy session attribution")
-    run_cli("session", "start", "--root", str(root), "--id", "legacy-owner")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "legacy-owner",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    legacy_manifest = build_context_manifest(
-        build_context_pack(
-            root,
-            "checkout auth legacy session attribution",
-            session_id="legacy-owner",
-        )
-    )
-    legacy_manifest.pop("briefing")
-    legacy_manifest.pop("retrieval_query_state", None)
-    legacy_path = tmp_path / "legacy-cross-session-manifest.json"
-    legacy_path.write_text(
-        json.dumps(legacy_manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    pack_id = legacy_manifest["pack_id"]
-    source_ids = [source["source_id"] for source in legacy_manifest["sources"]]
-    assert source_ids
-    emit_event(
-        root,
-        session_id="legacy-owner",
-        event_type="context.pack.created",
-        subject=f"context pack: {legacy_manifest['task']}",
-        body=(
-            f"pack_id={pack_id}\n"
-            f"protocol={legacy_manifest['protocol']}\n"
-            f"task={legacy_manifest['task']}\n"
-            "session_id=legacy-owner\n"
-            f"sources={len(source_ids)}"
-        ),
-        artifact=legacy_path,
-        extra_headers={
-            "X-AgentDir-Protocol": legacy_manifest["protocol"],
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Context-Query": legacy_manifest["retrieval_query"],
-            "X-AgentDir-Source-Id": source_ids,
-        },
-    )
-    run_cli("session", "start", "--root", str(root), "--id", "legacy-action-owner")
-    emit_event(
-        root,
-        session_id="legacy-action-owner",
-        event_type="context.pack.consumed",
-        subject="legacy cross-session context consume",
-        body=f"action=context_consumed\npack_id={pack_id}\npurpose=plan",
-        extra_headers={
-            "X-AgentDir-Protocol": legacy_manifest["protocol"],
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Source-Id": source_ids,
-            "X-AgentDir-Consumption-Purpose": "plan",
-        },
-    )
-
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    status = json.loads(run_cli("status", "--root", str(root), "--json").stdout)
-    finished = json.loads(
-        run_cli(
-            "work",
-            "finish",
-            "--root",
-            str(root),
-            "--no-doctor",
-            "--json",
-        ).stdout
-    )
-
-    assert audit["review_status"] == "legacy"
-    assert audit["finish_allowed"] is True
-    assert audit["lineage_valid"] is True
-    assert audit["session_attribution_enforced"] is False
-    assert audit["session_validation_errors"] == []
-    assert any("legacy-action-owner" in warning for warning in audit["legacy_session_mismatches"])
-    assert status["context"]["blocking_packs"] == []
-    assert finished["ended_session"]["session_id"] == "legacy-action-owner"
-
-
-def test_context_audit_rejects_a_malformed_terminal_decision(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth malformed decision")
-    run_cli("session", "start", "--root", str(root), "--id", "malformed-context")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "malformed-context",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "malformed-context",
-            "--emit",
-            "--json",
-            "checkout auth malformed decision",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    presented = emitted["manifest"]["briefing"]["source_ids"]
-    emit_event(
-        root,
-        session_id="malformed-context",
-        event_type="context.pack.consumed",
-        subject="malformed context decision",
-        body=f"action=context_review\npack_id={pack_id}\ndisposition=used\nreason=tampered payload",
-        extra_headers={
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Reviewed-Source-Id": presented,
-            "X-AgentDir-Dismissed-Source-Id": presented,
-            "X-AgentDir-Context-Disposition": "used",
-            "X-AgentDir-Context-Decision-Id": "ctxd-tampered",
-            "X-AgentDir-Context-Decision-Revision": "1",
-            "X-AgentDir-Consumption-Purpose": "plan",
-        },
-    )
-
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    strict = run_cli(
-        "audit",
-        "session",
-        "--root",
-        str(root),
-        "--session",
-        "malformed-context",
-        "--strict",
-        "--json",
-        expected_returncode=1,
-    )
-
-    assert audit["review_status"] == "conflict"
-    assert audit["lineage_valid"] is False
-    assert audit["finish_allowed"] is False
-    assert any("decision id" in error for error in audit["decision_validation_errors"])
-    assert any("at least one used source" in error for error in audit["decision_validation_errors"])
-    assert "malformed decision" in strict.stdout
-
-
-def test_context_audit_requires_terminal_decision_integrity_headers(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth missing integrity headers")
-    run_cli("session", "start", "--root", str(root), "--id", "missing-integrity")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "missing-integrity",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "missing-integrity",
-            "--emit",
-            "--json",
-            "checkout auth missing integrity headers",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    presented = emitted["manifest"]["briefing"]["source_ids"]
-    used = [presented[0]]
-    dismissed = [source_id for source_id in presented if source_id not in set(used)]
-    emit_event(
-        root,
-        session_id="missing-integrity",
-        event_type="context.pack.consumed",
-        subject="decision missing integrity headers",
-        body=(
-            f"action=context_review\npack_id={pack_id}\ndisposition=used\n"
-            "reason=valid payload without integrity headers"
-        ),
-        extra_headers={
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Source-Id": used,
-            "X-AgentDir-Reviewed-Source-Id": presented,
-            "X-AgentDir-Used-Source-Id": used,
-            "X-AgentDir-Dismissed-Source-Id": dismissed,
-            "X-AgentDir-Context-Disposition": "used",
-            "X-AgentDir-Consumption-Purpose": "plan",
-        },
-    )
-
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-
-    assert audit["review_status"] == "conflict"
-    assert audit["finish_allowed"] is False
-    assert any("decision id is missing" in error for error in audit["decision_validation_errors"])
-    assert any(
-        "decision revision is missing" in error for error in audit["decision_validation_errors"]
-    )
-
-
-def test_unknown_low_level_context_references_fail_closed(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth unknown source guard")
-    run_cli("session", "start", "--root", str(root), "--id", "unknown-source")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "unknown-source",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "unknown-source",
-            "--emit",
-            "--json",
-            "checkout auth unknown source guard",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    emit_event(
-        root,
-        session_id="unknown-source",
-        event_type="context.pack.consumed",
-        subject="unknown context consume",
-        body=f"action=context_consumed\npack_id={pack_id}\npurpose=plan",
-        extra_headers={
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Source-Id": "src-does-not-exist",
-            "X-AgentDir-Consumption-Purpose": "plan",
-        },
-    )
-    emit_event(
-        root,
-        session_id="unknown-source",
-        event_type="context.sources.cited",
-        subject="unknown context citation",
-        body=f"pack_id={pack_id}\nsource=src-citation-does-not-exist",
-        extra_headers={
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Source-Id": "src-citation-does-not-exist",
-        },
-    )
-
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    blocked = run_cli(
-        "work",
-        "finish",
-        "--root",
-        str(root),
-        "--no-doctor",
-        "--json",
-        expected_returncode=3,
-    )
-
-    assert audit["review_status"] == "conflict"
-    assert audit["finish_allowed"] is False
-    assert any("consumption references unknown" in error for error in audit["source_validation_errors"])
-    assert any("citation references unknown" in error for error in audit["source_validation_errors"])
-    assert "cannot be certified" in blocked.stderr
-
-
-def test_context_actions_reject_a_different_session_than_the_pack(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth session attribution guard")
-    run_cli("session", "start", "--root", str(root), "--id", "actual-session")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "actual-session",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "actual-session",
-            "--emit",
-            "--json",
-            "checkout auth session attribution guard",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    presented = emitted["manifest"]["briefing"]["source_ids"]
-    assert presented
-
-    rejected_consume = run_cli(
-        "context",
-        "consume",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--source",
-        presented[0],
-        "--purpose",
-        "plan",
-        "--session",
-        "wrong-session",
-        expected_returncode=2,
-    )
-    try:
-        review_context_pack(
-            root,
-            pack_id=pack_id,
-            disposition="used",
-            reason="apply the retrieved session-attribution evidence",
-            source_selectors=["1"],
-            session_id="wrong-session",
-        )
-    except AgentDirError as exc:
-        review_error = str(exc)
-    else:
-        raise AssertionError("context review accepted a different session")
-
-    consume_args: list[str] = []
-    for source_id in presented:
-        consume_args.extend(("--source", source_id))
-    run_cli(
-        "context",
-        "consume",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        *consume_args,
-        "--purpose",
-        "plan",
-    )
-    rejected_cite = run_cli(
-        "context",
-        "cite",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--source",
-        presented[0],
-        "--session",
-        "wrong-session",
-        expected_returncode=2,
-    )
-
-    assert "belongs to session actual-session, not wrong-session" in rejected_consume.stderr
-    assert "belongs to session actual-session, not wrong-session" in review_error
-    assert "belongs to session actual-session, not wrong-session" in rejected_cite.stderr
-
-
-def test_context_event_from_a_different_session_fails_closed(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "checkout auth event attribution guard")
-    run_cli("session", "start", "--root", str(root), "--id", "actual-session")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--session",
-        "actual-session",
-        "--type",
-        "agent.message",
-        "--body",
-        str(body),
-    )
-    emitted = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "--root",
-            str(root),
-            "--session",
-            "actual-session",
-            "--emit",
-            "--json",
-            "checkout auth event attribution guard",
-        ).stdout
-    )
-    pack_id = emitted["manifest"]["pack_id"]
-    presented = emitted["manifest"]["briefing"]["source_ids"]
-    assert presented
-    run_cli("session", "start", "--root", str(root), "--id", "wrong-session")
-    emit_event(
-        root,
-        session_id="wrong-session",
-        event_type="context.pack.consumed",
-        subject="misattributed context consume",
-        body=f"action=context_consumed\npack_id={pack_id}\npurpose=plan",
-        extra_headers={
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-            "X-AgentDir-Pack-Id": pack_id,
-            "X-AgentDir-Source-Id": presented,
-            "X-AgentDir-Consumption-Purpose": "plan",
-        },
-    )
-
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    status = json.loads(run_cli("status", "--root", str(root), "--json").stdout)
-    blocked = run_cli(
-        "work",
-        "finish",
-        "--root",
-        str(root),
-        "--no-doctor",
-        "--json",
-        expected_returncode=3,
-    )
-    current = json.loads(run_cli("session", "current", "--root", str(root), "--json").stdout)
-
-    assert audit["review_status"] == "conflict"
-    assert audit["finish_allowed"] is False
-    assert audit["lineage_valid"] is False
-    assert any("event session 'wrong-session'" in error for error in audit["session_validation_errors"])
-    assert pack_id in status["context"]["blocking_packs"]
-    assert "cannot be certified" in blocked.stderr
-    assert current["session_id"] == "wrong-session"
-
-
-def test_context_consume_rejects_sources_outside_the_pack(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    body = write_body(tmp_path / "message.txt", "auth login context marker")
-
-    run_cli("session", "start", "--root", str(root), "--id", "context-session")
-    run_cli("emit", "--root", str(root), "--session", "context-session", "--type", "agent.message", "--body", str(body))
-    pack_result = run_cli(
-        "context",
-        "build",
-        "--root",
-        str(root),
-        "--session",
-        "context-session",
-        "--emit",
-        "--json",
-        "auth login",
-    )
-    pack_id = json.loads(pack_result.stdout)["manifest"]["pack_id"]
-
-    rejected = run_cli(
-        "context",
-        "consume",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--source",
-        "message:sessions/not-in-pack/Maildir/new/missing",
-        "--purpose",
-        "plan",
-        expected_returncode=2,
-    )
-
-    assert "Unknown context source" in rejected.stderr
-
-
-def test_roots_register_and_federated_memory_search(tmp_path: Path) -> None:
-    controller = tmp_path / "controller"
-    alpha = tmp_path / "alpha"
-    beta = tmp_path / "beta"
-    run_cli("init", str(controller))
-    run_cli("init", str(alpha))
-    run_cli("init", str(beta))
-    alpha_body = write_body(tmp_path / "alpha.txt", "federated checkout memory marker in registered root")
-    beta_body = write_body(tmp_path / "beta.txt", "federated checkout memory marker in unregistered root")
-
-    run_cli("emit", "--root", str(alpha), "--session", "alpha-session", "--type", "agent.message", "--body", str(alpha_body))
-    run_cli("emit", "--root", str(beta), "--session", "beta-session", "--type", "agent.message", "--body", str(beta_body))
-    registered = run_cli(
-        "roots",
-        "register",
-        "--root",
-        str(controller),
-        str(alpha),
-        "--name",
-        "alpha",
-        "--json",
-    )
-    listed = run_cli("roots", "list", "--root", str(controller), "--json")
-    result = run_cli(
-        "memory",
-        "search",
-        "--root",
-        str(controller),
-        "--federated",
-        "--type",
-        "agent.message",
-        "--json",
-        "federated checkout marker",
-    )
-
-    entry = json.loads(registered.stdout)
-    roots = json.loads(listed.stdout)
-    rows = json.loads(result.stdout)
-
-    assert entry["name"] == "alpha"
-    assert roots[0]["available"] is True
-    assert rows[0]["source_root_name"] == "alpha"
-    assert rows[0]["session_id"] == "alpha-session"
-    assert rows[0]["source_id"].startswith(f"{entry['root_id']}:message:")
-    assert rows[0]["source_id_original"].startswith("message:")
-    assert all(row["session_id"] != "beta-session" for row in rows)
-
-
-def test_root_suggest_doctor_and_groups_scope_federated_search(tmp_path: Path) -> None:
-    controller = tmp_path / "controller"
-    alpha = tmp_path / "alpha"
-    beta = tmp_path / "beta"
-    run_cli("init", str(controller))
-    run_cli("init", str(alpha))
-    run_cli("init", str(beta))
-    alpha_body = write_body(tmp_path / "alpha.txt", "grouped memory marker from alpha root")
-    beta_body = write_body(tmp_path / "beta.txt", "grouped memory marker from beta root")
-
-    run_cli("emit", "--root", str(alpha), "--session", "alpha-session", "--type", "agent.message", "--body", str(alpha_body))
-    run_cli("emit", "--root", str(beta), "--session", "beta-session", "--type", "agent.message", "--body", str(beta_body))
-    suggestions = run_cli("roots", "suggest", "--root", str(controller), "--near", str(tmp_path), "--json")
-    listed_before_register = run_cli("roots", "list", "--root", str(controller), "--json")
-
-    alpha_entry = json.loads(
-        run_cli("roots", "register", "--root", str(controller), str(alpha), "--name", "alpha", "--json").stdout
-    )
-    beta_entry = json.loads(
-        run_cli("roots", "register", "--root", str(controller), str(beta), "--name", "beta", "--json").stdout
-    )
-    group = run_cli(
-        "roots",
-        "group",
-        "create",
-        "--root",
-        str(controller),
-        "product",
-        "--member",
-        alpha_entry["root_id"],
-        "--json",
-    )
-    grouped_search = run_cli(
-        "memory",
-        "search",
-        "--root",
-        str(controller),
-        "--group",
-        "product",
-        "--json",
-        "grouped memory marker",
-    )
-    doctor = run_cli("roots", "doctor", "--root", str(controller), "--group", "product", "--json")
-    run_cli(
-        "roots",
-        "group",
-        "add",
-        "--root",
-        str(controller),
-        "product",
-        beta_entry["root_id"],
-    )
-    groups = run_cli("roots", "group", "list", "--root", str(controller), "--json")
-
-    suggestion_payload = json.loads(suggestions.stdout)
-    rows = json.loads(grouped_search.stdout)
-    doctor_payload = json.loads(doctor.stdout)
-    group_payload = json.loads(group.stdout)
-    groups_payload = json.loads(groups.stdout)
-
-    assert json.loads(listed_before_register.stdout) == []
-    assert {item["name"] for item in suggestion_payload} >= {"alpha", "beta"}
-    assert group_payload["root_ids"] == [alpha_entry["root_id"]]
-    assert {row["session_id"] for row in rows} == {"alpha-session"}
-    assert doctor_payload[0]["root_id"] == alpha_entry["root_id"]
-    assert "stale" in doctor_payload[0]
-    assert set(groups_payload[0]["root_ids"]) == {alpha_entry["root_id"], beta_entry["root_id"]}
-
-
-def test_federated_context_build_emits_root_qualified_manifest(tmp_path: Path) -> None:
-    controller = tmp_path / "controller"
-    child = tmp_path / "child"
-    run_cli("init", str(controller))
-    run_cli("init", str(child))
-    body = write_body(
-        tmp_path / "child.txt",
-        "federated context source marker\n"
-        + ("canonical child detail " * 60)
-        + "\ndeep federated tail sentinel",
-    )
-
-    run_cli("session", "start", "--root", str(controller), "--id", "controller-session")
-    run_cli("emit", "--root", str(child), "--session", "child-session", "--type", "agent.message", "--body", str(body))
-    run_cli("roots", "register", "--root", str(controller), str(child), "--name", "child")
-    result = run_cli(
-        "context",
-        "build",
-        "--root",
-        str(controller),
-        "--federated",
-        "--emit",
-        "--json",
-        "federated context marker",
-    )
-
-    payload = json.loads(result.stdout)
-    manifest = payload["manifest"]
-    event_message = parse_message(Path(payload["event_path"]))
-    federated_source = next(
-        source
-        for source in manifest["sources"]
-        if source.get("source_root_name") == "child"
-        and source.get("event_type") == "agent.message"
-    )
-    briefing = brief_context_manifest(manifest)
-    source_ref = next(
-        source["ref"]
-        for source in briefing["sources"]
-        if source["source_id"] == federated_source["source_id"]
-    )
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--root",
-            str(controller),
-            "--pack",
-            manifest["pack_id"],
-            "--expand",
-            source_ref,
-            "--json",
-        ).stdout
-    )
-
-    assert manifest["federated"] is True
-    assert manifest["retrieval_mode"] == "hybrid"
-    assert federated_source["source_id"].startswith(f"{federated_source['source_root_id']}:message:")
-    assert federated_source["source_id_original"].startswith("message:")
-    assert event_message["X-AgentDir-Context-Scope"] == "federated"
-    assert expanded["integrity"] == "verified"
-    assert expanded["basis"] == "canonical_envelope"
-    assert expanded["source"]["root_id"] == federated_source["source_root_id"]
-    assert "deep federated tail sentinel" in expanded["content"]
-
-    version = child / "VERSION"
-    unavailable_version = child / "VERSION.unavailable"
-    version.rename(unavailable_version)
-    try:
-        unavailable = json.loads(
-            run_cli(
-                "work",
-                "context",
-                "--root",
-                str(controller),
-                "--pack",
-                manifest["pack_id"],
-                "--expand",
-                source_ref,
-                "--json",
-            ).stdout
-        )
-    finally:
-        unavailable_version.rename(version)
-
-    assert unavailable["integrity"] == "unavailable"
-    assert unavailable["basis"] == "manifest_excerpt"
-    assert unavailable["extent"] == "stored_excerpt"
-    assert "deep federated tail sentinel" not in unavailable["content"]
-    assert unavailable["receipt"]["status"] == "not_recorded"
-
-
-def test_malformed_expansion_receipt_is_visible_but_never_blocks_a_valid_decision(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "store"
-    run_cli("init", str(root))
-    prior = write_body(tmp_path / "prior.txt", "optional expansion receipt validation marker")
-    run_cli("session", "start", "--root", str(root), "--id", "prior-session")
-    run_cli(
-        "emit",
-        "--root",
-        str(root),
-        "--type",
-        "agent.message",
-        "--body",
-        str(prior),
-    )
-    run_cli("session", "end", "--root", str(root), "--summary", str(prior))
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "--root",
-            str(root),
-            "--json",
-            "optional expansion receipt validation marker",
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    session_id = started["session"]["session_id"]
-    run_cli(
-        "work",
-        "context",
-        "--root",
-        str(root),
-        "--pack",
-        pack_id,
-        "--none-relevant",
-        "--reason",
-        "the historical record does not constrain this task",
-    )
-    clean = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-
-    emit_event(
-        root,
-        session_id=session_id,
-        event_type="context.sources.expanded",
-        subject="malformed optional context expansion receipt",
-        body="receipt intentionally missing required metadata",
-        extra_headers={"X-AgentDir-Context-View-Pack-Id": pack_id},
-    )
-    emit_event(
-        root,
-        session_id=session_id,
-        event_type="context.sources.expanded",
-        subject="orphan optional context expansion receipt",
-        body="receipt intentionally claims an unknown pack",
-        extra_headers={"X-AgentDir-Context-View-Pack-Id": "ctx-does-not-exist"},
-    )
-    wrong_session = emit_event(
-        root,
-        session_id=session_id,
-        event_type="context.sources.expanded",
-        subject="physically owned receipt with wrong session header",
-        body="routing header intentionally changed before indexing",
-        extra_headers={"X-AgentDir-Context-View-Pack-Id": "ctx-wrong-session"},
-    )
-    wrong_session.path.write_text(
-        wrong_session.path.read_text(encoding="utf-8").replace(
-            f"X-AgentDir-Session: {session_id}",
-            "X-AgentDir-Session: spoofed-session",
-        ),
-        encoding="utf-8",
-    )
-    wrong_type = emit_event(
-        root,
-        session_id=session_id,
-        event_type="context.sources.expanded",
-        subject="physically owned receipt with missing event type",
-        body="event header intentionally changed before indexing",
-        extra_headers={"X-AgentDir-Context-View-Pack-Id": "ctx-wrong-type"},
-    )
-    wrong_type.path.write_text(
-        wrong_type.path.read_text(encoding="utf-8").replace(
-            "X-AgentDir-Event-Type: context.sources.expanded",
-            "X-AgentDir-Event-Typo: context.sources.expanded",
-        ),
-        encoding="utf-8",
-    )
-    audit = json.loads(
-        run_cli("audit", "context", "--root", str(root), "--pack", pack_id, "--json").stdout
-    )
-    status = json.loads(run_cli("status", "--root", str(root), "--json").stdout)
-    finished = json.loads(
-        run_cli("work", "finish", "--root", str(root), "--json").stdout
-    )
-
-    for field in ("review_status", "decision_id", "finish_allowed", "lineage_valid"):
-        assert audit[field] == clean[field]
-    assert audit["expansion"]["receipts_valid"] is False
-    assert audit["expansion"]["receipt_event_count"] == 1
-    assert audit["expansion"]["valid_receipt_count"] == 0
-    assert audit["expansion"]["validation_errors"]
-    assert pack_id in status["context"]["attention_packs"]
-    assert pack_id not in status["context"]["blocking_packs"]
-    assert status["health"]["ok"] is True
-    assert any(
-        "optional context expansion receipt" in warning
-        for warning in status["health"]["warnings"]
-    )
-    inventory = status["context"]["expansion_receipt_inventory"]
-    assert inventory["event_count"] == 4
-    assert inventory["orphan_event_count"] == 3
-    assert inventory["receipts_valid"] is False
-    with sqlite3.connect(index_path(root)) as conn:
-        direct_receipt_documents = conn.execute(
-            """
-            select count(distinct md.id)
-            from memory_documents md
-            join headers h on h.message_rowid = md.message_rowid
-            where lower(h.name) in (
-              'x-agentdir-context-view-pack-id',
-              'x-agentdir-context-view-id',
-              'x-agentdir-context-view-source-id'
-            )
-            """
-        ).fetchone()[0]
-        receipt_summary_leaks = conn.execute(
-            """
-            select count(*) from memory_documents
-            where source_kind = 'session_summary'
-              and (
-                body_text like '%routing header intentionally changed%'
-                or body_text like '%event header intentionally changed%'
-              )
-            """
-        ).fetchone()[0]
-    assert direct_receipt_documents == 0
-    assert receipt_summary_leaks == 0
-    lineage = finished["report"]["agent_handoff"]["context_lineage"]
-    assert lineage["ok"] is True
-    assert lineage["expansion"]["receipts_valid"] is False
-    assert finished["report"]["agent_handoff"]["status"] == "needs_attention"
-    inventory_check = next(
-        check
-        for check in finished["report"]["session_audit"]["checks"]
-        if check["id"] == "context_expansion_receipt_inventory"
-    )
-    assert inventory_check["status"] == "warn"
-    assert finished["report"]["health"]["ok"] is True

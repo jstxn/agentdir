@@ -102,7 +102,7 @@ agentdir context build "install smoke"
 agentdir memory search "install smoke"
 agentdir status
 agentdir report final --format json
-agentdir work finish --json
+agentdir work finish --json --brief
 ```
 
 ## Install From A Downloaded Wheel

@@ -40,7 +40,7 @@ find_python() {
   exit 1
 }
 
-if command -v agentdir >/dev/null 2>&1; then
+if [ "${AGENTDIR_FORCE_SOURCE:-0}" != "1" ] && command -v agentdir >/dev/null 2>&1; then
   AGENTDIR=(agentdir)
 else
   PYTHON_CMD="$(find_python)"

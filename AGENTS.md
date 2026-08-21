@@ -13,7 +13,11 @@ The agent owns the background recording flow:
 - If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`.
   If hook installation is blocked in a restricted linked worktree, rerun it
   with `--no-hooks`.
-- Then start non-trivial coding work with `agentdir work start "<short task>"`.
+- Then start non-trivial coding work yourself with
+  `agentdir work start "<subsystem: distinctive behavior or constraint>"`.
+  Keep the title concise but retrieval-specific: name the subsystem plus a
+  distinctive behavior or constraint, preserving request terms likely to match
+  prior work.
 - Retrieval is automatic. Configured FastEmbed stores use fused semantic and
   lexical matching; other stores keep the built-in hybrid path. Use the default
   invocation without a retrieval flag during normal work.
@@ -23,8 +27,9 @@ The agent owns the background recording flow:
   `agentdir work context --pack <pack-id> --expand <number>` command before marking a source
   used when implementation details, prior patterns, or exact evidence matter.
   Expansion is optional and does not replace the terminal review decision.
-- After reading and any useful expansion, record either useful numbered sources
-  with `agentdir work context --use <number> --reason "<how it helps>"` or a
+- After reading and any useful expansion, close the review once. Repeat `--use`
+  in that command for every useful numbered source:
+  `agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"`, or record a
   reasoned `agentdir work context --none-relevant --reason "<why>"` decision.
   Use `--skip --reason "<why>"` only when review is impossible; no decision is
   needed when the briefing presents no sources.
@@ -45,7 +50,7 @@ The agent owns the background recording flow:
   with `agentdir claim <family> --retract`.
 - Use `agentdir audit session` and `agentdir audit claims` before
   final claims when evidence support matters.
-- Before the final response, run `agentdir work finish --json` when practical.
+- Before the final response, run `agentdir work finish --json --brief` when practical.
   Use `agentdir report final --format json` to preview the same agent handoff
   without ending the session.
 - Read the `agent_handoff` object before making final verification claims.

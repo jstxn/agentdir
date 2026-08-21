@@ -7,9 +7,16 @@ from typing import Any
 from .claims import OUTCOME_PASSED, recorded_claims
 from .context import audit_context_pack
 from .context_expansion import audit_context_expansion_inventory
+from .context_repository import list_context_packs
 from .doctor import run_doctor
 from .git import git_status_short
-from .review import EVIDENCE_FAMILIES, evidence_rows, evidence_truncated, summarize_session
+from .review import (
+    EVIDENCE_FAMILIES,
+    evidence_failure_state,
+    evidence_rows,
+    evidence_truncated,
+    summarize_session,
+)
 from .sessions import read_current_session
 from .store import AgentDirError
 
@@ -104,6 +111,7 @@ def audit_session(
     latest_pack: dict[str, Any] | None | object = _MISSING,
     context_audit: dict[str, Any] | None | object = _MISSING,
     doctor: dict[str, Any] | None | object = _MISSING,
+    expansion_inventory: dict[str, Any] | object = _MISSING,
 ) -> dict[str, Any]:
     if summary is None:
         summary = summarize_session(root, session_id, rebuild=rebuild)
@@ -120,19 +128,22 @@ def audit_session(
         context_audit = _safe_context_audit(root, latest_pack, rebuild=rebuild)
     if doctor is _MISSING:
         doctor = run_doctor(root).as_dict() if run_health_check else None
-    try:
-        expansion_inventory = audit_context_expansion_inventory(root, resolved)
-    except AgentDirError as exc:
-        expansion_inventory = {
-            "event_count": 0,
-            "claimable_event_count": 0,
-            "orphan_event_count": 0,
-            "receipts_valid": False,
-            "validation_errors": [str(exc)],
-        }
+    if expansion_inventory is _MISSING:
+        try:
+            expansion_inventory = audit_context_expansion_inventory(root, resolved)
+        except AgentDirError as exc:
+            expansion_inventory = {
+                "event_count": 0,
+                "claimable_event_count": 0,
+                "orphan_event_count": 0,
+                "receipts_valid": False,
+                "validation_errors": [str(exc)],
+            }
     current = read_current_session(root)
     is_current = bool(current and current.session_id == resolved and current.status == "active")
-    failed_evidence = [row for row in evidence if row.get("event_type") == "tool.result" and row.get("tool_exit_code") not in (None, 0)]
+    failure_state = evidence_failure_state(evidence)
+    failed_evidence = failure_state["unresolved"]
+    resolved_failed_evidence = failure_state["resolved"]
     truncated_evidence = [
         row
         for row in evidence
@@ -160,7 +171,16 @@ def audit_session(
         _check(
             "failed_tool_results",
             CHECK_FAIL if failed_evidence else CHECK_PASS,
-            f"{len(failed_evidence)} failed tool result(s)" if failed_evidence else "no failed tool results",
+            f"{len(failed_evidence)} unresolved failed tool result(s)"
+            if failed_evidence
+            else "no unresolved failed tool results",
+        ),
+        _check(
+            "resolved_failed_tool_results",
+            CHECK_PASS if resolved_failed_evidence else CHECK_NOT_APPLICABLE,
+            f"{len(resolved_failed_evidence)} historical failed tool result(s) resolved by newer passing evidence"
+            if resolved_failed_evidence
+            else "no resolved historical tool failures",
         ),
         _check(
             "truncated_evidence",
@@ -610,9 +630,7 @@ def _doctor_check(doctor: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _latest_context_pack(root: str | Path, session_id: str, *, rebuild: bool = True) -> dict[str, Any] | None:
-    from .control import context_packs
-
-    packs = context_packs(root, session_id, rebuild=rebuild)
+    packs = list_context_packs(root, session_id, rebuild=rebuild)
     attention_pack = None
     for pack in packs:
         audit = _safe_context_audit(root, pack, rebuild=False)

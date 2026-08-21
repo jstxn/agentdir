@@ -42,6 +42,7 @@ from .context import (
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
 from .control import (
     adopt_repo,
+    brief_work_finish,
     build_final_report,
     build_status,
     expand_work_context,
@@ -85,6 +86,7 @@ from .index import rebuild_index, update_index
 from .memory import (
     DEFAULT_MIN_SCORE,
     RETRIEVAL_AUTO,
+    RETRIEVAL_EXECUTION_MODES,
     RETRIEVAL_MODES,
     explain_memory_match,
     memory_backend_status,
@@ -100,6 +102,7 @@ from .retention import (
 )
 from .review import (
     EVIDENCE_FAMILIES,
+    classify_evidence_command,
     evidence_brief,
     evidence_rows,
     filter_evidence,
@@ -993,6 +996,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         redact=not args.no_redact,
         timeout=args.timeout,
     )
+    evidence_family = classify_evidence_command(command, tool_name=result.tool)
     if args.json:
         print_json(
             {
@@ -1003,8 +1007,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "truncated_streams": list(result.truncated_streams),
                 "timed_out": result.timed_out,
                 "event_path": result.event_path,
+                "evidence_family": evidence_family,
             }
         )
+    elif not args.quiet:
+        if result.stderr_needs_newline:
+            sys.stderr.write("\n")
+        print(f"agentdir: recorded evidence family={evidence_family}", file=sys.stderr)
     return result.exit_code
 
 
@@ -1384,6 +1393,8 @@ def cmd_work_context(args: argparse.Namespace) -> int:
 
 
 def cmd_work_finish(args: argparse.Namespace) -> int:
+    if args.brief and not args.json:
+        raise AgentDirError("--brief requires --json")
     claims_text = read_body(args.claims) if args.claims else None
     result = finish_work(
         command_root(args),
@@ -1395,7 +1406,12 @@ def cmd_work_finish(args: argparse.Namespace) -> int:
         invocation=args.invocation,
     )
     if args.json:
-        print_json({key: value for key, value in result.items() if key != "rendered"})
+        payload = (
+            brief_work_finish(result)
+            if args.brief
+            else {key: value for key, value in result.items() if key != "rendered"}
+        )
+        print_json(payload)
     else:
         print(result["rendered"], end="")
     return 0
@@ -1427,15 +1443,15 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 def cmd_evidence(args: argparse.Namespace) -> int:
     rows = evidence_rows(command_root(args), args.session)
-    if args.family or args.failed:
-        rows = filter_evidence(rows, family=args.family, failed=args.failed)
     if args.brief:
-        brief = evidence_brief(rows, family=None, failed=False)
+        brief = evidence_brief(rows, family=args.family, failed=args.failed)
         if args.json:
             print_json(brief)
         else:
             print(format_evidence_brief(brief))
         return 0
+    if args.family or args.failed:
+        rows = filter_evidence(rows, family=args.family, failed=args.failed)
     if args.json:
         print_json(rows)
     else:
@@ -2277,7 +2293,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SOURCE",
         help="read a bounded page of one displayed source without deciding the pack",
     )
-    disposition.add_argument("--use", action="append", dest="sources")
+    disposition.add_argument(
+        "--use",
+        action="append",
+        dest="sources",
+        metavar="SOURCE",
+        help="mark one source useful; repeat in the same terminal review for multiple sources",
+    )
     disposition.add_argument("--none-relevant", action="store_true")
     disposition.add_argument("--skip", action="store_true")
     work_context.add_argument("--reason")
@@ -2297,6 +2319,11 @@ def build_parser() -> argparse.ArgumentParser:
     work_finish.add_argument("--no-doctor", action="store_true")
     work_finish.add_argument("--claims")
     work_finish.add_argument("--json", action="store_true")
+    work_finish.add_argument(
+        "--brief",
+        action="store_true",
+        help="with --json, print the compact agent handoff instead of the forensic report",
+    )
     work_finish.set_defaults(func=cmd_work_finish)
 
     report = sub.add_parser("report")
@@ -2358,7 +2385,11 @@ def build_parser() -> argparse.ArgumentParser:
     memory_explain.add_argument("query")
     memory_explain.add_argument("--source")
     memory_explain.add_argument("--min-score", type=float, default=0.0)
-    memory_explain.add_argument("--retrieval", choices=RETRIEVAL_MODES, default=RETRIEVAL_AUTO)
+    memory_explain.add_argument(
+        "--retrieval",
+        choices=RETRIEVAL_EXECUTION_MODES,
+        default=RETRIEVAL_AUTO,
+    )
     memory_explain.add_argument("--no-rebuild", action="store_true")
     memory_explain.add_argument("--json", action="store_true")
     memory_explain.set_defaults(func=cmd_memory_explain)

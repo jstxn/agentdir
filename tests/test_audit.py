@@ -211,6 +211,88 @@ def test_agent_handoff_surfaces_failed_evidence_and_claim_gaps(tmp_path: Path) -
     assert handoff["recommended_agent_actions"]
 
 
+def test_post_finish_status_and_read_commands_project_latest_session(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    started = json.loads(
+        run_cli("work", "start", "post-finish evidence projection", "--json", cwd=repo).stdout
+    )
+    session_id = started["session"]["session_id"]
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('post-finish evidence passed')",
+        cwd=repo,
+    )
+    run_cli("claim", "test", "--passed", cwd=repo)
+    run_cli("work", "finish", "--json", cwd=repo)
+
+    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
+    brief = json.loads(run_cli("evidence", "--brief", "--json", cwd=repo).stdout)
+    timeline = json.loads(run_cli("timeline", "--json", cwd=repo).stdout)
+
+    assert status["session"]["active"] is False
+    assert status["session"]["current"] is None
+    assert status["session"]["latest"]["session_id"] == session_id
+    assert status["session"]["summary"]["session_id"] == session_id
+    assert status["evidence"]["session_id"] == session_id
+    assert status["evidence"]["count"] >= 2
+    assert brief["latest_by_family"]["test"]["exit_code"] == 0
+    assert timeline[0]["event_type"] == "session.started"
+    assert timeline[-1]["event_type"] == "session.ended"
+
+
+def test_newer_passing_evidence_resolves_prior_failure_without_erasing_history(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    run_cli("work", "start", "repair a transient test failure", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(3)",
+        cwd=repo,
+        expected_returncode=3,
+    )
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        "print('repaired test passed')",
+        cwd=repo,
+    )
+    run_cli("claim", "test", "--passed", cwd=repo)
+
+    audit = json.loads(run_cli("audit", "session", "--strict", "--json", cwd=repo).stdout)
+    report = json.loads(run_cli("report", "final", "--format", "json", cwd=repo).stdout)
+    handoff = report["agent_handoff"]
+    test_verification = next(
+        item for item in handoff["verification"] if item["family"] == "test"
+    )
+
+    assert check(audit, "failed_tool_results")["status"] == "pass"
+    assert check(audit, "resolved_failed_tool_results")["status"] == "pass"
+    assert handoff["status"] == "ok"
+    assert handoff["failed_evidence"] == []
+    assert handoff["unresolved_failed_evidence"] == []
+    assert len(handoff["resolved_failed_evidence"]) == 1
+    assert len(handoff["historical_failed_evidence"]) == 1
+    assert test_verification["failed"] == 1
+    assert test_verification["resolved_failed"] == 1
+    assert test_verification["unresolved_failed"] == 0
+    assert test_verification["currently_failing"] is False
+
+
 def test_evidence_brief_filters_and_timeline_json(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     run_cli("work", "start", "evidence skim", cwd=repo)
@@ -338,7 +420,7 @@ def test_quality_policy_caps_score_only_document_matches_below_strong() -> None:
     policy = manifest["briefing"]["quality_policy"]
     assert source["match_quality"] == "possible"
     assert source["overlap_terms"] == []
-    assert policy["id"] == "agentdir.balanced.v3"
+    assert policy["id"] == "agentdir.balanced.v6"
     assert policy["retrieval_mode"] == "document"
     assert policy["score_thresholds"]["semantic_only_strong"] is None
     assert policy["briefing_limit"] == 5
@@ -518,11 +600,17 @@ def test_generic_guidance_store_and_project_targets_preserve_existing_agents_fil
     assert adopt_payload["generic_guidance"].endswith(".agentdir/integrations/generic/AGENTS.md")
 
 
-def test_dogfood_session_respects_agentdir_python_for_source_fallback(tmp_path: Path) -> None:
+def test_dogfood_session_can_force_source_when_agentdir_is_on_path(tmp_path: Path) -> None:
     root = tmp_path / "root"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    installed = bin_dir / "agentdir"
+    installed.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    installed.chmod(0o755)
     env = {
         **os.environ,
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "AGENTDIR_FORCE_SOURCE": "1",
         "AGENTDIR_PYTHON": sys.executable,
     }
     result = subprocess.run(

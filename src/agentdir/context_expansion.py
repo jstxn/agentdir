@@ -8,6 +8,13 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from .context_repository import (
+    EVENT_CONTEXT_SOURCES_EXPANDED,
+    context_events,
+    read_context_manifest,
+)
+from .context_review import fold_context_review
+from .context_selection import brief_context_manifest
 from .envelope import ParsedEnvelope, parse_envelope, validate_required
 from .events import emit_event
 from .federation import (
@@ -26,7 +33,6 @@ from .store import AgentDirError, AgentDirStateError, paths_for, require_root, v
 
 CONTEXT_EXPANSION_PROTOCOL = "agentdir.context-view.v1"
 CONTEXT_EXPANSION_REPRESENTATION = "redacted-canonical-body.v1"
-EVENT_CONTEXT_SOURCES_EXPANDED = "context.sources.expanded"
 DEFAULT_CONTEXT_EXPANSION_PAGE_BYTES = 4096
 
 HEADER_VIEW_PACK_ID = "X-AgentDir-Context-View-Pack-Id"
@@ -82,8 +88,6 @@ def expand_context_source(
 
     paths = require_root(root)
     update_index(paths.root)
-    from .context import read_context_manifest
-
     initial_manifest = read_context_manifest(paths.root, pack_id, rebuild=False)
     session_id = str(initial_manifest["session_id"])
 
@@ -106,9 +110,15 @@ def expand_context_source(
                     page_bytes=page_bytes,
                 )
 
-                from .context import audit_context_pack
-
-                audit = audit_context_pack(paths.root, pack_id, rebuild=False)
+                audit = fold_context_review(
+                    manifest,
+                    context_events(
+                        paths.root,
+                        pack_id,
+                        rebuild=False,
+                        session_id=session_id,
+                    ),
+                )
                 result["decision"] = {
                     "phase": (
                         "after_decision"
@@ -159,8 +169,6 @@ def audit_context_expansion(
         str(manifest["pack_id"]),
         session_id=str(manifest.get("session_id") or ""),
     )
-    from .context import brief_context_manifest
-
     briefing = brief_context_manifest(manifest)
     displayed = briefing.get("sources") or []
     source_order = [str(source["source_id"]) for source in displayed]
@@ -331,8 +339,6 @@ def audit_context_expansion_inventory(
     errors: list[str] = []
     claimable = 0
     manifest_cache: dict[str, dict[str, Any] | AgentDirError] = {}
-    from .context import read_context_manifest
-
     for event in events:
         routing_valid = True
         if event.get("event_type") != EVENT_CONTEXT_SOURCES_EXPANDED:
@@ -380,8 +386,6 @@ def _displayed_source(
     manifest: dict[str, Any],
     selector: str,
 ) -> tuple[dict[str, Any], str]:
-    from .context import brief_context_manifest
-
     displayed = brief_context_manifest(manifest).get("sources") or []
     normalized = selector.strip()
     ordinal = normalized[1:] if normalized.lower().startswith("s") else normalized
@@ -783,6 +787,7 @@ def _delivery_result(
             "source_id": source["source_id"],
             "source_kind": source.get("source_kind"),
             "source_class": source.get("source_class"),
+            "source_role": source.get("source_role"),
             "match_quality": source.get("match_quality"),
             "match_reasons": list(source.get("match_reasons") or []),
             "memory_score": source.get("memory_score"),

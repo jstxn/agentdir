@@ -79,7 +79,7 @@ agentdir work context --expand 1
 agentdir work context --use 1 --reason "prior checkout pattern informs the plan"
 agentdir run -- pytest -q
 agentdir audit session
-agentdir work finish --json
+agentdir work finish --json --brief
 ```
 
 ## Install
@@ -281,6 +281,12 @@ agentdir replay
 agentdir memory search "checkout failure"
 ```
 
+Without `--session`, the review commands use the active session when one
+exists, then fall back to the latest completed session for the current
+worktree. `status` keeps `session.current` reserved for active work and reports
+the historical projection separately as `session.latest` and
+`evidence.session_id`.
+
 For final-answer support:
 
 ```bash
@@ -327,9 +333,11 @@ The important property is recoverability: deleting the derived index does not
 destroy the session. AgentDir can rebuild from the envelope store.
 
 The agent-facing report surface is JSON. `agentdir report final --format json`
-and `agentdir work finish --json` include an `agent_handoff` object with
-verification evidence, failed evidence, claim support, context lineage, known
-gaps, and recommended next agent actions.
+and `agentdir work finish --json` include the full forensic report. Agents can
+use `agentdir work finish --json --brief` to receive just the compact handoff,
+Git state, health, and ended-session metadata. Both shapes include an
+`agent_handoff` object with verification evidence, failed evidence, claim
+support, context lineage, known gaps, and recommended next actions.
 
 ## Unique Capabilities
 
@@ -361,6 +369,11 @@ comparison rather than an interpretation of prose:
 Recording a family again replaces its earlier claim, so a check re-run after a
 fix supersedes rather than accumulates. Claiming a failure honestly is
 `acknowledged` and does not count against the audit.
+
+Tool evidence remains append-only. When a newer result in the same evidence
+family passes, earlier failures remain available as historical and resolved
+evidence, while strict session audit and the agent handoff report only failures
+whose family is still failing.
 
 A claim made in error can be withdrawn:
 

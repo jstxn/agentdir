@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 import sqlite3
 from dataclasses import asdict
@@ -14,28 +15,25 @@ from .audit import (
     session_audit_gaps,
 )
 from .context import (
-    EVENT_CONTEXT_PACK_CONSUMED,
-    EVENT_CONTEXT_PACK_REVIEWED,
-    EVENT_CONTEXT_SOURCES_CITED,
-    HEADER_PACK_ID,
     audit_context_pack,
     brief_context_manifest,
     build_context_pack,
-    context_pack_body_ids,
-    context_pack_identity_error,
     emit_context_pack,
     read_context_manifest,
     review_context_pack,
 )
+from .context_repository import list_context_packs
+from .context_projection import (
+    build_context_projection,
+    context_needs_attention as _context_needs_attention,
+)
 from .daemon import memory_daemon_status
 from .context_expansion import (
     ExpansionDelivery,
-    audit_context_expansion_inventory,
     empty_context_expansion_audit,
     expand_context_source,
 )
 from .doctor import run_doctor
-from .envelope import parse_envelope
 from .events import emit_event
 from .federation import doctor_registered_roots, list_registered_roots, list_root_groups
 from .git import git_branch, git_head, git_status_short, workspace_name
@@ -47,7 +45,6 @@ from .memory import (
     memory_stats,
     resolve_retrieval_mode,
 )
-from .query import query_messages
 from .review import evidence_brief, evidence_rows, format_evidence, format_summary, summarize_session
 from .rendering import rich_status
 from .sessions import (
@@ -55,7 +52,10 @@ from .sessions import (
     end_session,
     ensure_session,
     read_current_session,
+    read_last_session,
+    read_session_state,
     require_current_session,
+    session_git_cwd,
     session_pointer_lock,
     write_session_state,
 )
@@ -116,9 +116,9 @@ def build_status(
         doctor = run_doctor(paths.root)
         status.update(
             {
-                "session": {"active": False, "current": None},
+                "session": {"active": False, "current": None, "latest": None, "summary": None},
                 "context": {"latest_pack": None},
-                "evidence": {"count": 0},
+                "evidence": {"session_id": None, "count": 0},
                 "memory": {"indexed": False},
                 "federation": {"roots": [], "groups": []},
                 "health": doctor.as_dict(),
@@ -130,52 +130,27 @@ def build_status(
         update_index(paths.root)
 
     current = read_current_session(paths.root)
+    latest = current or read_last_session(paths.root)
     summary: dict[str, Any] | None = None
     evidence_count = 0
-    if current:
-        summary = summarize_session(paths.root, current.session_id, rebuild=False)
-        evidence_count = len(evidence_rows(paths.root, current.session_id, rebuild=False))
+    if latest:
+        summary = summarize_session(paths.root, latest.session_id, rebuild=False)
+        evidence_count = len(evidence_rows(paths.root, latest.session_id, rebuild=False))
 
-    packs = context_packs(
+    context_projection = build_context_projection(
         paths.root,
-        current.session_id if current else None,
-        fallback_any=current is None,
+        latest.session_id if latest else None,
+        fallback_any=latest is None,
         rebuild=False,
     )
-    latest_pack = packs[-1] if packs else None
-    audited_packs = (
-        packs
-        if current
-        else [
-            pack
-            for pack in packs
-            if latest_pack and pack.get("session_id") == latest_pack.get("session_id")
-        ]
-    )
-    pack_audits = _audit_context_packs(paths.root, audited_packs)
-    context_audit = pack_audits[-1] if pack_audits else None
-    attention_audit = next(
-        (audit for audit in pack_audits if _context_needs_attention(audit)),
-        None,
-    )
-    blocking_packs = [audit["pack_id"] for audit in pack_audits if not audit.get("finish_allowed", False)]
-    attention_packs = [audit["pack_id"] for audit in pack_audits if _context_needs_attention(audit)]
-    inventory_session_id = (
-        current.session_id
-        if current
-        else str((latest_pack or {}).get("session_id") or "")
-    )
-    expansion_inventory = (
-        _safe_context_expansion_inventory(paths.root, inventory_session_id)
-        if inventory_session_id
-        else {
-            "event_count": 0,
-            "claimable_event_count": 0,
-            "orphan_event_count": 0,
-            "receipts_valid": True,
-            "validation_errors": [],
-        }
-    )
+    packs = context_projection["packs"]
+    latest_pack = context_projection["latest_pack"]
+    pack_audits = context_projection["pack_audits"]
+    context_audit = context_projection["audit"]
+    attention_audit = context_projection["attention_audit"]
+    blocking_packs = context_projection["blocking_packs"]
+    attention_packs = context_projection["attention_packs"]
+    expansion_inventory = context_projection["expansion_receipt_inventory"]
     memory = _safe_memory_stats(paths.root)
     memory["daemon"] = memory_daemon_status(paths.root)
     roots = doctor_registered_roots(paths.root)
@@ -186,6 +161,7 @@ def build_status(
             "session": {
                 "active": current is not None and current.status == "active",
                 "current": asdict(current) if current else None,
+                "latest": asdict(latest) if latest else None,
                 "summary": summary,
             },
             "context": {
@@ -198,7 +174,10 @@ def build_status(
                 "attention_packs": attention_packs,
                 "expansion_receipt_inventory": expansion_inventory,
             },
-            "evidence": {"count": evidence_count},
+            "evidence": {
+                "session_id": latest.session_id if latest else None,
+                "count": evidence_count,
+            },
             "memory": memory,
             "federation": {
                 "roots": roots,
@@ -233,6 +212,8 @@ def format_status(status: dict[str, Any]) -> str:
         "",
         f"session_active={str(session['active']).lower()}",
         f"session={session['current']['session_id'] if session.get('current') else ''}",
+        f"session_latest={session['latest']['session_id'] if session.get('latest') else ''}",
+        f"evidence_session={evidence.get('session_id') or ''}",
         f"evidence={evidence['count']}",
         f"context_pack={context['latest_pack']['pack_id'] if context.get('latest_pack') else ''}",
         f"context_pack_count={context.get('pack_count', 0)}",
@@ -353,12 +334,12 @@ def _start_work_locked(
     paths = paths_for(root)
     session = ensure_session(paths.root, title=task, actor=actor)
     update_index(paths.root)
-    previous_packs = context_packs(paths.root, session.session_id, rebuild=False)
-    previous_audits = _audit_context_packs(paths.root, previous_packs)
-    previous_audit = next(
-        (audit for audit in previous_audits if not audit.get("finish_allowed", False)),
-        None,
+    previous_context = build_context_projection(
+        paths.root,
+        session.session_id,
+        rebuild=False,
     )
+    previous_audit = previous_context["blocking_audit"]
     if previous_audit:
         context_prefix = _scoped_command_prefix(
             invocation,
@@ -381,7 +362,8 @@ def _start_work_locked(
                 f"Context review is still pending for {previous_pack_id}. "
                 f"Re-open it with `{context_prefix} --show --pack {previous_pack_id}`, then run "
                 f"`{context_prefix} --pack {previous_pack_id} "
-                "--use <number> --reason \"<how it helps>\"` or record a reasoned no-relevant decision."
+                "--use <number> [--use <number> ...] --reason \"<how they help>\"` "
+                "in one terminal review, or record a reasoned no-relevant decision."
             )
     if session.title != task:
         session.title = task
@@ -496,7 +478,8 @@ def format_work_start(
         if len(excerpt) > 220:
             excerpt = excerpt[:217] + "..."
         lines.append(
-            f"[{source['ref']}] {source['match_quality']} {source['source_class']}: "
+            f"[{source['ref']}] {source['match_quality']} "
+            f"{source.get('source_role') or source['source_class']}: "
             f"{subject or '(untitled context)'}"
         )
         lines.append(f"    preview: {excerpt or '(no excerpt)'}")
@@ -513,9 +496,26 @@ def format_work_start(
             ("audit", "context"),
             command_root,
         )
-        lines.extend(
-            ["", f"context_expand={context_prefix} --pack {pack_id} --expand <number>"]
+        explain_source = next(
+            (
+                source
+                for source in briefing.get("sources") or []
+                if (source.get("next_actions") or {}).get("explain")
+            ),
+            None,
         )
+        if explain_source is None:
+            lines.append("")
+        lines.append(f"context_expand={context_prefix} --pack {pack_id} --expand <number>")
+        if explain_source is not None:
+            lines.append(
+                f"context_explain_{explain_source['ref']}="
+                + _format_scoped_action(
+                    invocation,
+                    explain_source["next_actions"]["explain"],
+                    command_root,
+                )
+            )
         if audit and audit.get("error"):
             lines.extend(
                 [
@@ -552,7 +552,8 @@ def format_work_start(
         elif briefing.get("review_required"):
             lines.extend(
                 [
-                    f'context_use={context_prefix} --pack {pack_id} --use <number> --reason "<how it helps>"',
+                    f'context_use={context_prefix} --pack {pack_id} --use <number> '
+                    f'[--use <number> ...] --reason "<how they help>"',
                     f'context_none={context_prefix} --pack {pack_id} --none-relevant --reason "<why none help>"',
                     f'context_skip={context_prefix} --pack {pack_id} --skip --reason "<why review was not possible>"',
                 ]
@@ -669,6 +670,7 @@ def format_context_expansion_content(
         f"context_source={source['ref']}",
         f"source_id={source['source_id']}",
         f"source_class={source.get('source_class') or ''}",
+        f"source_role={source.get('source_role') or source.get('source_class') or ''}",
         f"match_quality={source.get('match_quality') or 'unknown'}",
         f"subject={source.get('subject') or ''}",
         f"integrity={result['integrity']}",
@@ -734,7 +736,11 @@ def _format_scoped_action(
     root: str | Path | None,
 ) -> str:
     parts = [*invocation]
-    if root is not None and action[:2] == ["work", "context"]:
+    if (
+        root is not None
+        and action[:2] in (["work", "context"], ["memory", "explain"])
+        and "--root" not in action
+    ):
         parts.extend((*action[:2], "--root", str(Path(root).resolve()), *action[2:]))
     else:
         parts.extend(action)
@@ -861,7 +867,8 @@ def _finish_work_locked(
         raise AgentDirStateError(
             f"Context review is {context_audit.get('review_status') or 'incomplete'}. "
             f"Re-open it with `{context_prefix} --show {selector}`, then run "
-            f"`{context_prefix} {selector} --use <number> --reason \"<how it helps>\"`, "
+            f"`{context_prefix} {selector} --use <number> [--use <number> ...] "
+            f"--reason \"<how they help>\"`, "
             "record `--none-relevant`, or record `--skip`."
         )
     if end:
@@ -872,6 +879,7 @@ def _finish_work_locked(
                 "Rerun with `--keep-session` to emit its final report without changing the active session."
             )
     rendered = format_final_report(report)
+    ending_git_head = report["git"]["head"]
     event = emit_event(
         paths.root,
         session_id=session.session_id,
@@ -880,7 +888,7 @@ def _finish_work_locked(
         body=rendered,
         from_actor=actor,
         workspace=session.workspace,
-        git_head=git_head(),
+        git_head=ending_git_head,
     )
     emit_event(
         paths.root,
@@ -890,7 +898,7 @@ def _finish_work_locked(
         body=f"session_id={session.session_id}\nreport_event={event.path}",
         from_actor=actor,
         workspace=session.workspace,
-        git_head=git_head(),
+        git_head=ending_git_head,
     )
     ended = None
     if end:
@@ -908,6 +916,234 @@ def _finish_work_locked(
     }
 
 
+def brief_work_finish(result: dict[str, Any]) -> dict[str, Any]:
+    """Project the final agent handoff without the forensic report payload."""
+    report = result["report"]
+    handoff = dict(report["agent_handoff"])
+    unresolved = list(
+        handoff.get("unresolved_failed_evidence")
+        or handoff.get("failed_evidence")
+        or []
+    )
+    historical = list(handoff.get("historical_failed_evidence") or [])
+    resolved = list(handoff.get("resolved_failed_evidence") or [])
+    actionable = _newest_failure_per_family(unresolved)
+    historical_presented = historical[-5:]
+    resolved_presented = resolved[-5:]
+    handoff.update(
+        {
+            "failed_evidence": actionable,
+            "unresolved_failed_evidence": actionable,
+            "historical_failed_evidence": historical_presented,
+            "resolved_failed_evidence": resolved_presented,
+            "failure_evidence_counts": {
+                "unresolved_total": len(unresolved),
+                "unresolved_presented": len(actionable),
+                "historical_total": len(historical),
+                "historical_presented": len(historical_presented),
+                "resolved_total": len(resolved),
+                "resolved_presented": len(resolved_presented),
+            },
+        }
+    )
+    payload = {
+        "task": report["task"],
+        "agent_handoff": handoff,
+        "git": report["git"],
+        "health": report["health"],
+        "event_path": result["event_path"],
+        "ended_session": result["ended_session"],
+    }
+    return _byte_bound_work_finish_brief(payload)
+
+
+def _newest_failure_per_family(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in reversed(items):
+        family = str(item.get("family") or "unknown")
+        if family in seen:
+            continue
+        seen.add(family)
+        selected.append(item)
+    selected.reverse()
+    return selected
+
+
+def _byte_bound_work_finish_brief(payload: dict[str, Any]) -> dict[str, Any]:
+    profiles = (
+        (128, 10, 32, 8),
+        (64, 5, 20, 6),
+        (32, 3, 12, 5),
+    )
+    for profile_index, (max_string, max_list, max_dict, max_depth) in enumerate(profiles):
+        stats = {
+            "truncated_strings": 0,
+            "omitted_list_items": 0,
+            "omitted_dict_items": 0,
+            "depth_truncations": 0,
+        }
+        bounded = _bound_brief_value(
+            payload,
+            stats=stats,
+            max_string=max_string,
+            max_list=max_list,
+            max_dict=max_dict,
+            max_depth=max_depth,
+        )
+        bounded["brief_projection"] = {
+            "bounded": True,
+            "degraded": profile_index > 0,
+            "max_bytes": 20_000,
+            "max_string_chars": max_string,
+            "max_list_items": max_list,
+            **stats,
+        }
+        if len(json.dumps(bounded, indent=2).encode("utf-8")) < 20_000:
+            return bounded
+    return _minimal_work_finish_brief(payload)
+
+
+def _bound_brief_value(
+    value: Any,
+    *,
+    stats: dict[str, int],
+    max_string: int,
+    max_list: int,
+    max_dict: int,
+    max_depth: int,
+    depth: int = 0,
+) -> Any:
+    if isinstance(value, str):
+        if len(value) <= max_string:
+            return value
+        stats["truncated_strings"] += 1
+        marker = "...<truncated>..."
+        prefix_length = (max_string - len(marker)) // 2
+        suffix_length = max_string - len(marker) - prefix_length
+        return f"{value[:prefix_length]}{marker}{value[-suffix_length:]}"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= max_depth:
+        stats["depth_truncations"] += 1
+        return "<truncated:depth>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        if len(items) > max_dict:
+            stats["omitted_dict_items"] += len(items) - max_dict
+        return {
+            key: _bound_brief_value(
+                item,
+                stats=stats,
+                max_string=max_string,
+                max_list=max_list,
+                max_dict=max_dict,
+                max_depth=max_depth,
+                depth=depth + 1,
+            )
+            for key, item in items[:max_dict]
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > max_list:
+            stats["omitted_list_items"] += len(value) - max_list
+        return [
+            _bound_brief_value(
+                item,
+                stats=stats,
+                max_string=max_string,
+                max_list=max_list,
+                max_dict=max_dict,
+                max_depth=max_depth,
+                depth=depth + 1,
+            )
+            for item in value[:max_list]
+        ]
+    return _bound_brief_value(
+        str(value),
+        stats=stats,
+        max_string=max_string,
+        max_list=max_list,
+        max_dict=max_dict,
+        max_depth=max_depth,
+        depth=depth,
+    )
+
+
+def _minimal_work_finish_brief(payload: dict[str, Any]) -> dict[str, Any]:
+    handoff = payload.get("agent_handoff") or {}
+    context = handoff.get("context_lineage") or {}
+    claim_support = handoff.get("claim_support") or {}
+    minimal = {
+        "task": payload.get("task"),
+        "agent_handoff": {
+            "status": handoff.get("status"),
+            "verification": [
+                {
+                    "family": item.get("family"),
+                    "currently_failing": item.get("currently_failing"),
+                    "unresolved_failed": item.get("unresolved_failed"),
+                }
+                for item in (handoff.get("verification") or [])[:7]
+            ],
+            "failure_evidence_counts": handoff.get("failure_evidence_counts") or {},
+            "claim_support": {
+                "claims": [
+                    {"family": claim.get("family"), "status": claim.get("status")}
+                    for claim in (claim_support.get("claims") or [])[:7]
+                ]
+            },
+            "context_lineage": {
+                key: context.get(key)
+                for key in (
+                    "pack_id",
+                    "ok",
+                    "review_status",
+                    "decision_complete",
+                    "retrieved",
+                    "presented",
+                    "used",
+                    "pending",
+                    "cited_without_use",
+                )
+            },
+            "known_gaps": (handoff.get("known_gaps") or [])[:3],
+            "recommended_agent_actions": (
+                handoff.get("recommended_agent_actions") or []
+            )[:3],
+        },
+        "git": payload.get("git"),
+        "health": {"ok": (payload.get("health") or {}).get("ok")},
+        "event_path": payload.get("event_path"),
+        "ended_session": {
+            key: (payload.get("ended_session") or {}).get(key)
+            for key in ("session_id", "status", "git_head", "ended_at")
+        },
+    }
+    stats = {
+        "truncated_strings": 0,
+        "omitted_list_items": 0,
+        "omitted_dict_items": 0,
+        "depth_truncations": 0,
+    }
+    bounded = _bound_brief_value(
+        minimal,
+        stats=stats,
+        max_string=64,
+        max_list=7,
+        max_dict=16,
+        max_depth=5,
+    )
+    bounded["brief_projection"] = {
+        "bounded": True,
+        "degraded": True,
+        "max_bytes": 20_000,
+        "max_string_chars": 64,
+        "max_list_items": 7,
+        **stats,
+    }
+    return bounded
+
+
 def build_final_report(
     root: str | Path,
     *,
@@ -918,18 +1154,22 @@ def build_final_report(
 ) -> dict[str, Any]:
     paths = require_root(root)
     session = _resolve_session(paths.root, session_id)
+    git_cwd = session_git_cwd(paths.root, session)
     update_index(paths.root)
     summary = summarize_session(paths.root, session.session_id, rebuild=False)
     evidence = evidence_rows(paths.root, session.session_id, rebuild=False)
-    packs = context_packs(paths.root, session.session_id, rebuild=False)
-    latest_pack = packs[-1] if packs else None
-    pack_audits = _audit_context_packs(paths.root, packs)
-    context_audit = pack_audits[-1] if pack_audits else None
-    blocking_audit = next(
-        (audit for audit in pack_audits if not audit.get("finish_allowed", False)),
-        None,
+    context_projection = build_context_projection(
+        paths.root,
+        session.session_id,
+        rebuild=False,
     )
-    attention_audit = next((audit for audit in pack_audits if _context_needs_attention(audit)), None)
+    packs = context_projection["packs"]
+    latest_pack = context_projection["latest_pack"]
+    pack_audits = context_projection["pack_audits"]
+    context_audit = context_projection["audit"]
+    blocking_audit = context_projection["blocking_audit"]
+    attention_audit = context_projection["attention_audit"]
+    expansion_inventory = context_projection["expansion_receipt_inventory"]
     audit_for_session = blocking_audit or attention_audit or context_audit
     pack_for_session = (
         next((pack for pack in packs if pack["pack_id"] == audit_for_session["pack_id"]), latest_pack)
@@ -948,20 +1188,7 @@ def build_final_report(
         latest_pack=pack_for_session,
         context_audit=audit_for_session,
         doctor=doctor,
-    )
-    expansion_inventory = next(
-        (
-            check.get("details")
-            for check in session_audit.get("checks") or []
-            if check.get("id") == "context_expansion_receipt_inventory"
-        ),
-        {
-            "event_count": 0,
-            "claimable_event_count": 0,
-            "orphan_event_count": 0,
-            "receipts_valid": True,
-            "validation_errors": [],
-        },
+        expansion_inventory=expansion_inventory,
     )
     if claims_text is not None:
         claims_audit = audit_claims(
@@ -1005,16 +1232,8 @@ def build_final_report(
             "audit": context_audit,
             "attention_audit": attention_audit,
             "pack_audits": pack_audits,
-            "blocking_packs": [
-                audit["pack_id"]
-                for audit in pack_audits
-                if not audit.get("finish_allowed", False)
-            ],
-            "attention_packs": [
-                audit["pack_id"]
-                for audit in pack_audits
-                if _context_needs_attention(audit)
-            ],
+            "blocking_packs": context_projection["blocking_packs"],
+            "attention_packs": context_projection["attention_packs"],
             "expansion_receipt_inventory": expansion_inventory,
         },
         "session_audit": session_audit,
@@ -1022,9 +1241,9 @@ def build_final_report(
         "agent_handoff": handoff,
         "git": {
             "workspace": session.workspace,
-            "branch": git_branch(),
-            "head": git_head(),
-            "dirty": bool(git_status_short()),
+            "branch": git_branch(git_cwd) if git_cwd else None,
+            "head": (git_head(git_cwd) if git_cwd else None) or session.git_head,
+            "dirty": bool(git_status_short(git_cwd)) if git_cwd else False,
         },
         "health": doctor,
         "known_gaps": gaps,
@@ -1051,6 +1270,8 @@ def format_final_report(report: dict[str, Any]) -> str:
         f"- events_before_final_report: {summary['events']}",
         f"- tool_results: {summary['tool_results']}",
         f"- failed_tools: {summary['failed_tools']}",
+        f"- resolved_failed_tools: {summary.get('resolved_failed_tools', 0)}",
+        f"- unresolved_failed_tools: {summary.get('unresolved_failed_tools', summary['failed_tools'])}",
         "",
         "## Evidence",
         "",
@@ -1171,6 +1392,10 @@ def _agent_handoff(
     known_gaps: list[str],
 ) -> dict[str, Any]:
     failed_evidence = evidence_brief_payload.get("failed_evidence") or []
+    historical_failed_evidence = (
+        evidence_brief_payload.get("historical_failed_evidence") or []
+    )
+    resolved_failed_evidence = evidence_brief_payload.get("resolved_failed_evidence") or []
     fail_checks = [
         check
         for check in (session_audit or {}).get("checks", [])
@@ -1210,6 +1435,9 @@ def _agent_handoff(
         "status": "needs_attention" if needs_attention else "ok",
         "verification": evidence_brief_payload.get("families") or [],
         "failed_evidence": failed_evidence,
+        "unresolved_failed_evidence": failed_evidence,
+        "historical_failed_evidence": historical_failed_evidence,
+        "resolved_failed_evidence": resolved_failed_evidence,
         "claim_support": claims_audit,
         "context_lineage": _context_lineage(context_audit),
         "known_gaps": known_gaps,
@@ -1300,13 +1528,6 @@ def _context_lineage(context_audit: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _context_needs_attention(context_audit: dict[str, Any]) -> bool:
-    if not context_audit.get("lineage_valid", False):
-        return True
-    expansion = context_audit.get("expansion") or {}
-    return not expansion.get("receipts_valid", True)
-
-
 def _recommended_agent_actions(
     *,
     summary: dict[str, Any],
@@ -1385,40 +1606,6 @@ def latest_context_pack(
     return rows[-1] if rows else None
 
 
-def _audit_context_packs(
-    root: str | Path,
-    packs: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    audits: list[dict[str, Any]] = []
-    for pack in packs:
-        if pack.get("identity_error"):
-            audits.append(
-                {
-                    "error": pack["identity_error"],
-                    "pack_id": pack["pack_id"],
-                    "review_status": "error",
-                    "decision_complete": False,
-                    "finish_allowed": False,
-                    "lineage_valid": False,
-                }
-            )
-            continue
-        try:
-            audits.append(audit_context_pack(root, pack["pack_id"], rebuild=False))
-        except AgentDirError as exc:
-            audits.append(
-                {
-                    "error": str(exc),
-                    "pack_id": pack["pack_id"],
-                    "review_status": "error",
-                    "decision_complete": False,
-                    "finish_allowed": False,
-                    "lineage_valid": False,
-                }
-            )
-    return audits
-
-
 def context_packs(
     root: str | Path,
     session_id: str | None = None,
@@ -1426,153 +1613,27 @@ def context_packs(
     fallback_any: bool = False,
     rebuild: bool = True,
 ) -> list[dict[str, Any]]:
-    if rebuild:
-        update_index(root)
-    rows = query_messages(
+    """Compatibility facade for context repository pack discovery."""
+    return list_context_packs(
         root,
-        session_id=session_id,
-        event_type="context.pack.created",
-        limit=10_000,
+        session_id,
+        fallback_any=fallback_any,
+        rebuild=rebuild,
     )
-    if not rows and session_id and fallback_any:
-        rows = query_messages(root, event_type="context.pack.created", limit=10_000)
-    packs: list[dict[str, Any]] = []
-    for row in rows:
-        event_path = Path(str(row.get("file_path") or ""))
-        if not event_path.is_absolute():
-            event_path = paths_for(root).root / event_path
-        header_ids: list[str] = []
-        body_ids: list[str] = []
-        identity_error: str | None = None
-        try:
-            parsed = parse_envelope(event_path)
-            header_ids = parsed.headers(HEADER_PACK_ID)
-            body_ids = context_pack_body_ids(parsed.body_text)
-            identity_error = context_pack_identity_error(header_ids, body_ids)
-        except (AgentDirError, OSError) as exc:
-            identity_error = f"context pack creation event cannot be read: {exc}"
-        pack_id = (
-            header_ids[0]
-            if header_ids
-            else body_ids[0]
-            if body_ids
-            else f"event-{row.get('id') or 'unknown'}"
-        )
-        pack = {
-            "pack_id": pack_id,
-            "session_id": row.get("session_id"),
-            "event_path": row.get("file_path"),
-            "subject": row.get("subject"),
-            "date_utc": row.get("date_utc"),
-        }
-        if identity_error:
-            pack["identity_error"] = identity_error
-        packs.append(pack)
-
-    counts: dict[str, int] = {}
-    for pack in packs:
-        counts[pack["pack_id"]] = counts.get(pack["pack_id"], 0) + 1
-    for pack in packs:
-        if counts[pack["pack_id"]] > 1:
-            duplicate_error = f"context pack has multiple creation events: {pack['pack_id']}"
-            existing = pack.get("identity_error")
-            pack["identity_error"] = (
-                f"{existing}; {duplicate_error}" if existing else duplicate_error
-            )
-
-    if session_id:
-        created_in_session = {
-            pack["pack_id"] for pack in packs if pack.get("session_id") == session_id
-        }
-        orphan_claims: set[str] = set()
-        for event_type in (
-            EVENT_CONTEXT_PACK_CONSUMED,
-            EVENT_CONTEXT_PACK_REVIEWED,
-            EVENT_CONTEXT_SOURCES_CITED,
-        ):
-            action_rows = query_messages(
-                root,
-                session_id=session_id,
-                event_type=event_type,
-                limit=10_000,
-            )
-            for row in action_rows:
-                event_path = Path(str(row.get("file_path") or ""))
-                if not event_path.is_absolute():
-                    event_path = paths_for(root).root / event_path
-                try:
-                    header_ids = parse_envelope(event_path).headers(HEADER_PACK_ID)
-                except (AgentDirError, OSError) as exc:
-                    header_ids = []
-                    identity_error = f"context action event cannot be read: {exc}"
-                else:
-                    identity_error = (
-                        "context action event must have exactly one "
-                        f"X-AgentDir-Pack-Id header; found {len(header_ids)}"
-                        if len(header_ids) != 1
-                        else None
-                    )
-                claimed_pack_id = (
-                    header_ids[0]
-                    if len(header_ids) == 1
-                    else f"event-{row.get('id') or 'unknown'}"
-                )
-                if identity_error:
-                    packs.append(
-                        {
-                            "pack_id": claimed_pack_id,
-                            "session_id": session_id,
-                            "event_path": row.get("file_path"),
-                            "subject": row.get("subject"),
-                            "date_utc": row.get("date_utc"),
-                            "identity_error": identity_error,
-                        }
-                    )
-                    continue
-                if claimed_pack_id in created_in_session or claimed_pack_id in orphan_claims:
-                    continue
-                try:
-                    claimed_manifest = read_context_manifest(
-                        root,
-                        claimed_pack_id,
-                        rebuild=False,
-                    )
-                except AgentDirError:
-                    claimed_manifest = None
-                if claimed_manifest is not None and "briefing" not in claimed_manifest:
-                    # v1 callers could explicitly attribute consume/cite actions
-                    # to a different session. Those immutable events predate the
-                    # review-aware same-session contract and remain compatible.
-                    continue
-                orphan_claims.add(claimed_pack_id)
-                packs.append(
-                    {
-                        "pack_id": claimed_pack_id,
-                        "session_id": session_id,
-                        "event_path": row.get("file_path"),
-                        "subject": row.get("subject"),
-                        "date_utc": row.get("date_utc"),
-                        "identity_error": (
-                            f"context action in session {session_id} references pack "
-                            f"{claimed_pack_id} without a creation event in that session"
-                        ),
-                    }
-                )
-    return packs
 
 
 def _resolve_session(root: str | Path, session_id: str | None) -> SessionState:
     if session_id:
-        current = read_current_session(root)
-        if current and current.session_id == session_id:
-            return current
+        persisted = read_session_state(root, session_id)
+        if persisted:
+            return persisted
         summary = summarize_session(root, session_id)
         return SessionState(
             session_id=session_id,
             title=session_id,
             actor="agent",
-            workspace=workspace_name(),
-            git_head=git_head(),
+            workspace="unknown",
+            git_head=None,
             started_at=summary.get("first_event") or "",
             status="unknown",
         )
@@ -1587,22 +1648,6 @@ def _safe_memory_stats(root: str | Path) -> dict[str, Any]:
     except (AgentDirError, sqlite3.Error, OSError) as exc:
         return {"indexed": False, "error": str(exc)}
     return {"indexed": True, **stats}
-
-
-def _safe_context_expansion_inventory(
-    root: str | Path,
-    session_id: str,
-) -> dict[str, Any]:
-    try:
-        return audit_context_expansion_inventory(root, session_id)
-    except (AgentDirError, sqlite3.Error, OSError) as exc:
-        return {
-            "event_count": 0,
-            "claimable_event_count": 0,
-            "orphan_event_count": 0,
-            "receipts_valid": False,
-            "validation_errors": [str(exc)],
-        }
 
 
 def _store_version(root: str | Path) -> str | None:

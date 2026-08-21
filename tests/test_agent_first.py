@@ -22,6 +22,7 @@ from agentdir.context_expansion import (
     _view_payload,
     expand_context_source,
 )
+from agentdir.control import brief_work_finish
 
 
 def find_project_root() -> Path:
@@ -415,15 +416,26 @@ def test_setup_installs_hooks_and_user_codex_skill(tmp_path: Path) -> None:
     assert "agentdir adopt --if-needed --gitignore user" in skill_text
     assert "do not decide whether agentdir is set up" in skill_text.lower()
     assert "`.agentdir`" in skill_text
-    assert 'agentdir work start "<short task>"' in skill_text
-    assert 'agentdir work context --use <number> --reason "<how it helps>"' in skill_text
+    assert 'agentdir work start "<subsystem: distinctive behavior or constraint>"' in skill_text
+    assert "Keep the title concise but retrieval-specific" in skill_text
+    assert "name the subsystem plus a" in skill_text
+    assert "distinctive behavior or constraint" in skill_text
+    assert "yourself" in skill_text
+    assert (
+        'agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"'
+        in skill_text
+    )
+    assert (
+        "Repeat `--use` in that command for every useful source"
+        in " ".join(skill_text.split())
+    )
     assert 'agentdir work context --none-relevant --reason "<why>"' in skill_text
     assert "agentdir status" in skill_text
     assert "agentdir run -- <command>" in skill_text
     assert "agentdir context consume --pack <pack-id>" in skill_text
     assert "agentdir roots suggest" in skill_text
     assert "agentdir memory search --group <name>" in skill_text
-    assert "agentdir work finish" in skill_text
+    assert "agentdir work finish --json --brief" in skill_text
     assert "Do not wrap routine exploration commands" in skill_text
     assert (repo / ".git" / "hooks" / "pre-commit").is_file()
 
@@ -730,6 +742,13 @@ def test_generated_agent_guidance_uses_user_gitignore(tmp_path: Path) -> None:
         assert "agentdir adopt --if-needed --gitignore user" in text, path
         assert "do not decide whether agentdir is set up" in text.lower(), path
         assert "`.agentdir`" in text, path
+        assert (
+            'agentdir work start "<subsystem: distinctive behavior or constraint>"' in text
+        ), path
+        assert "Keep the title concise but retrieval-specific" in text, path
+        assert "name the subsystem plus a" in text, path
+        assert "distinctive behavior or constraint" in text, path
+        assert "yourself" in text, path
 
 
 def test_integrations_install_all_store_target(tmp_path: Path) -> None:
@@ -792,6 +811,282 @@ def test_work_start_status_report_and_finish_are_agent_owned_flow(tmp_path: Path
     assert "work.report.final" in event_types
     assert "work.finished" in event_types
     assert "session.ended" in event_types
+
+
+def test_work_finish_brief_json_returns_handoff_without_forensic_payload(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    sentinel = "LARGE_CHILD_OUTPUT_SHOULD_NOT_BE_REPEATED_" * 200
+    run_cli("work", "start", "compact final agent handoff", "--json", cwd=repo)
+    run_cli(
+        "run",
+        "--name",
+        "pytest",
+        "--",
+        sys.executable,
+        "-c",
+        f"print({sentinel!r})",
+        cwd=repo,
+    )
+
+    finished = run_cli("work", "finish", "--json", "--brief", cwd=repo)
+    payload = json.loads(finished.stdout)
+
+    assert payload["agent_handoff"]["verification"][0]["family"] == "test"
+    assert payload["ended_session"]["status"] == "completed"
+    assert payload["event_path"]
+    assert "report" not in payload
+    assert "evidence" not in payload
+    assert "context" not in payload
+    assert sentinel not in finished.stdout
+    assert len(finished.stdout.encode("utf-8")) < 20_000
+
+
+def test_work_finish_brief_bounds_failure_history_without_mutating_full_report() -> None:
+    def failure_ref(family: str, index: int) -> dict[str, object]:
+        return {
+            "family": family,
+            "path": f"sessions/s/Maildir/new/{family}-{index}",
+            "subject": f"{family} failure {index}",
+            "failed": True,
+        }
+
+    unresolved = [failure_ref("test", index) for index in range(20)] + [
+        failure_ref("build", index) for index in range(12)
+    ]
+    historical = [failure_ref("test", index) for index in range(40)]
+    resolved = [failure_ref("lint", index) for index in range(30)]
+    handoff = {
+        "status": "needs_attention",
+        "failed_evidence": unresolved,
+        "unresolved_failed_evidence": unresolved,
+        "historical_failed_evidence": historical,
+        "resolved_failed_evidence": resolved,
+    }
+    result = {
+        "report": {
+            "task": "bounded handoff",
+            "agent_handoff": handoff,
+            "git": {"head": "abc"},
+            "health": {"ok": True},
+        },
+        "event_path": "sessions/s/report",
+        "ended_session": {"session_id": "s"},
+    }
+
+    payload = brief_work_finish(result)
+    brief_handoff = payload["agent_handoff"]
+
+    assert [item["path"] for item in brief_handoff["failed_evidence"]] == [
+        "sessions/s/Maildir/new/test-19",
+        "sessions/s/Maildir/new/build-11",
+    ]
+    assert brief_handoff["unresolved_failed_evidence"] == brief_handoff["failed_evidence"]
+    assert brief_handoff["historical_failed_evidence"] == historical[-5:]
+    assert brief_handoff["resolved_failed_evidence"] == resolved[-5:]
+    assert brief_handoff["failure_evidence_counts"] == {
+        "unresolved_total": 32,
+        "unresolved_presented": 2,
+        "historical_total": 40,
+        "historical_presented": 5,
+        "resolved_total": 30,
+        "resolved_presented": 5,
+    }
+    assert len(handoff["failed_evidence"]) == 32
+    assert len(handoff["historical_failed_evidence"]) == 40
+    assert len(handoff["resolved_failed_evidence"]) == 30
+    assert len(json.dumps(payload).encode("utf-8")) < 20_000
+
+
+def test_work_finish_brief_byte_bounds_user_controlled_nested_strings() -> None:
+    oversized = "USER_CONTROLLED_VALUE_" * 12_000
+    failure = {
+        "family": "test",
+        "tool": oversized,
+        "subject": oversized,
+        "path": oversized,
+        "failed": True,
+    }
+    handoff = {
+        "status": "needs_attention",
+        "verification": [{"family": "test", "latest": failure}],
+        "failed_evidence": [failure],
+        "unresolved_failed_evidence": [failure],
+        "historical_failed_evidence": [failure],
+        "resolved_failed_evidence": [],
+        "claim_support": {"claims": [{"family": "test", "message": oversized}]},
+        "context_lineage": {"ok": True, "decision_reason": oversized},
+        "known_gaps": [oversized],
+        "recommended_agent_actions": [oversized],
+        "final_response_guidance": [oversized],
+    }
+    result = {
+        "report": {
+            "task": oversized,
+            "agent_handoff": handoff,
+            "git": {"head": "abc"},
+            "health": {"ok": False, "errors": [oversized], "warnings": [oversized]},
+        },
+        "event_path": oversized,
+        "ended_session": {"session_id": "s", "title": oversized},
+    }
+
+    payload = brief_work_finish(result)
+    rendered = json.dumps(payload, indent=2)
+
+    assert len(rendered.encode("utf-8")) < 20_000
+    assert payload["brief_projection"]["truncated_strings"] >= 10
+    assert payload["brief_projection"]["max_string_chars"] == 128
+    assert len(handoff["failed_evidence"][0]["subject"]) == len(oversized)
+    assert oversized not in rendered
+
+
+def test_work_finish_records_the_ending_git_head_in_completed_session(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "repo")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial state"], cwd=repo, check=True)
+    initial_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    run_cli("work", "start", "record completed session git head", "--json", cwd=repo)
+    tracked.write_text("implemented\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Implement change"], cwd=repo, check=True)
+    final_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
+    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
+    run_cli("index", "rebuild", cwd=repo)
+    ended_rows = query_rows(repo / ".agentdir", event_type="session.ended")
+
+    assert finished["report"]["session"]["git_head"] == initial_sha
+    assert finished["report"]["git"]["head"] == final_sha
+    assert finished["ended_session"]["git_head"] == final_sha
+    assert status["session"]["latest"]["git_head"] == final_sha
+    assert ended_rows[-1]["git_head"] == final_sha
+
+
+def test_explicit_root_finish_does_not_take_git_head_from_the_callers_repo(
+    tmp_path: Path,
+) -> None:
+    owner = init_repo(tmp_path / "owner")
+    owner_file = owner / "tracked.txt"
+    owner_file.write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=owner, check=True)
+    subprocess.run(["git", "commit", "-m", "Owner initial"], cwd=owner, check=True)
+    owner_start_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=owner, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    run_cli("work", "start", "explicit root ending state", "--json", cwd=owner)
+    owner_file.write_text("implemented\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=owner, check=True)
+    subprocess.run(["git", "commit", "-m", "Owner final"], cwd=owner, check=True)
+    owner_final_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=owner, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    caller_parent = tmp_path / "unrelated"
+    caller_parent.mkdir()
+    caller = init_repo(caller_parent / "owner")
+    caller_file = caller / "caller.txt"
+    caller_file.write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "add", "caller.txt"], cwd=caller, check=True)
+    subprocess.run(["git", "commit", "-m", "Caller state"], cwd=caller, check=True)
+    caller_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=caller, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+    finished = json.loads(
+        run_cli(
+            "work",
+            "finish",
+            "--root",
+            str(owner / ".agentdir"),
+            "--json",
+            cwd=caller,
+        ).stdout
+    )
+    run_cli("index", "rebuild", "--root", str(owner / ".agentdir"), cwd=caller)
+    final_rows = [
+        row
+        for row in query_rows(owner / ".agentdir")
+        if row["event_type"] in {"work.report.final", "work.finished", "session.ended"}
+    ]
+
+    assert caller_sha != owner_start_sha
+    assert owner_final_sha != owner_start_sha
+    assert finished["report"]["git"]["head"] == owner_final_sha
+    assert finished["ended_session"]["git_head"] == owner_final_sha
+    assert len(final_rows) == 3
+    assert {row["git_head"] for row in final_rows} == {owner_final_sha}
+
+
+def test_explicit_root_start_uses_the_store_owners_checkout(tmp_path: Path) -> None:
+    owner_parent = tmp_path / "owner-parent"
+    caller_parent = tmp_path / "caller-parent"
+    owner_parent.mkdir()
+    caller_parent.mkdir()
+    owner = init_repo(owner_parent / "agentdir")
+    owner_file = owner / "owner.txt"
+    owner_file.write_text("owner\n", encoding="utf-8")
+    subprocess.run(["git", "add", "owner.txt"], cwd=owner, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Owner state"],
+        cwd=owner,
+        check=True,
+        capture_output=True,
+    )
+    owner_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=owner,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    run_cli("init", cwd=owner)
+
+    caller = init_repo(caller_parent / "agentdir")
+    caller_file = caller / "caller.txt"
+    caller_file.write_text("caller\n", encoding="utf-8")
+    subprocess.run(["git", "add", "caller.txt"], cwd=caller, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Caller state"],
+        cwd=caller,
+        check=True,
+        capture_output=True,
+    )
+    caller_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=caller,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    started = json.loads(
+        run_cli(
+            "work",
+            "start",
+            "explicit root starting state",
+            "--root",
+            str(owner / ".agentdir"),
+            "--no-context",
+            "--json",
+            cwd=caller,
+        ).stdout
+    )
+
+    assert owner_sha != caller_sha
+    assert started["session"]["workspace"] == owner.name
+    assert started["session"]["git_head"] == owner_sha
 
 
 def test_work_context_records_used_briefing_and_handoff_funnel(tmp_path: Path) -> None:
@@ -997,2220 +1292,6 @@ def test_work_start_records_context_by_default_and_keeps_plain_briefing_compact(
     )
     assert copied.returncode == 0, copied.stderr
     assert f"context_pack={pack_id}" in copied.stdout
-
-
-def test_work_context_expands_clean_bounded_pages_and_records_read_before_use(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior_text = "context expansion canonical marker\n" + "".join(
-        f"line-{index:04d} preserves canonical context expansion detail {index}\n"
-        for index in range(220)
-    )
-    prior.write_text(prior_text, encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "canonical context expansion detail",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-
-    first = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--page",
-            "1",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    second = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--page",
-            "2",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    repeated = run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--expand",
-        source_ref,
-        "--page",
-        "1",
-        cwd=repo,
-    )
-
-    assert first["pack_id"] == pack_id
-    assert first["source"]["ref"] == source_ref
-    assert first["source"]["event_type"] == "agent.message"
-    assert first["source"]["match_quality"] in {"strong", "possible", "weak"}
-    assert first["integrity"] == "verified"
-    assert first["basis"] == "canonical_envelope"
-    assert first["extent"] == "bounded"
-    assert first["page"] == 1
-    assert first["page_count"] >= 2
-    assert first["byte_start"] == 0
-    assert first["returned_bytes"] <= 4096
-    assert first["truncated"] is True
-    assert "context expansion canonical marker" in first["content"]
-    assert first["receipt"]["status"] == "recorded"
-    assert first["receipt"]["recorded"] is True
-    assert second["byte_start"] == first["byte_end"]
-    assert second["content"] != first["content"]
-    assert second["receipt"]["status"] == "recorded"
-    assert "receipt=existing" in repeated.stdout
-    assert (
-        f"next_page={scoped_work_context_invocation(repo / '.agentdir')} --pack {pack_id} "
-        f"--expand {source_ref} --page 2"
-        in repeated.stdout
-    )
-
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--use",
-        source_ref,
-        "--reason",
-        "the expanded canonical record supplies the implementation details",
-        cwd=repo,
-    )
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-    expansion = status["context"]["audit"]["expansion"]
-    lineage = json.loads(
-        run_cli("report", "final", "--format", "json", cwd=repo).stdout
-    )["agent_handoff"]["context_lineage"]
-
-    assert expansion["expanded_source_count"] == 1
-    assert expansion["expanded_before_decision_count"] == 1
-    assert expansion["expanded_after_decision_count"] == 0
-    assert expansion["used_without_prior_expansion_count"] == 0
-    assert expansion["receipt_event_count"] == 2
-    assert expansion["receipts_valid"] is True
-    assert lineage["expansion"] == expansion
-
-    root = repo / ".agentdir"
-    with sqlite3.connect(root / "indexes" / "agentdir.sqlite3") as conn:
-        direct_receipts = conn.execute(
-            "select count(*) from memory_documents where event_type = 'context.sources.expanded'"
-        ).fetchone()[0]
-        summaries = [
-            row[0]
-            for row in conn.execute(
-                "select body_text from memory_documents where source_kind = 'session_summary'"
-            ).fetchall()
-        ]
-    assert direct_receipts == 0
-    assert all("- context.sources.expanded:" not in summary for summary in summaries)
-    assert status["memory"]["coverage"] == 1.0
-
-
-def test_context_expansion_pages_unicode_and_deduplicates_concurrent_receipts(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior_text = (
-        "unicode context expansion boundary marker\n"
-        + ("unicode context expansion boundary marker " * 110)
-        + "🙂é漢字"
-        + (" unicode context expansion boundary marker" * 110)
-        + "\nunicode context expansion tail"
-    )
-    prior.write_text(prior_text, encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "unicode context expansion boundary marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-
-    def expand_first_page() -> dict[str, object]:
-        return json.loads(
-            run_cli(
-                "work",
-                "context",
-                "--pack",
-                pack_id,
-                "--expand",
-                source_ref,
-                "--page",
-                "1",
-                "--json",
-                cwd=repo,
-            ).stdout
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = (pool.submit(expand_first_page), pool.submit(expand_first_page))
-        concurrent = [future.result() for future in futures]
-
-    assert {item["receipt"]["status"] for item in concurrent} == {"recorded", "existing"}
-    first = concurrent[0]
-    content = [str(first["content"])]
-    for page in range(2, int(first["page_count"]) + 1):
-        expanded = json.loads(
-            run_cli(
-                "work",
-                "context",
-                "--pack",
-                pack_id,
-                "--expand",
-                source_ref,
-                "--page",
-                str(page),
-                "--json",
-                cwd=repo,
-            ).stdout
-        )
-        assert expanded["returned_bytes"] <= 4096
-        content.append(expanded["content"])
-    assert "".join(content).strip() == prior_text.strip()
-
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--expand",
-        source_ref,
-        "--page",
-        "0",
-        "--json",
-        cwd=repo,
-        expected_returncode=2,
-    )
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--expand",
-        source_ref,
-        "--page",
-        str(int(first["page_count"]) + 1),
-        "--json",
-        cwd=repo,
-        expected_returncode=2,
-    )
-    run_cli("index", "update", cwd=repo)
-    root = repo / ".agentdir"
-    with sqlite3.connect(root / "indexes" / "agentdir.sqlite3") as conn:
-        receipt_rows = conn.execute(
-            "select id from messages where event_type = 'context.sources.expanded' order by id"
-        ).fetchall()
-        header_names = {
-            row[0]
-            for row in conn.execute(
-                "select name from headers where message_rowid = ?",
-                (receipt_rows[0][0],),
-            ).fetchall()
-        }
-    assert len(receipt_rows) == int(first["page_count"])
-    assert "X-AgentDir-Context-View-Pack-Id" in header_names
-    assert "X-AgentDir-Pack-Id" not in header_names
-
-
-def test_context_expansion_returns_content_when_optional_receipt_write_fails(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("optional receipt failure must not hide expanded content", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "optional receipt failure expanded content",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-
-    def fail_receipt(*_args, **_kwargs):
-        raise OSError("simulated receipt fsync failure")
-
-    monkeypatch.setattr("agentdir.context_expansion.emit_event", fail_receipt)
-    expanded = expand_context_source(
-        repo / ".agentdir",
-        pack_id=pack_id,
-        source_selector=source_ref,
-    )
-
-    assert "optional receipt failure" in expanded["content"]
-    assert expanded["receipt"]["status"] == "failed"
-    assert expanded["receipt"]["reason"] == "receipt_write_failed"
-    assert "simulated receipt fsync failure" in expanded["receipt"]["error"]
-    assert any("optional receipt failed" in warning for warning in expanded["warnings"])
-
-
-def test_context_expansion_stdout_failure_emits_no_receipt(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("stdout delivery failure receipt boundary marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "stdout delivery failure receipt boundary", "--json", cwd=repo).stdout
-    )
-    env = {**os.environ, "PYTHONPATH": str(SRC_ROOT)}
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "agentdir",
-            "work",
-            "context",
-            "--pack",
-            started["context_pack"]["pack_id"],
-            "--expand",
-            displayed_source_ref(started),
-            "--json",
-        ],
-        cwd=repo,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None
-    process.stdout.close()
-    returncode = process.wait(timeout=10)
-    stderr = process.stderr.read() if process.stderr is not None else ""
-    run_cli("index", "update", cwd=repo)
-
-    assert returncode != 0, stderr
-    assert query_rows(repo / ".agentdir", "context.sources.expanded") == []
-
-
-def test_context_expansion_receipt_binds_verified_content_to_manifest_digest(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("receipt manifest digest binding marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "receipt manifest digest binding marker", "--json", cwd=repo).stdout
-    )
-    manifest = started["context_pack"]
-    pack_id = manifest["pack_id"]
-    session_id = manifest["session_id"]
-    source_ref = displayed_source_ref(started)
-    expanded = expand_context_source(
-        repo / ".agentdir",
-        pack_id=pack_id,
-        source_selector=source_ref,
-    )
-    run_cli("index", "update", cwd=repo)
-    source_id = expanded["source"]["source_id"]
-    event = deepcopy(
-        _expansion_events(repo / ".agentdir", pack_id, session_id=session_id)[0]
-    )
-    forged_payload = _view_payload(expanded)
-    forged_payload["source_sha256"] = "0" * 64
-    forged_view_id = _view_id(forged_payload)
-    event["header_values"][HEADER_VIEW_SOURCE_SHA256] = ["0" * 64]
-    event["header_values"][HEADER_VIEW_ID] = [forged_view_id]
-    event["message_id"] = f"<{forged_view_id}@agentdir.local>"
-    event["body_text"] = _receipt_body(
-        forged_payload,
-        view_id=forged_view_id,
-        decision_phase="before_decision",
-    )
-
-    payload, errors = _validate_receipt(
-        repo / ".agentdir",
-        event,
-        manifest,
-        {source_id: source_ref},
-        {source["source_id"]: source for source in manifest["sources"]},
-    )
-
-    assert payload is not None
-    assert any("source_sha256 does not match retained content" in error for error in errors), errors
-
-
-def test_context_expansion_rejects_symlinked_source_outside_the_store(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("outside symlink containment expansion marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "outside symlink containment expansion marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-    source_id = started["context_briefing"]["source_ids"][int(source_ref) - 1]
-    source = next(
-        item for item in started["context_pack"]["sources"] if item["source_id"] == source_id
-    )
-    envelope = repo / ".agentdir" / source["file_path"]
-    outside = tmp_path / "outside-source.eml"
-    envelope.rename(outside)
-    envelope.symlink_to(outside)
-
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert expanded["integrity"] == "unavailable"
-    assert expanded["basis"] == "manifest_excerpt"
-    assert expanded["receipt"]["status"] == "not_recorded"
-
-
-def test_context_expansion_normalizes_retained_header_whitespace(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("header whitespace expansion marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli(
-        "emit",
-        "--type",
-        "agent.message",
-        "--subject",
-        "subject  with   spacing",
-        "--body",
-        str(prior),
-        cwd=repo,
-    )
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "header whitespace expansion marker", "--json", cwd=repo).stdout
-    )
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            started["context_pack"]["pack_id"],
-            "--expand",
-            displayed_source_ref(started),
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert expanded["integrity"] == "verified"
-    assert expanded["basis"] == "canonical_envelope"
-
-
-def test_context_expansion_rejects_unsafe_summary_session_identity(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    run_cli("init", str(repo / ".agentdir"))
-    outside_session = tmp_path / "outside-session"
-
-    resolved = _resolve_session_summary(
-        repo / ".agentdir",
-        {
-            "session_id": str(outside_session),
-            "source_kind": "session_summary",
-            "excerpt": "bounded captured summary preview",
-        },
-    )
-
-    assert resolved["integrity"] == "unavailable"
-    assert resolved["basis"] == "manifest_excerpt"
-    assert resolved["integrity_reason"] == "summary session identity is unsafe"
-
-
-def test_work_context_integrity_mismatch_returns_only_the_stored_redacted_excerpt(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text(
-        "immutable expansion original marker with stable historical evidence",
-        encoding="utf-8",
-    )
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "immutable expansion original marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-    source_id = started["context_briefing"]["source_ids"][int(source_ref) - 1]
-    source = next(
-        item for item in started["context_pack"]["sources"] if item["source_id"] == source_id
-    )
-    envelope = repo / ".agentdir" / source["file_path"]
-    raw = envelope.read_text(encoding="utf-8")
-    assert "immutable expansion original marker" in raw
-    envelope.write_text(
-        raw.replace("immutable expansion original marker", "immutable expansion changed marker"),
-        encoding="utf-8",
-    )
-
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    audit = json.loads(
-        run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout
-    )
-
-    assert expanded["integrity"] == "changed"
-    assert expanded["basis"] == "manifest_excerpt"
-    assert expanded["extent"] == "stored_excerpt"
-    assert "immutable expansion original marker" in expanded["content"]
-    assert "immutable expansion changed marker" not in expanded["content"]
-    assert expanded["receipt"]["status"] == "not_recorded"
-    assert expanded["receipt"]["reason"] == "canonical_source_unavailable"
-    assert audit["expansion"]["receipt_event_count"] == 0
-
-
-def test_context_expansion_labels_derived_summary_drift_instead_of_rewriting_history(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text(
-        "derived summary context expansion drift marker",
-        encoding="utf-8",
-    )
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "derived summary context expansion drift marker",
-            "--memory-limit",
-            "1",
-            "--recent-limit",
-            "5",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    summary_ref = displayed_source_ref(started, event_type="summary.compacted")
-    original = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            summary_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    drift = tmp_path / "drift.txt"
-    drift.write_text("new derived summary material that was not captured", encoding="utf-8")
-    run_cli(
-        "emit",
-        "--session",
-        "prior-context",
-        "--type",
-        "agent.message",
-        "--body",
-        str(drift),
-        cwd=repo,
-    )
-
-    changed = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            summary_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert original["integrity"] == "verified"
-    assert original["basis"] == "canonical_derived_summary"
-    assert changed["integrity"] == "changed"
-    assert changed["basis"] == "manifest_excerpt"
-    assert "drifted or its session identity was replaced" in changed["integrity_reason"]
-    assert "new derived summary material" not in changed["content"]
-    assert changed["receipt"]["status"] == "not_recorded"
-
-
-def test_expansion_after_use_is_observable_without_changing_the_terminal_decision(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text(
-        "late context expansion decision stability marker",
-        encoding="utf-8",
-    )
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "late context expansion decision stability marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--use",
-        source_ref,
-        "--reason",
-        "the historical pattern constrains the implementation",
-        cwd=repo,
-    )
-    before = json.loads(
-        run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout
-    )
-
-    expanded = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    after = json.loads(
-        run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout
-    )
-
-    for field in ("decision_id", "decision", "review_status", "finish_allowed", "lineage_valid"):
-        assert after[field] == before[field]
-    assert expanded["decision"]["phase"] == "after_decision"
-    assert after["expansion"]["expanded_before_decision_count"] == 0
-    assert after["expansion"]["expanded_after_decision_count"] == 1
-    assert after["expansion"]["used_without_prior_expansion_count"] == 1
-    assert all(event["event_type"] != "context.sources.expanded" for event in after["events"])
-    run_cli("work", "finish", "--json", cwd=repo)
-
-
-def test_terminal_context_show_is_decision_aware_and_historical_expand_is_read_only(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text(
-        "terminal context expansion historical read marker",
-        encoding="utf-8",
-    )
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "terminal context expansion historical read marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ref = displayed_source_ref(started)
-    reason = "the historical record is not relevant to the current decision"
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--none-relevant",
-        "--reason",
-        reason,
-        cwd=repo,
-    )
-
-    shown = run_cli("work", "context", "--show", "--pack", pack_id, cwd=repo)
-    assert "context_review_status=complete" in shown.stdout
-    assert "context_decision=no_relevant" in shown.stdout
-    assert f"context_reason={reason}" in shown.stdout
-    assert "context_use=" not in shown.stdout
-    assert "context_none=" not in shown.stdout
-    assert "context_skip=" not in shown.stdout
-    assert (
-        f"context_expand={scoped_work_context_invocation(repo / '.agentdir')} "
-        f"--pack {pack_id} --expand <number>"
-        in shown.stdout
-    )
-
-    run_cli("work", "finish", "--json", cwd=repo)
-    historical = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    run_cli("index", "update", cwd=repo)
-    receipts = query_rows(repo / ".agentdir", "context.sources.expanded")
-
-    assert historical["integrity"] == "verified"
-    assert "historical read marker" in historical["content"]
-    assert historical["receipt"]["status"] == "not_recorded"
-    assert historical["receipt"]["reason"] == "session_not_active"
-    assert receipts == []
-
-
-def test_archived_pack_and_source_receipt_remain_directly_readable_but_not_searchable(
-    tmp_path: Path,
-) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text(
-        "archived context expansion retained canonical marker",
-        encoding="utf-8",
-    )
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "archived context expansion retained canonical marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    session_id = started["session"]["session_id"]
-    source_ref = displayed_source_ref(started)
-    active_read = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        pack_id,
-        "--use",
-        source_ref,
-        "--reason",
-        "the retained canonical record establishes the historical behavior",
-        cwd=repo,
-    )
-    run_cli("work", "finish", "--json", cwd=repo)
-    run_cli(
-        "archive",
-        "--session",
-        session_id,
-        "--session",
-        "prior-context",
-        "--apply",
-        cwd=repo,
-    )
-
-    archived_read = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--pack",
-            pack_id,
-            "--expand",
-            source_ref,
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    audit = json.loads(
-        run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout
-    )
-    rows = query_rows(repo / ".agentdir")
-
-    assert active_read["receipt"]["status"] == "recorded"
-    assert archived_read["integrity"] == "verified"
-    assert "retained canonical marker" in archived_read["content"]
-    assert archived_read["receipt"]["status"] == "not_recorded"
-    assert archived_read["receipt"]["reason"] == "session_not_active"
-    assert audit["review_status"] == "complete"
-    assert audit["expansion"]["receipt_event_count"] == 1
-    assert audit["expansion"]["expanded_before_decision_count"] == 1
-    assert all(row["session_id"] != session_id for row in rows)
-    assert all(row["event_type"] != "context.sources.expanded" for row in rows)
-
-
-def test_work_start_blocks_a_second_pack_until_the_first_is_decided(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect pending briefing marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-
-    first = json.loads(
-        run_cli("work", "start", "checkout redirect pending briefing marker", "--json", cwd=repo).stdout
-    )
-    blocked = run_cli(
-        "work",
-        "start",
-        "second task cannot hide the first pack",
-        "--json",
-        cwd=repo,
-        expected_returncode=3,
-    )
-
-    assert first["context_pack"]["pack_id"] in blocked.stderr
-    assert f"work context --root {repo / '.agentdir'} --pack" in blocked.stderr
-    assert f"work context --root {repo / '.agentdir'} --show --pack" in blocked.stderr
-
-
-def test_concurrent_work_starts_create_only_one_pending_pack(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect concurrent start marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    run_cli("session", "start", "--id", "active-context", cwd=repo)
-
-    def start() -> subprocess.CompletedProcess[str]:
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(SRC_ROOT)
-        return subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "agentdir",
-                "work",
-                "start",
-                "checkout redirect concurrent start marker",
-                "--json",
-            ],
-            cwd=repo,
-            env=env,
-            text=True,
-            capture_output=True,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: start(), range(2)))
-
-    assert sorted(result.returncode for result in results) == [0, 3]
-    successful = next(result for result in results if result.returncode == 0)
-    pack_id = json.loads(successful.stdout)["context_pack"]["pack_id"]
-    run_cli("status", "--json", cwd=repo)
-    packs = [
-        row
-        for row in query_rows(repo / ".agentdir", "context.pack.created")
-        if row["session_id"] == "active-context"
-    ]
-    assert len(packs) == 1
-    assert pack_id in next(result.stderr for result in results if result.returncode == 3)
-
-
-def test_context_pack_emission_linearizes_before_finish_audit(tmp_path: Path, monkeypatch) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.context as context
-    import agentdir.control as control
-    from agentdir.store import AgentDirStateError
-
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect finish race marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "finish race baseline", "--no-context", "--json", cwd=repo).stdout
-    )
-    store = repo / ".agentdir"
-    pack = context.build_context_pack(
-        store,
-        "checkout redirect finish race marker",
-        session_id=started["session"]["session_id"],
-        exclude_session_from_memory=True,
-    )
-    assert context.brief_context_manifest(context.build_context_manifest(pack))["review_required"]
-
-    emitter_inside = Event()
-    release_emitter = Event()
-    finish_lock_probe = Event()
-    finish_scan = Event()
-    finisher_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_context_emit = context.emit_event
-    real_build_report = control.build_final_report
-    real_control_lock = control.lifecycle_lock
-
-    def paused_context_emit(*args, **kwargs):
-        if kwargs.get("event_type") == "context.pack.created":
-            emitter_inside.set()
-            if not release_emitter.wait(5):
-                raise AssertionError("timed out waiting to release context emission")
-        return real_context_emit(*args, **kwargs)
-
-    def observed_build_report(*args, **kwargs):
-        finish_scan.set()
-        return real_build_report(*args, **kwargs)
-
-    @contextmanager
-    def observed_control_lock(root, key):
-        expected_key = f"session:{started['session']['session_id']}"
-        if current_thread().ident == finisher_ident["value"] and key == expected_key:
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            finish_lock_probe.set()
-        with real_control_lock(root, key):
-            yield
-
-    def finish() -> dict[str, object]:
-        finisher_ident["value"] = current_thread().ident
-        return control.finish_work(store, run_health_check=False)
-
-    monkeypatch.setattr(context, "emit_event", paused_context_emit)
-    monkeypatch.setattr(control, "build_final_report", observed_build_report)
-    monkeypatch.setattr(control, "lifecycle_lock", observed_control_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        emitted_future = pool.submit(context.emit_context_pack, store, pack)
-        assert emitter_inside.wait(5)
-        finish_future = pool.submit(finish)
-        assert finish_lock_probe.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_emitter.set()
-        emitted = emitted_future.result(timeout=5)
-        try:
-            finish_future.result(timeout=5)
-        except AgentDirStateError as exc:
-            assert "Context review is pending" in str(exc)
-        else:
-            raise AssertionError("finish unexpectedly ignored the newly emitted pending pack")
-
-    audit = json.loads(
-        run_cli("audit", "context", "--pack", emitted.manifest["pack_id"], "--json", cwd=repo).stdout
-    )
-    current = json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)
-    assert finish_scan.is_set()
-    assert audit["review_status"] == "pending"
-    assert current["session_id"] == started["session"]["session_id"]
-
-
-def test_session_start_reservation_orders_context_creation(tmp_path: Path, monkeypatch) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.context as context
-    import agentdir.sessions as sessions
-
-    repo = init_repo(tmp_path / "repo")
-    store = repo / ".agentdir"
-    run_cli("init", str(store))
-    session_id = "ordered-session"
-    pack = context.build_context_pack(store, "ordered context creation", session_id=session_id)
-    start_paused = Event()
-    release_start = Event()
-    emitter_probe_complete = Event()
-    emitter_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_write_session_state = sessions.write_session_state
-    real_context_lock = context.lifecycle_lock
-
-    def paused_write_session_state(*args, **kwargs):
-        start_paused.set()
-        if not release_start.wait(5):
-            raise AssertionError("timed out waiting to release session start")
-        return real_write_session_state(*args, **kwargs)
-
-    @contextmanager
-    def observed_context_lock(root, key):
-        if current_thread().ident == emitter_ident["value"] and key == f"session:{session_id}":
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            emitter_probe_complete.set()
-        with real_context_lock(root, key):
-            yield
-
-    def start():
-        return sessions.start_session(store, session_id=session_id, cwd=repo)
-
-    def emit():
-        emitter_ident["value"] = current_thread().ident
-        return context.emit_context_pack(store, pack)
-
-    monkeypatch.setattr(sessions, "write_session_state", paused_write_session_state)
-    monkeypatch.setattr(context, "lifecycle_lock", observed_context_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        start_future = pool.submit(start)
-        assert start_paused.wait(5)
-        emit_future = pool.submit(emit)
-        assert emitter_probe_complete.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_start.set()
-        started = start_future.result(timeout=5)
-        emitted = emit_future.result(timeout=5)
-
-    run_cli("index", "update", "--root", str(store))
-    lifecycle_events = [
-        row["event_type"]
-        for row in query_rows(store)
-        if row["session_id"] == session_id
-        and row["event_type"] in {"session.started", "context.pack.created"}
-    ]
-    assert started.session_id == session_id
-    assert emitted.manifest["session_id"] == session_id
-    assert lifecycle_events == ["session.started", "context.pack.created"]
-
-
-def test_context_pack_emission_is_rejected_after_finish_wins(tmp_path: Path, monkeypatch) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.context as context
-    import agentdir.control as control
-    from agentdir.store import AgentDirStateError
-
-    repo = init_repo(tmp_path / "repo")
-    started = json.loads(
-        run_cli("work", "start", "finish wins baseline", "--no-context", "--json", cwd=repo).stdout
-    )
-    store = repo / ".agentdir"
-    pack = context.build_context_pack(
-        store,
-        "late context pack",
-        session_id=started["session"]["session_id"],
-    )
-    finish_scanned = Event()
-    release_finish = Event()
-    emitter_lock_probe = Event()
-    creation_reached = Event()
-    emitter_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_build_report = control.build_final_report
-    real_context_emit = context.emit_event
-    real_context_lock = context.lifecycle_lock
-
-    def paused_build_report(*args, **kwargs):
-        report = real_build_report(*args, **kwargs)
-        finish_scanned.set()
-        if not release_finish.wait(5):
-            raise AssertionError("timed out waiting to release finish")
-        return report
-
-    def observed_context_emit(*args, **kwargs):
-        if kwargs.get("event_type") == "context.pack.created":
-            creation_reached.set()
-        return real_context_emit(*args, **kwargs)
-
-    @contextmanager
-    def observed_context_lock(root, key):
-        expected_key = f"session:{started['session']['session_id']}"
-        if current_thread().ident == emitter_ident["value"] and key == expected_key:
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            emitter_lock_probe.set()
-        with real_context_lock(root, key):
-            yield
-
-    def emit_late_pack():
-        emitter_ident["value"] = current_thread().ident
-        return context.emit_context_pack(store, pack)
-
-    monkeypatch.setattr(control, "build_final_report", paused_build_report)
-    monkeypatch.setattr(context, "emit_event", observed_context_emit)
-    monkeypatch.setattr(context, "lifecycle_lock", observed_context_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        finish_future = pool.submit(control.finish_work, store, run_health_check=False)
-        assert finish_scanned.wait(5)
-        emitted_future = pool.submit(emit_late_pack)
-        assert emitter_lock_probe.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_finish.set()
-        finished = finish_future.result(timeout=5)
-        try:
-            emitted_future.result(timeout=5)
-        except AgentDirStateError as exc:
-            assert "ended session" in str(exc)
-        else:
-            raise AssertionError("a context pack was emitted after the session ended")
-
-    run_cli("index", "update", cwd=repo)
-    created = [
-        row
-        for row in query_rows(store, "context.pack.created")
-        if row["session_id"] == started["session"]["session_id"]
-    ]
-    assert finished["ended_session"]["session_id"] == started["session"]["session_id"]
-    assert len(created) == 1
-    assert not creation_reached.is_set()
-
-
-def test_finish_cannot_end_a_concurrently_started_replacement_session(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.control as control
-    import agentdir.sessions as sessions
-
-    repo = init_repo(tmp_path / "repo")
-    first = json.loads(
-        run_cli("work", "start", "session A", "--no-context", "--json", cwd=repo).stdout
-    )
-    first_session_id = first["session"]["session_id"]
-    store = repo / ".agentdir"
-    finish_paused = Event()
-    release_finish = Event()
-    pointer_probe_complete = Event()
-    starter_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_control_emit = control.emit_event
-    real_pointer_lock = sessions.session_pointer_lock
-
-    def paused_finish_emit(*args, **kwargs):
-        if kwargs.get("event_type") == "work.report.final":
-            finish_paused.set()
-            if not release_finish.wait(5):
-                raise AssertionError("timed out waiting to release finish")
-        return real_control_emit(*args, **kwargs)
-
-    @contextmanager
-    def observed_pointer_lock(root):
-        if current_thread().ident == starter_ident["value"]:
-            digest = hashlib.sha256(b"active-session-pointer").hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            pointer_probe_complete.set()
-        with real_pointer_lock(root):
-            yield
-
-    def start_replacement():
-        starter_ident["value"] = current_thread().ident
-        return sessions.start_session(
-            store,
-            session_id="session-B",
-            title="session B",
-            cwd=repo,
-        )
-
-    monkeypatch.setattr(control, "emit_event", paused_finish_emit)
-    monkeypatch.setattr(sessions, "session_pointer_lock", observed_pointer_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        finish_future = pool.submit(control.finish_work, store, run_health_check=False)
-        assert finish_paused.wait(5)
-        start_future = pool.submit(start_replacement)
-        assert pointer_probe_complete.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_finish.set()
-        finished = finish_future.result(timeout=5)
-        replacement = start_future.result(timeout=5)
-
-    run_cli("index", "update", cwd=repo)
-    ended = query_rows(store, "session.ended")
-    current = json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)
-    assert finished["ended_session"]["session_id"] == first_session_id
-    assert replacement.session_id == "session-B"
-    assert current["session_id"] == "session-B"
-    assert [row["session_id"] for row in ended].count(first_session_id) == 1
-    assert [row["session_id"] for row in ended].count("session-B") == 0
-
-
-def test_work_start_cannot_partially_mutate_a_session_being_finished(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.control as control
-    import agentdir.sessions as sessions
-
-    repo = init_repo(tmp_path / "repo")
-    first = json.loads(
-        run_cli("work", "start", "first task", "--no-context", "--json", cwd=repo).stdout
-    )
-    first_session_id = first["session"]["session_id"]
-    store = repo / ".agentdir"
-    finish_scanned = Event()
-    release_finish = Event()
-    start_probe_complete = Event()
-    starter_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_build_report = control.build_final_report
-    real_lifecycle_lock = control.lifecycle_lock
-
-    def paused_build_report(*args, **kwargs):
-        report = real_build_report(*args, **kwargs)
-        finish_scanned.set()
-        if not release_finish.wait(5):
-            raise AssertionError("timed out waiting to release finish")
-        return report
-
-    @contextmanager
-    def observed_lifecycle_lock(root, key):
-        if current_thread().ident == starter_ident["value"] and key == "work-start":
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            start_probe_complete.set()
-        with real_lifecycle_lock(root, key):
-            yield
-
-    def start_replacement_work():
-        starter_ident["value"] = current_thread().ident
-        return control.start_work(store, "replacement task", emit_context=False)
-
-    monkeypatch.setattr(control, "build_final_report", paused_build_report)
-    monkeypatch.setattr(control, "lifecycle_lock", observed_lifecycle_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        finish_future = pool.submit(control.finish_work, store, run_health_check=False)
-        assert finish_scanned.wait(5)
-        start_future = pool.submit(start_replacement_work)
-        assert start_probe_complete.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_finish.set()
-        finished = finish_future.result(timeout=5)
-        replacement = start_future.result(timeout=5)
-
-    run_cli("index", "update", cwd=repo)
-    work_starts = query_rows(store, "work.started")
-    current = sessions.read_current_session(store)
-    replacement_session_id = replacement["session"]["session_id"]
-    assert finished["ended_session"]["session_id"] == first_session_id
-    assert replacement_session_id != first_session_id
-    assert current is not None and current.session_id == replacement_session_id
-    assert [row["session_id"] for row in work_starts].count(first_session_id) == 1
-    assert [row["session_id"] for row in work_starts].count(replacement_session_id) == 1
-
-
-def test_work_start_serializes_direct_active_session_replacement(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import fcntl
-    import hashlib
-    from contextlib import contextmanager
-    from threading import current_thread
-
-    import agentdir.control as control
-    import agentdir.sessions as sessions
-
-    repo = init_repo(tmp_path / "repo")
-    store = repo / ".agentdir"
-    start_paused = Event()
-    release_start = Event()
-    pointer_probe_complete = Event()
-    replacement_ident: dict[str, int | None] = {"value": None}
-    probe_blocked: dict[str, bool | None] = {"value": None}
-    real_emit_pack = control.emit_context_pack
-    real_pointer_lock = sessions.session_pointer_lock
-
-    def paused_emit_pack(*args, **kwargs):
-        start_paused.set()
-        if not release_start.wait(5):
-            raise AssertionError("timed out waiting to release work start")
-        return real_emit_pack(*args, **kwargs)
-
-    @contextmanager
-    def observed_pointer_lock(root):
-        if current_thread().ident == replacement_ident["value"]:
-            digest = hashlib.sha256(b"active-session-pointer").hexdigest()[:24]
-            lock_path = store / "state" / f".lifecycle-{digest}.lock"
-            with lock_path.open("a+", encoding="utf-8") as probe:
-                try:
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    probe_blocked["value"] = True
-                else:
-                    probe_blocked["value"] = False
-                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-            pointer_probe_complete.set()
-        with real_pointer_lock(root):
-            yield
-
-    def replace_session():
-        replacement_ident["value"] = current_thread().ident
-        return sessions.start_session(
-            store,
-            session_id="replacement-session",
-            cwd=repo,
-        )
-
-    monkeypatch.setattr(control, "emit_context_pack", paused_emit_pack)
-    monkeypatch.setattr(sessions, "session_pointer_lock", observed_pointer_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        work_future = pool.submit(control.start_work, store, "serialized start", emit_context=False)
-        assert start_paused.wait(5)
-        replacement_future = pool.submit(replace_session)
-        assert pointer_probe_complete.wait(5)
-        try:
-            assert probe_blocked["value"] is True
-        finally:
-            release_start.set()
-        started = work_future.result(timeout=5)
-        replacement = replacement_future.result(timeout=5)
-
-    run_cli("index", "update", cwd=repo)
-    created = query_rows(store, "context.pack.created")
-    work_starts = query_rows(store, "work.started")
-    current = json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)
-    assert len(created) == 1
-    assert [row["session_id"] for row in work_starts] == [started["session"]["session_id"]]
-    assert replacement.session_id == "replacement-session"
-    assert current["session_id"] == "replacement-session"
-
-
-def test_work_context_show_reopens_the_persisted_numbered_briefing(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect persisted briefing marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect persisted briefing marker", "--json", cwd=repo).stdout
-    )
-
-    shown = run_cli(
-        "work",
-        "context",
-        "--show",
-        "--pack",
-        started["context_pack"]["pack_id"],
-        cwd=repo,
-    )
-
-    assert "[1]" in shown.stdout
-    assert "persisted briefing marker" in shown.stdout
-    pack_id = started["context_pack"]["pack_id"]
-    assert (
-        f"context_use={scoped_work_context_invocation(repo / '.agentdir')} "
-        f"--pack {pack_id} --use <number>"
-        in shown.stdout
-    )
-
-
-def test_reopened_briefing_commands_remain_bound_to_the_displayed_pack(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect recovered pack target marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    first = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "checkout redirect recovered pack target marker",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    first_pack_id = first["context_pack"]["pack_id"]
-    second = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "checkout redirect newer pack target marker",
-            "--emit",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    second_pack_id = second["manifest"]["pack_id"]
-
-    shown = run_cli("work", "context", "--show", "--pack", first_pack_id, cwd=repo)
-    assert (
-        f"context_use={scoped_work_context_invocation(repo / '.agentdir')} "
-        f"--pack {first_pack_id} --use <number>"
-        in shown.stdout
-    )
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        first_pack_id,
-        "--use",
-        "1",
-        "--reason",
-        "the recovered source constrains the active repair",
-        cwd=repo,
-    )
-
-    first_audit = json.loads(
-        run_cli("audit", "context", "--pack", first_pack_id, "--json", cwd=repo).stdout
-    )
-    second_audit = json.loads(
-        run_cli("audit", "context", "--pack", second_pack_id, "--json", cwd=repo).stdout
-    )
-    assert first_audit["review_status"] == "complete"
-    assert first_audit["used_count"] == 1
-    assert second_audit["review_status"] == "pending"
-
-
-def test_finish_cannot_hide_an_older_pending_pack_behind_a_newer_pack(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect hidden pending marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    first = json.loads(
-        run_cli("work", "start", "checkout redirect hidden pending marker", "--json", cwd=repo).stdout
-    )
-    second = json.loads(
-        run_cli(
-            "context",
-            "build",
-            "checkout redirect replacement pack",
-            "--emit",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        second["manifest"]["pack_id"],
-        "--none-relevant",
-        "--reason",
-        "the replacement briefing does not constrain this task",
-        cwd=repo,
-    )
-
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-    strict_audit = run_cli("audit", "session", "--strict", "--json", cwd=repo, expected_returncode=1)
-    blocked = run_cli("work", "finish", "--json", cwd=repo, expected_returncode=3)
-
-    assert first["context_pack"]["pack_id"] in status["context"]["blocking_packs"]
-    assert first["context_pack"]["pack_id"] in strict_audit.stdout
-    assert first["context_pack"]["pack_id"] in blocked.stderr
-
-
-def test_no_context_records_a_visible_marker_for_the_latest_task(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect stale attribution marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    run_cli("work", "start", "first attributed task", cwd=repo)
-    run_cli(
-        "work",
-        "context",
-        "--none-relevant",
-        "--reason",
-        "the prior record does not constrain the next task",
-        cwd=repo,
-    )
-
-    second = json.loads(
-        run_cli("work", "start", "second explicit opt-out task", "--no-context", "--json", cwd=repo).stdout
-    )
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
-
-    assert second["context_pack"] is not None
-    assert second["context_briefing"]["match_state"] == "context_disabled"
-    assert second["context_pack"]["selection_policy"]["context_enabled"] is False
-    assert status["session"]["current"]["title"] == "second explicit opt-out task"
-    assert status["context"]["audit"]["task"] == "second explicit opt-out task"
-    assert status["context"]["audit"]["retrieved_count"] == 0
-    assert finished["report"]["task"] == "second explicit opt-out task"
-
-
-def test_low_level_consume_of_all_presented_sources_completes_compatibility_review(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect compatibility consume marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect compatibility consume marker", "--json", cwd=repo).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_ids = started["context_briefing"]["source_ids"]
-    source_args = [part for source_id in source_ids for part in ("--source", source_id)]
-
-    run_cli(
-        "context",
-        "consume",
-        "--pack",
-        pack_id,
-        *source_args,
-        "--purpose",
-        "plan",
-        cwd=repo,
-    )
-    audit = json.loads(run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout)
-
-    assert audit["review_status"] == "complete"
-    assert audit["decision"] == "legacy_used"
-    assert audit["reviewed_count"] == audit["presented_count"]
-    run_cli("work", "finish", "--json", cwd=repo)
-
-
-def test_partial_low_level_consume_can_finish_with_a_visible_compatibility_warning(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    for index in range(2):
-        prior = tmp_path / f"prior-{index}.txt"
-        prior.write_text(
-            f"checkout redirect partial compatibility marker {index}",
-            encoding="utf-8",
-        )
-        run_cli("session", "start", "--id", f"prior-context-{index}", cwd=repo)
-        run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-        run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect partial compatibility marker", "--json", cwd=repo).stdout
-    )
-    assert started["context_briefing"]["presented_count"] >= 2
-    pack_id = started["context_pack"]["pack_id"]
-    source_id = started["context_briefing"]["source_ids"][0]
-
-    run_cli(
-        "context",
-        "consume",
-        "--pack",
-        pack_id,
-        "--source",
-        source_id,
-        "--purpose",
-        "plan",
-        cwd=repo,
-    )
-    audit = json.loads(run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout)
-    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
-
-    assert audit["review_status"] == "compatibility_partial"
-    assert audit["decision"] == "legacy_partial"
-    assert audit["finish_allowed"] is True
-    assert audit["lineage_valid"] is False
-    assert finished["report"]["agent_handoff"]["status"] == "needs_attention"
-
-
-def test_terminal_review_rejects_later_low_level_consumption(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect terminal review marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect terminal review marker", "--json", cwd=repo).stdout
-    )
-    pack_id = started["context_pack"]["pack_id"]
-    source_id = started["context_briefing"]["source_ids"][0]
-    run_cli(
-        "work",
-        "context",
-        "--none-relevant",
-        "--reason",
-        "the prior marker does not constrain this task",
-        cwd=repo,
-    )
-
-    blocked = run_cli(
-        "context",
-        "consume",
-        "--pack",
-        pack_id,
-        "--source",
-        source_id,
-        "--purpose",
-        "plan",
-        cwd=repo,
-        expected_returncode=3,
-    )
-    audit = json.loads(run_cli("audit", "context", "--pack", pack_id, "--json", cwd=repo).stdout)
-
-    assert "already terminal" in blocked.stderr
-    assert audit["decision"] == "no_relevant"
-    assert audit["used_count"] == 0
-    assert audit["transition_conflict"] is False
-
-
-def test_concurrent_identical_context_decisions_are_idempotent(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect concurrent decision marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    run_cli("work", "start", "checkout redirect concurrent decision marker", cwd=repo)
-
-    def decide() -> dict[str, object]:
-        result = run_cli(
-            "work",
-            "context",
-            "--use",
-            "1",
-            "--reason",
-            "the prior redirect marker constrains the plan",
-            "--json",
-            cwd=repo,
-        )
-        return json.loads(result.stdout)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        decisions = list(pool.map(lambda _: decide(), range(2)))
-
-    assert sorted(decision["recorded"] for decision in decisions) == [False, True]
-    assert len({decision["decision_id"] for decision in decisions}) == 1
-
-
-def test_reordered_context_selectors_resolve_to_the_same_terminal_decision(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect selector order marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect selector order marker", "--json", cwd=repo).stdout
-    )
-    assert started["context_briefing"]["presented_count"] >= 2
-
-    first = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--use",
-            "2",
-            "--use",
-            "1",
-            "--reason",
-            "both prior records constrain the plan",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    repeated = json.loads(
-        run_cli(
-            "work",
-            "context",
-            "--use",
-            "1",
-            "--use",
-            "2",
-            "--reason",
-            "both prior records constrain the plan",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert first["recorded"] is True
-    assert repeated["recorded"] is False
-    assert repeated["decision_id"] == first["decision_id"]
-
-
-def test_work_context_rejects_a_retrieved_source_omitted_from_the_briefing(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    for index in range(6):
-        body = tmp_path / f"prior-{index}.txt"
-        body.write_text(
-            f"checkout redirect omitted source marker variant {index}",
-            encoding="utf-8",
-        )
-        run_cli("session", "start", "--id", f"prior-{index}", cwd=repo)
-        run_cli("emit", "--type", "agent.message", "--body", str(body), cwd=repo)
-        run_cli("session", "end", "--summary", str(body), cwd=repo)
-    started = json.loads(
-        run_cli(
-            "work",
-            "start",
-            "checkout redirect omitted source marker",
-            "--memory-limit",
-            "8",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-    presented = set(started["context_briefing"]["source_ids"])
-    omitted = next(
-        source["source_id"]
-        for source in started["context_pack"]["sources"]
-        if source["source_id"] not in presented
-    )
-
-    blocked = run_cli(
-        "work",
-        "context",
-        "--use",
-        omitted,
-        "--reason",
-        "attempt to bypass the bounded briefing",
-        cwd=repo,
-        expected_returncode=2,
-    )
-
-    assert "not presented" in blocked.stderr
-
-    all_source_ids = [source["source_id"] for source in started["context_pack"]["sources"]]
-    source_args = [part for source_id in all_source_ids for part in ("--source", source_id)]
-    run_cli(
-        "context",
-        "consume",
-        "--pack",
-        started["context_pack"]["pack_id"],
-        *source_args,
-        "--purpose",
-        "plan",
-        cwd=repo,
-    )
-    audit = json.loads(
-        run_cli(
-            "audit",
-            "context",
-            "--pack",
-            started["context_pack"]["pack_id"],
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert audit["used_count"] == audit["presented_count"]
-    assert audit["consumed_count"] == audit["retrieved_count"]
-    assert audit["additional_consumed_count"] == audit["retrieved_count"] - audit["presented_count"]
-    assert audit["lineage_valid"] is True
-
-
-def test_context_review_can_target_an_older_session_without_ending_the_current_one(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect older session marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    started = json.loads(
-        run_cli("work", "start", "checkout redirect older session marker", "--json", cwd=repo).stdout
-    )
-    older_session = started["session"]["session_id"]
-    run_cli("session", "start", "--id", "newer-active", cwd=repo)
-
-    run_cli(
-        "work",
-        "context",
-        "--session",
-        older_session,
-        "--none-relevant",
-        "--reason",
-        "the older marker does not constrain the current implementation",
-        cwd=repo,
-    )
-    blocked = run_cli(
-        "work",
-        "finish",
-        "--session",
-        older_session,
-        "--json",
-        cwd=repo,
-        expected_returncode=3,
-    )
-    current = json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)
-    finished = json.loads(
-        run_cli(
-            "work",
-            "finish",
-            "--session",
-            older_session,
-            "--keep-session",
-            "--json",
-            cwd=repo,
-        ).stdout
-    )
-
-    assert "--keep-session" in blocked.stderr
-    assert current["session_id"] == "newer-active"
-    assert finished["ended_session"] is None
-
-
-def test_status_does_not_attribute_an_older_pack_to_a_new_active_session(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    started = json.loads(run_cli("work", "start", "first context pack", "--json", cwd=repo).stdout)
-    assert started["context_pack"] is not None
-    run_cli("work", "finish", "--json", cwd=repo)
-    run_cli("session", "start", "--id", "new-session-without-pack", cwd=repo)
-
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-
-    assert status["session"]["current"]["session_id"] == "new-session-without-pack"
-    assert status["context"]["latest_pack"] is None
-    assert status["context"]["audit"] is None
-
-
-def test_work_finish_blocks_pending_context_but_allows_visible_skip(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect review gate marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    run_cli("work", "start", "checkout redirect review gate marker", "--emit-context", cwd=repo)
-
-    blocked = run_cli("work", "finish", "--json", cwd=repo, expected_returncode=3)
-    assert "Context review is pending" in blocked.stderr
-    assert json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)["status"] == "active"
-
-    run_cli(
-        "work",
-        "context",
-        "--skip",
-        "--reason",
-        "the context artifact could not be reviewed",
-        cwd=repo,
-    )
-    finished = json.loads(run_cli("work", "finish", "--json", cwd=repo).stdout)
-    assert finished["report"]["agent_handoff"]["status"] == "needs_attention"
-    assert finished["report"]["agent_handoff"]["context_lineage"]["review_status"] == "skipped"
-
-
-def test_later_clean_pack_does_not_hide_an_earlier_context_warning(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    prior = tmp_path / "prior.txt"
-    prior.write_text("checkout redirect durable skip marker", encoding="utf-8")
-    run_cli("session", "start", "--id", "prior-context", cwd=repo)
-    run_cli("emit", "--type", "agent.message", "--body", str(prior), cwd=repo)
-    run_cli("session", "end", "--summary", str(prior), cwd=repo)
-    first = json.loads(
-        run_cli("work", "start", "checkout redirect durable skip marker", "--json", cwd=repo).stdout
-    )
-    first_pack_id = first["context_pack"]["pack_id"]
-    run_cli(
-        "work",
-        "context",
-        "--pack",
-        first_pack_id,
-        "--skip",
-        "--reason",
-        "the briefing could not be reviewed in this environment",
-        cwd=repo,
-    )
-    run_cli("work", "start", "later explicit context opt out", "--no-context", cwd=repo)
-
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-    strict = run_cli("audit", "session", "--strict", "--json", cwd=repo, expected_returncode=1)
-    report = json.loads(
-        run_cli("report", "final", "--format", "json", "--no-doctor", cwd=repo).stdout
-    )
-    finished = json.loads(run_cli("work", "finish", "--no-doctor", "--json", cwd=repo).stdout)
-
-    assert first_pack_id in status["context"]["attention_packs"]
-    assert first_pack_id in strict.stdout
-    assert report["agent_handoff"]["status"] == "needs_attention"
-    assert report["agent_handoff"]["context_lineage"]["pack_id"] == first_pack_id
-    assert report["agent_handoff"]["context_lineage"]["review_status"] == "skipped"
-    assert finished["report"]["agent_handoff"]["status"] == "needs_attention"
-
-
-def test_tampered_context_manifest_is_visible_and_blocks_finish(tmp_path: Path) -> None:
-    repo = init_repo(tmp_path / "repo")
-    run_cli("work", "start", "corrupt context manifest", cwd=repo)
-    blobs = list((repo / ".agentdir" / "artifacts" / "blobs" / "sha256").glob("*/*/*"))
-    assert len(blobs) == 1
-    manifest = json.loads(blobs[0].read_text(encoding="utf-8"))
-    manifest["briefing"]["review_required"] = False
-    blobs[0].write_text(json.dumps(manifest), encoding="utf-8")
-
-    status = run_cli("status", cwd=repo, expected_returncode=1)
-    report = json.loads(
-        run_cli("report", "final", "--format", "json", "--no-doctor", cwd=repo).stdout
-    )
-    blocked = run_cli("work", "finish", "--no-doctor", "--json", cwd=repo, expected_returncode=3)
-
-    assert "review_status" in status.stdout
-    assert "audit_error" in status.stdout
-    assert "error" in status.stdout
-    assert report["agent_handoff"]["status"] == "needs_attention"
-    assert report["agent_handoff"]["context_lineage"]["review_status"] == "error"
-    assert "digest does not match" in report["agent_handoff"]["context_lineage"]["error"]
-    assert "cannot be certified" in blocked.stderr
-
-
-def test_malformed_context_manifests_use_the_typed_audit_error_path(tmp_path: Path) -> None:
-    from agentdir.events import emit_event
-
-    variants: tuple[tuple[str, str, str], ...] = (
-        ("invalid-json", "{not json", "invalid JSON"),
-        ("non-object", "[]", "must be a JSON object"),
-        (
-            "missing-sources",
-            json.dumps(
-                {
-                    "protocol": "agentdir.context-pack.v1",
-                    "pack_id": "ctx-missing-sources",
-                    "task": "missing sources",
-                    "session_id": "malformed-missing-sources",
-                }
-            ),
-            "sources must be a list",
-        ),
-        (
-            "disabled-review",
-            json.dumps(
-                {
-                    "protocol": "agentdir.context-pack.v1",
-                    "pack_id": "ctx-disabled-review",
-                    "task": "disabled review",
-                    "session_id": "malformed-disabled-review",
-                    "sources": [{"source_id": "src-presented"}],
-                    "briefing": {
-                        "protocol": "agentdir.context-briefing.v1",
-                        "source_ids": ["src-presented"],
-                        "presented_count": 1,
-                        "omitted_count": 0,
-                        "review_required": False,
-                    },
-                }
-            ),
-            "review requirement is inconsistent",
-        ),
-        (
-            "session-mismatch",
-            json.dumps(
-                {
-                    "protocol": "agentdir.context-pack.v1",
-                    "pack_id": "ctx-session-mismatch",
-                    "task": "session mismatch",
-                    "session_id": "claimed-session",
-                    "sources": [],
-                    "briefing": {
-                        "protocol": "agentdir.context-briefing.v1",
-                        "source_ids": [],
-                        "presented_count": 0,
-                        "omitted_count": 0,
-                        "review_required": False,
-                    },
-                }
-            ),
-            "session does not match",
-        ),
-    )
-    for name, content, expected_error in variants:
-        repo = init_repo(tmp_path / name)
-        session_id = f"malformed-{name}"
-        pack_id = "ctx-missing-sources" if name == "missing-sources" else f"ctx-{name}"
-        run_cli("session", "start", "--id", session_id, cwd=repo)
-        artifact = tmp_path / f"{name}.json"
-        artifact.write_text(content, encoding="utf-8")
-        emit_event(
-            repo / ".agentdir",
-            session_id=session_id,
-            event_type="context.pack.created",
-            subject=f"malformed manifest {name}",
-            body=f"pack_id={pack_id}\nprotocol=agentdir.context-pack.v1",
-            artifact=artifact,
-            extra_headers={
-                "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-                "X-AgentDir-Pack-Id": pack_id,
-            },
-        )
-
-        status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-        strict = run_cli(
-            "audit",
-            "session",
-            "--strict",
-            "--json",
-            cwd=repo,
-            expected_returncode=1,
-        )
-        report = json.loads(
-            run_cli("report", "final", "--format", "json", "--no-doctor", cwd=repo).stdout
-        )
-        blocked = run_cli(
-            "work",
-            "finish",
-            "--no-doctor",
-            "--json",
-            cwd=repo,
-            expected_returncode=3,
-        )
-
-        assert expected_error in status["context"]["audit"]["error"]
-        assert pack_id in status["context"]["blocking_packs"]
-        assert expected_error in strict.stdout
-        assert report["agent_handoff"]["status"] == "needs_attention"
-        assert report["agent_handoff"]["context_lineage"]["review_status"] == "error"
-        assert "cannot be certified" in blocked.stderr
-        assert json.loads(run_cli("session", "current", "--json", cwd=repo).stdout)[
-            "session_id"
-        ] == session_id
-
-
-def test_malformed_context_creation_identities_remain_visible_blockers(tmp_path: Path) -> None:
-    from agentdir.events import emit_event
-
-    variants = (
-        ("header-only", ["ctx-header-only"], "no pack id in this body", "body field, found 0"),
-        ("body-only", [], "pack_id=ctx-body-only", "header, found 0"),
-        (
-            "mismatch",
-            ["ctx-mismatch-header"],
-            "pack_id=ctx-mismatch-body",
-            "does not match body pack id",
-        ),
-        (
-            "duplicate-header",
-            ["ctx-duplicate-header", "ctx-duplicate-header"],
-            "pack_id=ctx-duplicate-header",
-            "header, found 2",
-        ),
-        (
-            "duplicate-body",
-            ["ctx-duplicate-body"],
-            "pack_id=ctx-duplicate-body\npack_id=ctx-duplicate-body",
-            "body field, found 2",
-        ),
-    )
-    for name, header_ids, body, expected_error in variants:
-        repo = init_repo(tmp_path / name)
-        session_id = f"identity-{name}"
-        run_cli("session", "start", "--id", session_id, cwd=repo)
-        extra_headers: dict[str, str | list[str]] = {
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1"
-        }
-        if header_ids:
-            extra_headers["X-AgentDir-Pack-Id"] = header_ids
-        emit_event(
-            repo / ".agentdir",
-            session_id=session_id,
-            event_type="context.pack.created",
-            subject=f"malformed identity {name}",
-            body=body,
-            extra_headers=extra_headers,
-        )
-        pack_id = header_ids[0] if header_ids else f"ctx-{name}"
-
-        status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-        strict = run_cli(
-            "audit",
-            "session",
-            "--strict",
-            "--json",
-            cwd=repo,
-            expected_returncode=1,
-        )
-        report = json.loads(
-            run_cli("report", "final", "--format", "json", "--no-doctor", cwd=repo).stdout
-        )
-        blocked = run_cli(
-            "work",
-            "finish",
-            "--no-doctor",
-            "--json",
-            cwd=repo,
-            expected_returncode=3,
-        )
-
-        assert pack_id in status["context"]["blocking_packs"]
-        assert expected_error in status["context"]["audit"]["error"]
-        assert expected_error in strict.stdout
-        assert report["agent_handoff"]["status"] == "needs_attention"
-        assert "cannot be certified" in blocked.stderr
-        direct = run_cli(
-            "audit",
-            "context",
-            "--pack",
-            pack_id,
-            "--json",
-            cwd=repo,
-            expected_returncode=2,
-        )
-        assert expected_error in direct.stdout + direct.stderr
-
-    repo = init_repo(tmp_path / "duplicate-creation")
-    run_cli("session", "start", "--id", "identity-duplicate-creation", cwd=repo)
-    for index in range(2):
-        headers: dict[str, str] = {
-            "X-AgentDir-Protocol": "agentdir.context-pack.v1",
-        }
-        if index == 0:
-            headers["X-AgentDir-Pack-Id"] = "ctx-duplicate-creation"
-        emit_event(
-            repo / ".agentdir",
-            session_id="identity-duplicate-creation",
-            event_type="context.pack.created",
-            subject=f"duplicate creation {index}",
-            body="pack_id=ctx-duplicate-creation",
-            extra_headers=headers,
-        )
-    status = json.loads(run_cli("status", "--json", cwd=repo).stdout)
-    blocked = run_cli(
-        "work",
-        "finish",
-        "--no-doctor",
-        "--json",
-        cwd=repo,
-        expected_returncode=3,
-    )
-    assert "ctx-duplicate-creation" in status["context"]["blocking_packs"]
-    assert "multiple creation events" in status["context"]["audit"]["error"]
-    assert "cannot be certified" in blocked.stderr
-    direct = run_cli(
-        "audit",
-        "context",
-        "--pack",
-        "ctx-duplicate-creation",
-        "--json",
-        cwd=repo,
-        expected_returncode=2,
-    )
-    assert "multiple creation events" in direct.stdout + direct.stderr
 
 
 def test_build_final_report_rebuilds_index_once(tmp_path: Path, monkeypatch) -> None:

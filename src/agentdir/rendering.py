@@ -24,6 +24,7 @@ def rich_status(status: dict[str, Any]) -> str | None:
     table.add_row("root", "version", str(root.get("version") or ""))
     table.add_row("session", "active", _bool(session["active"]))
     table.add_row("session", "current", session["current"]["session_id"] if session.get("current") else "")
+    table.add_row("session", "latest", session["latest"]["session_id"] if session.get("latest") else "")
     table.add_row("context", "latest_pack", context["latest_pack"]["pack_id"] if context.get("latest_pack") else "")
     table.add_row("context", "pack_count", str(context.get("pack_count", 0)))
     table.add_row("context", "blocking_packs", ", ".join(context.get("blocking_packs") or []))
@@ -83,6 +84,7 @@ def rich_status(status: dict[str, Any]) -> str | None:
     elif context_audit.get("error"):
         table.add_row("context", "review_status", "error")
         table.add_row("context", "audit_error", str(context_audit["error"]))
+    table.add_row("evidence", "session", str(status["evidence"].get("session_id") or ""))
     table.add_row("evidence", "count", str(status["evidence"]["count"]))
     table.add_row("memory", "documents", str(memory.get("memory_documents", 0)))
     table.add_row("memory", "passages", str(memory.get("passages", 0)))

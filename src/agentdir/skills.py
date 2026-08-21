@@ -42,7 +42,10 @@ user when reporting evidence, blockers, or setup problems.
 - If the probe exits 3 with `Not an AgentDir root`, run
   `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked
   in a restricted linked worktree, rerun it with `--no-hooks`.
-- Then run `agentdir work start "<short task>"` yourself.
+- Then run `agentdir work start "<subsystem: distinctive behavior or constraint>"` yourself.
+  Keep the title concise but retrieval-specific: name the subsystem plus a
+  distinctive behavior or constraint, preserving request terms likely to match
+  prior work.
 - Retrieval is automatic. A configured and available FastEmbed backend uses
   fused semantic and lexical matching; otherwise AgentDir keeps the built-in
   hybrid path. Use the default invocation without a retrieval flag during normal work.
@@ -51,8 +54,9 @@ user when reporting evidence, blockers, or setup problems.
   command before marking a source used when
   implementation details, prior patterns, or exact evidence matter. Continue
   bounded sources with `--page <number>`; expansion itself is not a decision.
-- After reading and any useful expansion, close the review with
-  `agentdir work context --use <number> --reason "<how it helps>"` for useful sources, or
+- After reading and any useful expansion, close the review once. Repeat `--use`
+  in that command for every useful source:
+  `agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"`, or
   `agentdir work context --none-relevant --reason "<why>"` when none help. If
   review is impossible, use `--skip --reason "<why>"` so the final handoff keeps
   the gap visible. No decision is needed when no sources are presented.
@@ -121,7 +125,7 @@ user when reporting evidence, blockers, or setup problems.
 
 ## Finish
 
-- Before the final response, run `agentdir work finish --json` when practical.
+- Before the final response, run `agentdir work finish --json --brief` when practical.
   It emits a final report, checks evidence and context lineage, runs doctor, and
   ends the active session.
 - Use `agentdir report final --format json` to preview the same agent handoff
@@ -148,7 +152,11 @@ The agent owns the background recording flow:
 - If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`.
   If hook installation is blocked in a restricted linked worktree, rerun it
   with `--no-hooks`.
-- Then start non-trivial coding work with `agentdir work start "<short task>"`.
+- Then start non-trivial coding work yourself with
+  `agentdir work start "<subsystem: distinctive behavior or constraint>"`.
+  Keep the title concise but retrieval-specific: name the subsystem plus a
+  distinctive behavior or constraint, preserving request terms likely to match
+  prior work.
 - Retrieval is automatic. Configured FastEmbed stores use fused semantic and
   lexical matching; other stores keep the built-in hybrid path. Use the default
   invocation without a retrieval flag during normal work.
@@ -158,8 +166,9 @@ The agent owns the background recording flow:
   `agentdir work context --pack <pack-id> --expand <number>` command before marking a source
   used when implementation details, prior patterns, or exact evidence matter.
   Expansion is optional and does not replace the terminal review decision.
-- After reading and any useful expansion, record either useful numbered sources
-  with `agentdir work context --use <number> --reason "<how it helps>"` or a
+- After reading and any useful expansion, close the review once. Repeat `--use`
+  in that command for every useful numbered source:
+  `agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"`, or record a
   reasoned `agentdir work context --none-relevant --reason "<why>"` decision.
   Use `--skip --reason "<why>"` only when review is impossible; no decision is
   needed when the briefing presents no sources.
@@ -180,7 +189,7 @@ The agent owns the background recording flow:
   with `agentdir claim <family> --retract`.
 - Use `agentdir audit session` and `agentdir audit claims` before
   final claims when evidence support matters.
-- Before the final response, run `agentdir work finish --json` when practical.
+- Before the final response, run `agentdir work finish --json --brief` when practical.
   Use `agentdir report final --format json` to preview the same agent handoff
   without ending the session.
 - Read the `agent_handoff` object before making final verification claims.
@@ -764,8 +773,8 @@ The engineer installs or adopts it once; agents operate it during normal work.
 
 - Before starting work in an unfamiliar checkout, run `agentdir root --require --quiet`. Exit 0 means an initialized local or shared worktree store is ready; do not decide whether AgentDir is set up from the presence of `.agentdir` in this checkout.
 - If the probe exits 3, run `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked in a restricted linked worktree, rerun it with `--no-hooks`.
-- Then start non-trivial coding work with `agentdir work start "<short task>"`.
-- Read the printed context briefing, treat excerpts as previews, and prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before using a source when implementation details, prior patterns, or exact evidence matter. Then record either useful numbered sources with `agentdir work context --use <number> --reason "<how it helps>"` or `agentdir work context --none-relevant --reason "<why>"`. Use `--skip --reason "<why>"` only when review is impossible; no decision is needed when no sources are presented. Re-open lost output with `agentdir work context --show`.
+- Then start non-trivial coding work yourself with `agentdir work start "<subsystem: distinctive behavior or constraint>"`. Keep the title concise but retrieval-specific: name the subsystem plus a distinctive behavior or constraint, preserving request terms likely to match prior work.
+- Read the printed context briefing, treat excerpts as previews, and prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before using a source when implementation details, prior patterns, or exact evidence matter. Then close the review once: repeat `--use` in that command for every useful numbered source (`agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"`), or run `agentdir work context --none-relevant --reason "<why>"`. Use `--skip --reason "<why>"` only when review is impossible; no decision is needed when no sources are presented. Re-open lost output with `agentdir work context --show`.
 - Wrap evidence-bearing commands with `agentdir run -- <command>`.
 - Evidence includes tests, lint, typecheck, builds, doctor checks, release checks, reproduced failures, and diagnostics used in final claims.
 - Do not wrap routine exploration such as `rg`, `sed`, `nl`, `cat`, `ls`, `find`, or quick read-only `git status`.
@@ -773,7 +782,7 @@ The engineer installs or adopts it once; agents operate it during normal work.
 - Record each verification you will rely on with `agentdir claim <family> --passed|--failed`, e.g. `agentdir claim test --passed`. Families: test, lint, typecheck, build, doctor, release.
 - Claim what the evidence shows, including failures. `agentdir audit claims` compares recorded claims against evidence, so a claim that overstates a result is reported as contradicted.
 - Re-recording a family replaces its earlier claim; withdraw one made in error with `agentdir claim <family> --retract`.
-- Use `agentdir report final --format json` or `agentdir work finish --json` for the agent handoff object before final claims when practical.
+- Use `agentdir report final --format json` or `agentdir work finish --json --brief` for the agent handoff object before final claims when practical.
 - Do not record secrets, private keys, raw environment dumps, or credential-bearing command output."""
 
 RULESYNC_FRONTMATTER = """---

@@ -23,13 +23,13 @@ At the start of a non-trivial coding task in a software repository:
 
 1. Probe with `agentdir root --require --quiet`. Exit 0 means AgentDir found an initialized local or shared linked-worktree store. Do not decide whether AgentDir is set up from the presence of `.agentdir` in this checkout.
 2. If the probe exits 3 with `Not an AgentDir root`, run `agentdir adopt --if-needed --gitignore user`. If hook installation is blocked in a restricted linked worktree, rerun it with `--no-hooks`.
-3. Start the session yourself with `agentdir work start "<short task>"`; it records a bounded context briefing by default.
+3. Start the session yourself with `agentdir work start "<subsystem: distinctive behavior or constraint>"`; it records a bounded context briefing by default. Keep the title concise but retrieval-specific: name the subsystem plus a distinctive behavior or constraint, preserving request terms likely to match prior work.
    Retrieval is automatic: configured FastEmbed stores use fused semantic and
    lexical matching, while other stores keep the built-in hybrid path. Use the
    default invocation without a retrieval flag during normal work.
 4. Read its compact context briefing. If the original output is unavailable, re-open the persisted briefing with `agentdir work context --show` before deciding.
 5. Treat excerpts as previews. Prefer the printed `agentdir work context --pack <pack-id> --expand <number>` command before marking a source used when implementation details, prior patterns, or exact evidence matter. Continue long sources with `--page <number>`; expansion itself is not a decision.
-6. After reading and any useful expansion, record useful numbered sources with `agentdir work context --use <number> --reason "<how it helps>"`, or record `agentdir work context --none-relevant --reason "<why>"` when none help. Use `--skip --reason "<why>"` only when review is impossible. No decision is needed when no sources are presented.
+6. After reading and any useful expansion, close the review once. Repeat `--use` in that command for every useful source: `agentdir work context --use <number> [--use <number> ...] --reason "<how they help>"`. Use `agentdir work context --none-relevant --reason "<why>"` when none help, or `--skip --reason "<why>"` only when review is impossible. No decision is needed when no sources are presented.
 
 Use `agentdir status` when you need one compact view of the active session, evidence, memory, context, registered roots, and doctor health.
 
@@ -91,7 +91,7 @@ Families: `test`, `lint`, `typecheck`, `build`, `doctor`, `release`. Re-recordin
 
 ## Finish Work
 
-Before the final response, run `agentdir work finish --json` when practical. Read the `agent_handoff` object before making final verification claims.
+Before the final response, run `agentdir work finish --json --brief` when practical. Read the `agent_handoff` object before making final verification claims.
 
 If you need to preview the final handoff without ending the active session, run `agentdir report final --format json` instead.
 

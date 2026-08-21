@@ -406,8 +406,8 @@ agentdir root [--scope <scope>]
 agentdir status [--json]
 agentdir work start <task> [--no-context] [--federated] [--group <name>]
 agentdir work context --show [--session <id> | --pack <id>]
-agentdir work context (--use <number> | --none-relevant | --skip) --reason <text> [--purpose plan|tool|answer|handoff] [--session <id> | --pack <id>]
-agentdir work finish [--keep-session] [--json]
+agentdir work context (--use <number> [--use <number> ...] | --none-relevant | --skip) --reason <text> [--purpose plan|tool|answer|handoff] [--session <id> | --pack <id>]
+agentdir work finish [--keep-session] [--json] [--brief]
 agentdir report final [--format md|json]
 agentdir session ensure [--id <id>] [--title <title>]
 agentdir session start [--id <id>] [--title <title>]
@@ -457,6 +457,13 @@ agentdir summarize [--session <id>]
 agentdir evidence [--session <id>]
 agentdir doctor [--root <root>] [--scope <scope>]
 ```
+
+Session review commands resolve an omitted session to the active session, or
+to the latest completed session scoped to the calling worktree when no work is
+active. Status keeps the active pointer and this latest-session projection
+separate. Failed tool results are immutable history; a newer passing result in
+the same evidence family marks prior failures resolved for strict audit and
+handoff purposes without removing their records.
 
 `work start` is the agent-owned path. It ensures a session, emits a work-start
 event, and emits an auditable context pack with a persisted at-most-five-source
