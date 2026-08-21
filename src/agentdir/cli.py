@@ -2563,7 +2563,7 @@ def command_invocation(argv: list[str] | None = None) -> tuple[str, ...]:
     original = list(getattr(sys, "orig_argv", []) or [])
     for index in range(len(original) - 1):
         if original[index] == "-m" and original[index + 1] == "agentdir":
-            return tuple(original[: index + 2])
+            return (sys.executable, "-m", "agentdir")
     invoked = Path(sys.argv[0])
     if invoked.name == "agentdir":
         return (str(invoked),)

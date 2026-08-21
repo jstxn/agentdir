@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 
+from agentdir.cli import command_invocation
 from agentdir.context_expansion import (
     HEADER_VIEW_ID,
     HEADER_VIEW_SOURCE_SHA256,
@@ -107,6 +108,12 @@ def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
     assert result.stdout.strip() == "agentdir 0.9.0"
+
+
+def test_module_invocation_uses_the_runtime_interpreter(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "orig_argv", ["/different/python-launcher", "-m", "agentdir"])
+
+    assert command_invocation() == (sys.executable, "-m", "agentdir")
 
 
 def test_session_current_and_sessionless_emit_use_project_store(tmp_path: Path) -> None:
