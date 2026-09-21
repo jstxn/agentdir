@@ -24,6 +24,8 @@ agent operates AgentDir in the background and leaves behind a useful trail.
 
 ## Featured: Use Jev with Your Own Key
 
+[![Jev: Bring your own key](https://img.shields.io/badge/Jev-Bring_your_own_key-2563eb?style=flat-square)](https://docs.typesafe.ai/introduction)
+
 Get your API key from [TypeSafe](https://console.typesafe.ai), then run this in
 your project's Bash terminal:
 
