@@ -22,6 +22,21 @@ Engineers should not have to manually start sessions, wrap commands, collect
 evidence, or maintain agent memory by hand. Once a repository is adopted, the
 agent operates AgentDir in the background and leaves behind a useful trail.
 
+## Featured: Use Jev with Your Own Key
+
+Get your API key from [TypeSafe](https://console.typesafe.ai), then run this in
+your project's Bash terminal:
+
+```bash
+read -rsp "Your Jev API key: " TYPESAFE_API_KEY
+printf '\n'
+export TYPESAFE_API_KEY
+agentdir memory reranker configure jev
+```
+
+Launch your coding agent from that terminal. This opt-in feature sends redacted
+context to Jev. [Details and limits](#optional-jev-context-filtering).
+
 ## Why AgentDir Exists
 
 Agentic engineering has a trust gap.
@@ -508,6 +523,49 @@ store, the same `work start`, `context build`, `memory search`, and
 `memory explain` commands automatically fuse semantic and lexical scores while
 preserving both components in JSON output. Explicit `--retrieval` modes remain
 available for diagnostics and comparisons.
+
+### Optional Jev Context Filtering
+
+Jev can filter and rank local context for `work start` and `context build` after
+retrieval, before source diversification. It is disabled by default and needs
+no extra Python dependencies. Opt in separately for each store:
+
+```bash
+agentdir memory reranker configure jev
+# Supply TYPESAFE_API_KEY (or JEV_API_KEY) through your process environment.
+agentdir work start "make database migrations safe to roll back"
+
+# Restore fully local context selection.
+agentdir memory reranker configure none
+```
+
+Enabling this sends the task (up to 2048 UTF-8 bytes) and up to 20 local
+candidate passages (subject plus passage, up to 1024 bytes each) to
+`https://api.typesafe.ai/v1/systemone`. Common secret patterns and the configured
+API key are redacted before sending; redaction does not anonymize proprietary
+material. Keys are read only from the environment, never saved in configuration;
+AgentDir does not automatically load `.env` files. Review
+[TypeSafe's data handling](https://docs.typesafe.ai/models) before opting in.
+Federated/group context always uses local selection, even when Jev is enabled.
+
+The evaluated `jev-1.13.0` model and relevance cutoff of 0.7 are pinned. A
+successful response filters the shortlist and suppresses unscored recent
+summaries, while preserving source tiers, diversity limits, original retrieval
+scores, current evidence, and the agent's review requirement. Derived session
+summaries are not sent for scoring. Missing credentials, request failures,
+malformed responses, or the three-second worker deadline retain local selection
+and report a fallback reason. There are no retries. Work-start locking stays
+intact; a request may add up to the worker deadline to that locked operation.
+
+Context JSON and persisted manifests include `reranking` metadata: status,
+model, rubric version, cutoff, candidate identities and sanitized-text hashes,
+scores, usage, and latency. Each surviving source also has `rerank_score`;
+`memory_score` remains the original local score. Reviewing a saved pack or
+rebuilding the index makes no Jev request. `memory search` and `memory explain`
+continue to describe local retrieval. Jev scores are advisory and cannot verify
+evidence or mark a source read, used, or cited. The
+[synthetic evaluation](docs/investigations/2026-09-21-jev-evaluation.md) motivates
+this opt-in feature; validation on real session history is still needed.
 
 ### Federated Memory
 

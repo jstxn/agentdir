@@ -1044,6 +1044,15 @@ def configure_team_backend(root: str | Path, backend: str) -> dict[str, Any]:
     return memory_backend_status(root)
 
 
+def configure_context_reranker(root: str | Path, provider: str) -> dict[str, str]:
+    if provider not in {"jev", "none"}:
+        raise AgentDirError("Unknown context reranker; expected jev or none")
+    config = read_memory_config(root)
+    config["context_reranker"] = None if provider == "none" else provider
+    _write_memory_config(root, config)
+    return {"provider": provider}
+
+
 def explain_memory_match(
     root: str | Path,
     query: str,

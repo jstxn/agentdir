@@ -464,6 +464,9 @@ def format_work_start(
         lines.append(f"group={context['federation_group']}")
     if result.get("context_pack"):
         lines.append(f"context_pack={result['context_pack']['pack_id']}")
+    reranking = (result.get("context_pack") or {}).get("reranking") or {}
+    if reranking.get("provider") == "jev":
+        lines.append(f"context_reranker=jev status={reranking['status']} reason={reranking.get('reason') or 'none'}")
     briefing = result.get("context_briefing") or {}
     lines.extend(
         [

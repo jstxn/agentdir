@@ -137,6 +137,7 @@ def brief_context_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 "match_quality": source.get("match_quality") or "unknown",
                 "match_reasons": source.get("match_reasons") or [],
                 "memory_score": source.get("memory_score"),
+                "rerank_score": source.get("rerank_score"),
                 "retrieval_mode": source.get("retrieval_mode"),
                 "requested_retrieval_mode": source.get("requested_retrieval_mode"),
                 "semantic_score": source.get("semantic_score"),
@@ -578,7 +579,7 @@ def _prefer_context_sources(
                         CONTEXT_QUALITY_ORDER.index(
                             _source_match_quality(source, retrieval_query)
                         ),
-                        -float(source.get("memory_score") or 0.0),
+                        -_selection_score(source),
                     ),
                 ),
                 "_context_final_fallback": True,
@@ -596,9 +597,14 @@ def _prefer_context_sources(
         preferred,
         key=lambda source: (
             tier_index[_selection_preference(source, task_terms=task_terms)],
-            -float(source.get("memory_score") or 0.0),
+            -_selection_score(source),
         ),
     )
+
+
+def _selection_score(source: dict[str, Any]) -> float:
+    score = source.get("rerank_score")
+    return float(score if score is not None else source.get("memory_score") or 0.0)
 
 
 def _source_preference(source: dict[str, Any]) -> str:
