@@ -80,6 +80,7 @@ from .envelope import parse_envelope
 from .federation import search_federated_memory
 from .fsutil import atomic_write_text
 from .index import connect_index, update_index
+from .jev import filter_context_hits
 from .locking import lifecycle_lock
 from .memory import (
     DEFAULT_MIN_SCORE,
@@ -162,25 +163,23 @@ def build_context_pack(
     else:
         memory_hits = []
     if resolved_session and exclude_session_from_memory:
-        memory_hits = _diversify_memory_hits(
-            [row for row in memory_hits if row.get("session_id") != resolved_session],
-            memory_limit,
-            retrieval_query=retrieval_query,
-            task_intent=task,
-        )
+        memory_hits = [row for row in memory_hits if row.get("session_id") != resolved_session]
         recent = [
             row
             for row in recent_session_summaries(root, limit=recent_limit + 5)
             if row.get("session_id") != resolved_session
         ][:recent_limit]
     else:
-        memory_hits = _diversify_memory_hits(
-            memory_hits,
-            memory_limit,
-            retrieval_query=retrieval_query,
-            task_intent=task,
-        )
         recent = recent_session_summaries(root, limit=recent_limit)
+    memory_hits, reranking = filter_context_hits(
+        root, task, memory_hits, federated=bool(federated or federation_group),
+    )
+    if reranking["status"] == "applied":
+        # Unscored summaries must not backfill history rejected by the relevance gate.
+        recent = []
+    memory_hits = _diversify_memory_hits(
+        memory_hits, memory_limit, retrieval_query=retrieval_query, task_intent=task,
+    )
     evidence = (
         evidence_rows(root, resolved_session, rebuild=False)[-evidence_limit:]
         if resolved_session and evidence_limit > 0
@@ -199,6 +198,7 @@ def build_context_pack(
         "federation_group": federation_group,
         "retrieval_mode": effective_retrieval_mode,
         "requested_retrieval_mode": retrieval_mode,
+        "reranking": reranking,
         "recent_session_summaries": recent,
         "evidence": evidence,
         "instructions": [
@@ -268,6 +268,7 @@ def build_context_manifest(
         "federation_group": pack.get("federation_group"),
         "retrieval_mode": retrieval_mode,
         "requested_retrieval_mode": pack.get("requested_retrieval_mode") or retrieval_mode,
+        "reranking": pack.get("reranking") or {"provider": "none", "status": "disabled"},
         "briefing": briefing,
         "sources": sources,
         "memory_hits": memory_sources,
@@ -655,6 +656,9 @@ def format_context_pack(pack: dict[str, Any]) -> str:
         f"Retrieval query: {_pack_retrieval_query(pack) or '[no specific terms]'}",
         f"Session: {pack.get('session_id') or 'none'}",
     ]
+    reranking = pack.get("reranking") or {}
+    if reranking.get("provider") == "jev":
+        lines.append(f"Jev relevance filter: {reranking['status']} {reranking.get('reason', '')}".rstrip())
 
     summary = pack.get("current_summary")
     if summary:
@@ -821,6 +825,9 @@ def _source_entry(
         task_term_count=len(task_terms),
         retrieval_mode=str(row.get("retrieval_mode") or retrieval_mode),
     )
+    if origin == "memory_hit" and row.get("rerank_score") is not None:
+        match_quality = "strong"
+        match_reasons.append(f"Jev relevance {row['rerank_score']:.3f}; advisory")
     return {
         "source_id": source_id,
         "source_kind": row.get("source_kind") or "message",
@@ -849,6 +856,7 @@ def _source_entry(
         "indexed_at": row.get("indexed_at"),
         "file_path": row.get("file_path"),
         "memory_score": row.get("memory_score"),
+        "rerank_score": row.get("rerank_score"),
         "retrieval_mode": row.get("retrieval_mode") or retrieval_mode,
         "requested_retrieval_mode": row.get("requested_retrieval_mode"),
         "semantic_score": row.get("semantic_score"),

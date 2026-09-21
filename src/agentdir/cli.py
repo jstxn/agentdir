@@ -91,7 +91,7 @@ from .memory import (
     explain_memory_match,
     memory_backend_status,
 )
-from .memory import configure_embeddings, configure_team_backend, configure_vector_backend
+from .memory import configure_context_reranker, configure_embeddings, configure_team_backend, configure_vector_backend
 from .memory import format_memory_explanation, format_memory_hits, memory_stats, search_memory
 from .query import query_messages
 from .replay import replay_session
@@ -1604,6 +1604,17 @@ def cmd_memory_embeddings_configure(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_reranker_configure(args: argparse.Namespace) -> int:
+    result = configure_context_reranker(command_root(args, create=True), args.provider)
+    if args.json:
+        print_json(result)
+    else:
+        print(f"context_reranker={result['provider']}")
+        if result["provider"] == "jev":
+            print("Context builds may send the task and up to 20 redacted local passages to api.typesafe.ai.")
+    return 0
+
+
 def cmd_memory_team_configure(args: argparse.Namespace) -> int:
     root = command_root(args, create=True)
     update_index(root)
@@ -2418,6 +2429,15 @@ def build_parser() -> argparse.ArgumentParser:
     memory_embeddings_configure.add_argument("--model")
     memory_embeddings_configure.add_argument("--json", action="store_true")
     memory_embeddings_configure.set_defaults(func=cmd_memory_embeddings_configure)
+    memory_reranker = memory_sub.add_parser("reranker")
+    memory_reranker_sub = memory_reranker.add_subparsers(dest="memory_reranker_command", required=True)
+    memory_reranker_configure = memory_reranker_sub.add_parser(
+        "configure", help="Opt in to sharing context with Jev, or disable remote filtering",
+    )
+    add_scope_args(memory_reranker_configure)
+    memory_reranker_configure.add_argument("provider", choices=("jev", "none"))
+    memory_reranker_configure.add_argument("--json", action="store_true")
+    memory_reranker_configure.set_defaults(func=cmd_memory_reranker_configure)
     memory_team = memory_sub.add_parser("team")
     memory_team_sub = memory_team.add_subparsers(dest="memory_team_command", required=True)
     memory_team_configure = memory_team_sub.add_parser("configure")
