@@ -19,6 +19,12 @@ from agentdir.memory import configure_context_reranker
 from agentdir.store import init_root
 
 
+def stub_jev_run(monkeypatch, run):
+    # Stub only Jev's view of subprocess. Patching subprocess.run itself also
+    # stubs git lookups, which then pass only if an earlier test cached them.
+    monkeypatch.setattr(jev, "subprocess", SimpleNamespace(**{**vars(subprocess), "run": run}))
+
+
 def response(scores):
     return {"model": jev.MODEL,
             "answers": {f"p{i}": {"type": "noul", "noul": score} for i, score in enumerate(scores)},
@@ -40,7 +46,7 @@ def test_opt_in_and_export_boundaries(tmp_path, monkeypatch):
     rows = hits()
     monkeypatch.setenv("JEV_API_KEY", "synthetic-api-key")
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    monkeypatch.setattr(jev.subprocess, "run", lambda *a, **k: pytest.fail("unexpected export"))
+    stub_jev_run(monkeypatch, lambda *a, **k: pytest.fail("unexpected export"))
     assert jev.filter_context_hits(tmp_path, "migration", rows)[1]["status"] == "disabled"
     configure_context_reranker(tmp_path, "jev")
     assert jev.filter_context_hits(tmp_path, "migration", rows, federated=True)[1]["reason"] == "federated_context"
@@ -72,7 +78,7 @@ def test_bounded_redacted_export_and_scores_survive_both_selection_stages(tmp_pa
         assert kwargs["timeout"] == 3
         return SimpleNamespace(stdout=json.dumps(response([0.7, 0.99] + [0.1] * 18)))
 
-    monkeypatch.setattr(jev.subprocess, "run", run)
+    stub_jev_run(monkeypatch, run)
     selected, record = jev.filter_context_hits(tmp_path, "migration token=abcdefghijklmnop", rows)
     assert len(captured["questions"]) == 20
     assert all(len(text.encode()) <= 1024 for text in captured["state"]["candidates"].values())
@@ -102,7 +108,7 @@ def test_invalid_or_failed_response_preserves_local_candidates(tmp_path, monkeyp
     init_root(tmp_path)
     configure_context_reranker(tmp_path, "jev")
     monkeypatch.setenv("JEV_API_KEY", "synthetic-api-key")
-    monkeypatch.setattr(jev.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=json.dumps(bad)))
+    stub_jev_run(monkeypatch, lambda *a, **k: SimpleNamespace(stdout=json.dumps(bad)))
     rows = hits(1)
     returned, record = jev.filter_context_hits(tmp_path, "migration", rows)
     assert returned is rows and record["status"] == "fallback"
@@ -116,7 +122,7 @@ def test_deadline_terminates_stalled_worker(tmp_path, monkeypatch):
     monkeypatch.setenv("JEV_API_KEY", "synthetic-api-key")
     real_run = subprocess.run
     monkeypatch.setattr(jev, "TIMEOUT_SECONDS", 0.1)
-    monkeypatch.setattr(jev.subprocess, "run", lambda command, **kwargs: real_run(
+    stub_jev_run(monkeypatch, lambda command, **kwargs: real_run(
         [sys.executable, "-c", "import time; time.sleep(30)"], **kwargs,
     ))
     rows = hits()
@@ -156,7 +162,7 @@ def test_work_start_persists_scores_and_review_replays_without_api(tmp_path, mon
 
     # Patch only the worker, leaving git and session subprocesses operational.
     real_run = subprocess.run
-    monkeypatch.setattr(jev.subprocess, "run", lambda command, **kwargs:
+    stub_jev_run(monkeypatch, lambda command, **kwargs:
                         score(command, **kwargs) if command[:3] == [sys.executable, "-m", "agentdir.jev"]
                         else real_run(command, **kwargs))
     started = start_work(tmp_path, "rollback migration")
@@ -185,7 +191,7 @@ def test_empty_filter_cannot_backfill_recent_summaries_and_keeps_current_evidenc
     evidence = [{"source_id": "current:tool", "event_type": "tool.result", "body_text": "exit=0"}]
     monkeypatch.setattr(context, "evidence_rows", lambda *a, **k: evidence)
     monkeypatch.setattr(context, "summarize_session", lambda *a, **k: {})
-    monkeypatch.setattr(jev.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=json.dumps(response([0.1] * 3))))
+    stub_jev_run(monkeypatch, lambda *a, **k: SimpleNamespace(stdout=json.dumps(response([0.1] * 3))))
     pack = context.build_context_pack(tmp_path, "rollback migration", session_id="current")
     assert pack["memory_hits"] == [] and pack["recent_session_summaries"] == []
     manifest = context.build_context_manifest(pack)
