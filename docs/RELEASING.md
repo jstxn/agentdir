@@ -45,9 +45,9 @@ chmod +x dist/rollback-agentdir.sh
 Expected assets (substitute the release version):
 
 ```text
-dist/agentdir_cli-0.9.0-py3-none-any.whl
-dist/agentdir_cli-0.9.0.tar.gz
-dist/jstxn-agentdir-pi-0.9.0.tgz
+dist/agentdir_cli-0.10.0-py3-none-any.whl
+dist/agentdir_cli-0.10.0.tar.gz
+dist/jstxn-agentdir-pi-0.10.0.tgz
 dist/install-agentdir.sh
 dist/rollback-agentdir.sh
 ```
@@ -55,19 +55,19 @@ dist/rollback-agentdir.sh
 ## Tag And Release
 
 ```bash
-git tag -a v0.9.0 -m "Release AgentDir v0.9.0"
+git tag -a v0.10.0 -m "Release AgentDir v0.10.0"
 git push origin main
-git push origin v0.9.0
+git push origin v0.10.0
 
-gh release create v0.9.0 \
-  dist/agentdir_cli-0.9.0-py3-none-any.whl \
-  dist/agentdir_cli-0.9.0.tar.gz \
-  dist/jstxn-agentdir-pi-0.9.0.tgz \
+gh release create v0.10.0 \
+  dist/agentdir_cli-0.10.0-py3-none-any.whl \
+  dist/agentdir_cli-0.10.0.tar.gz \
+  dist/jstxn-agentdir-pi-0.10.0.tgz \
   dist/install-agentdir.sh \
   dist/rollback-agentdir.sh \
   --repo jstxn/agentdir \
-  --title "AgentDir v0.9.0" \
-  --notes-file docs/releases/v0.9.0.md
+  --title "AgentDir v0.10.0" \
+  --notes-file docs/releases/v0.10.0.md
 ```
 
 Publishing the release triggers `publish.yml`, which rebuilds the sdist and
@@ -94,7 +94,7 @@ Use a disposable environment:
 
 ```bash
 tmp="$(mktemp -d)"
-gh release download v0.9.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
+gh release download v0.10.0 --repo jstxn/agentdir --pattern install-agentdir.sh --dir "$tmp"
 AGENTDIR_PREFIX="$tmp/prefix" AGENTDIR_HOME="$tmp/home" AGENTDIR_FORCE_VENV=1 bash "$tmp/install-agentdir.sh"
 "$tmp/prefix/bin/agentdir" --help
 "$tmp/prefix/bin/agentdir" --version
@@ -130,13 +130,13 @@ tmp="$(mktemp -d)"
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.9.0-py3-none-any.whl" \
+AGENTDIR_WHEEL="$PWD/dist/agentdir_cli-0.10.0-py3-none-any.whl" \
   bash dist/install-agentdir.sh
 
 AGENTDIR_PREFIX="$tmp/prefix" \
 AGENTDIR_HOME="$tmp/home" \
 AGENTDIR_FORCE_VENV=1 \
-  bash dist/rollback-agentdir.sh v0.8.0
+  bash dist/rollback-agentdir.sh v0.9.0
 
 "$tmp/prefix/bin/agentdir" --help
 ```

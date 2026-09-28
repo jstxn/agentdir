@@ -107,7 +107,7 @@ def displayed_source_ref(payload: dict[str, object], *, event_type: str = "agent
 def test_cli_version_reports_package_version() -> None:
     result = run_cli("--version")
 
-    assert result.stdout.strip() == "agentdir 0.9.0"
+    assert result.stdout.strip() == "agentdir 0.10.0"
 
 
 def test_module_invocation_uses_the_runtime_interpreter(monkeypatch) -> None:
