@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -25,11 +26,12 @@ def atomic_write_bytes(path: str | Path, data: bytes) -> None:
     write.
     """
     target = Path(path)
-    temp = target.with_name(f".{target.name}.agentdir-tmp")
-    if temp.exists():
-        temp.unlink()
     mode = target.stat().st_mode if target.exists() else None
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # A unique temp name per writer, so concurrent writers of one file (the
+    # memory daemon and the CLI that starts it) cannot unlink or rename each
+    # other's temp file.
+    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".agentdir-tmp")
+    temp = Path(temp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
