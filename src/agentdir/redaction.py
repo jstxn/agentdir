@@ -4,14 +4,40 @@ import re
 from dataclasses import dataclass
 
 
+# Private keys are masked as a whole block, not just the BEGIN line. When the
+# END line is missing (truncated output), the base64 lines that follow the
+# BEGIN line are masked instead. Line breaks may be real or JSON-escaped.
+_PEM_BEGIN = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+_PEM_END = r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+_PEM_BREAK = r"(?:\s|\\[nr])"
+_PEM_LINES = rf"(?:{_PEM_BREAK}+[A-Za-z0-9+/=]{{16,}})"
+_PRIVATE_KEY = (
+    rf"{_PEM_BEGIN}(?:[A-Za-z0-9+/=\s\\:,-]*?{_PEM_END}|{_PEM_LINES}+)?"
+    # Key bodies left in place by older versions, which masked only the
+    # BEGIN line.
+    rf"|<redacted:private-key>{_PEM_BREAK}+[A-Za-z0-9+/=]{{40,}}"
+    rf"{_PEM_LINES}*(?:{_PEM_BREAK}*{_PEM_END})?"
+)
+
 SECRET_PATTERNS = [
     ("github-token", re.compile(r"gh[opsu]_[A-Za-z0-9_]{20,}")),
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
     (
         "key-value-secret",
-        re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"),
+        # Covers JSON-quoted keys ("password": "...") and names ending in
+        # SECRET_KEY or SECRET_ACCESS_KEY, but not words that merely start
+        # with token, secret or password (tokenizer: ...).
+        re.compile(
+            r"(?i)(api[_-]?key|secret(?:[_-]?access)?[_-]?key|secret|token|password)"
+            r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"
+        ),
     ),
-    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    # The length floor keeps prose such as "the bearer of bad news" intact.
+    ("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_.~+/-]{20,}=*")),
+    # Standalone keys such as sk-proj-... or sk-ant-...; requiring a digit
+    # keeps kebab-case words like sk-learn-tutorial-for-beginners intact.
+    ("api-key", re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}")),
+    ("private-key", re.compile(_PRIVATE_KEY)),
 ]
 
 

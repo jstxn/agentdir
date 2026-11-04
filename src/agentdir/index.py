@@ -80,6 +80,22 @@ create table if not exists message_artifacts (
 """
 
 
+# Per-message header reads and cascading deletes look headers up by
+# message_rowid; memory exclusion checks look them up by lower(name).
+HEADER_INDEXES = (
+    "create index if not exists headers_message_rowid_idx on headers(message_rowid)",
+    "create index if not exists headers_lower_name_message_idx"
+    " on headers(lower(name), message_rowid)",
+)
+
+
+def _ensure_header_indexes(conn: sqlite3.Connection) -> None:
+    # Incremental updates run this too, so indexes added after a store's
+    # index was first built arrive without forcing a full rebuild.
+    for statement in HEADER_INDEXES:
+        conn.execute(statement)
+
+
 @dataclass
 class IndexResult:
     indexed: int = 0
@@ -93,6 +109,7 @@ def now_iso() -> str:
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _ensure_header_indexes(conn)
     conn.executescript(memory_schema_sql())
     conn.execute("insert or replace into metadata(key, value) values('schema_version', '3')")
     conn.execute("insert or replace into metadata(key, value) values('vector_memory', 'yes')")
@@ -191,9 +208,13 @@ def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
 
     result = IndexResult()
     affected_sessions: set[str] = set()
+    _ensure_header_indexes(conn)
 
     # Forward-clean telemetry that an older AgentDir version may have indexed
     # before it knew these events were intentionally excluded from memory.
+    # Only messages that still have memory documents need cleaning. Once
+    # cleaned they drop out of this query, so a no-op update does not
+    # re-summarize their sessions.
     if MEMORY_EXCLUDED_EVENT_TYPES or MEMORY_EXCLUDED_HEADER_NAMES:
         event_marks = ",".join("?" for _ in MEMORY_EXCLUDED_EVENT_TYPES)
         header_marks = ",".join("?" for _ in MEMORY_EXCLUDED_HEADER_NAMES)
@@ -203,11 +224,13 @@ def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
         )
         excluded_rows = conn.execute(
             f"""
-            select id, session_id from messages
-            where event_type in ({event_marks})
+            select distinct m.id, m.session_id
+            from memory_documents md
+            join messages m on m.id = md.message_rowid
+            where m.event_type in ({event_marks})
                or exists (
                  select 1 from headers h
-                 where h.message_rowid = messages.id
+                 where h.message_rowid = m.id
                    and lower(h.name) in ({header_marks})
                )
             """,
