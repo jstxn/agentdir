@@ -12,6 +12,7 @@ from pathlib import Path
 
 import agentdir.memory as memory
 import agentdir.context as context_module
+import agentdir.index as index_module
 from agentdir.cli import build_parser
 from agentdir.context import (
     brief_context_manifest,
@@ -20,6 +21,7 @@ from agentdir.context import (
     review_context_pack,
 )
 from agentdir.events import emit_event
+from agentdir.index import update_index
 from agentdir.memory import index_memory_document
 from agentdir.store import AgentDirError
 
@@ -168,6 +170,87 @@ def test_incremental_index_cleans_receipt_memory_written_by_an_older_cli(tmp_pat
     assert "- context.sources.expanded:" not in summary
     assert "context.sources.expanded=1" in summary
     assert stats["coverage"] == 1.0
+
+
+def test_noop_index_update_does_not_resummarize_sessions_of_cleaned_receipts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    emit_event(
+        root,
+        session_id="receipt-session",
+        event_type="context.sources.expanded",
+        body="receipt excluded from memory by event type",
+        extra_headers={"X-AgentDir-Context-View-Pack-Id": "ctx-noop"},
+    )
+    emit_event(
+        root,
+        session_id="view-session",
+        event_type="agent.message",
+        body="message excluded from memory by a context view header",
+        extra_headers={"X-AgentDir-Context-View-Source-Id": "src-noop"},
+    )
+    update_index(root)
+
+    resummarized: list[set[str] | None] = []
+    original = index_module.index_session_summaries
+
+    def spy(conn: sqlite3.Connection, only_sessions: set[str] | None = None) -> None:
+        resummarized.append(only_sessions)
+        original(conn, only_sessions=only_sessions)
+
+    monkeypatch.setattr(index_module, "index_session_summaries", spy)
+    update_index(root)
+
+    assert resummarized == []
+
+
+def header_lookup_plans(root: Path) -> list[str]:
+    queries = [
+        (
+            "select name, value from headers where message_rowid = ? order by rowid",
+            (1,),
+        ),
+        (
+            """
+            select 1 from headers h
+            where h.message_rowid = ? and lower(h.name) in (?, ?, ?)
+            """,
+            (
+                1,
+                "x-agentdir-context-view-pack-id",
+                "x-agentdir-context-view-id",
+                "x-agentdir-context-view-source-id",
+            ),
+        ),
+    ]
+    with sqlite3.connect(index_path(root)) as conn:
+        return [
+            " ".join(row[3] for row in conn.execute(f"explain query plan {sql}", params))
+            for sql, params in queries
+        ]
+
+
+def test_header_lookups_are_indexed_after_rebuild_and_incremental_update(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    run_cli("init", str(root))
+    emit_event(root, session_id="header-session", event_type="agent.message", body="header lookups")
+    run_cli("index", "rebuild", "--root", str(root))
+
+    for plan in header_lookup_plans(root):
+        assert plan.startswith("SEARCH") and "INDEX" in plan, plan
+
+    with sqlite3.connect(index_path(root)) as conn:
+        conn.execute("drop index headers_message_rowid_idx")
+        conn.execute("drop index headers_lower_name_message_idx")
+    assert all(plan.startswith("SCAN") for plan in header_lookup_plans(root))
+
+    update_index(root)
+
+    for plan in header_lookup_plans(root):
+        assert plan.startswith("SEARCH") and "INDEX" in plan, plan
 
 
 def test_index_rebuild_preserves_semantic_embedding_cache(tmp_path: Path) -> None:
