@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import subprocess
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -68,17 +70,23 @@ def remove_registered_root(controller_root: str | Path, identifier: str) -> dict
     with _registry_lock(controller.root):
         registry = _read_registry(controller.root)
         remaining: list[dict[str, Any]] = []
-        removed: dict[str, Any] | None = None
+        matches: list[dict[str, Any]] = []
         for root in registry["roots"]:
             if identifier in {root["root_id"], root["name"], root["root_path"]}:
-                removed = root
+                matches.append(root)
             else:
                 remaining.append(root)
-        if removed is None:
+        if not matches:
             raise AgentDirError(f"Unknown registered root: {identifier}")
+        if len(matches) > 1:
+            root_ids = ", ".join(item["root_id"] for item in matches)
+            raise AgentDirError(
+                f"Ambiguous registered root {identifier!r} matches multiple roots ({root_ids}); "
+                "specify a root_id or root_path"
+            )
         registry["roots"] = remaining
         _write_registry(controller.root, registry)
-    return removed
+    return matches[0]
 
 
 def rebuild_registered_roots(
@@ -107,7 +115,7 @@ def rebuild_registered_roots(
             results.append(item)
             continue
         try:
-            result = rebuild_index(root["root_path"])
+            result = update_index(root["root_path"]) if stale_only else rebuild_index(root["root_path"])
         except AgentDirError as exc:
             item["ok"] = False
             item["error"] = str(exc)
@@ -225,7 +233,7 @@ def doctor_registered_roots(controller_root: str | Path, *, group: str | None = 
         paths = paths_for(root_path)
         index_path = paths.index_path
         latest_record_mtime = _latest_record_mtime(paths.root)
-        index_mtime = index_path.stat().st_mtime if index_path.is_file() else None
+        index_mtime = _index_mtime(paths.root)
         stale = index_mtime is None or (
             latest_record_mtime is not None and latest_record_mtime > index_mtime
         )
@@ -493,11 +501,14 @@ def _validate_registered_root_ids(registry: dict[str, Any], root_ids: list[str])
 
 
 def _candidate_agentdir_root(candidate: Path) -> Path | None:
-    if (candidate / "VERSION").is_file():
-        return candidate.resolve()
-    nested = candidate / ".agentdir"
-    if (nested / "VERSION").is_file():
-        return nested.resolve()
+    try:
+        if (candidate / "VERSION").is_file():
+            return candidate.resolve()
+        nested = candidate / ".agentdir"
+        if (nested / "VERSION").is_file():
+            return nested.resolve()
+    except OSError:
+        return None
     return None
 
 
@@ -542,7 +553,10 @@ def _git_remote(project_path: Path) -> str | None:
 
 def _index_mtime(root: Path) -> float | None:
     path = paths_for(root).index_path
-    return path.stat().st_mtime if path.is_file() else None
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _latest_record_mtime(root: Path) -> float | None:
@@ -551,8 +565,18 @@ def _latest_record_mtime(root: Path) -> float | None:
         base = root / container
         if not base.is_dir():
             continue
-        for path in base.rglob("*"):
-            if path.is_file():
-                mtime = path.stat().st_mtime
+        for dirpath, dirnames, filenames in os.walk(base):
+            current = Path(dirpath)
+            if current.name == "Maildir":
+                dirnames[:] = [name for name in dirnames if name != "tmp"]
+            for filename in filenames:
+                path = current / filename
+                try:
+                    stat_result = path.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(stat_result.st_mode):
+                    continue
+                mtime = stat_result.st_mtime
                 latest = mtime if latest is None else max(latest, mtime)
     return latest

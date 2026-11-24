@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import re
 import shlex
 import stat
 import tempfile
@@ -12,12 +14,51 @@ from pathlib import Path
 from .environment import identify_hook_owner
 from .events import emit_event
 from .git import git_branch, git_head, git_output, git_root, git_status_short
-from .sessions import end_session, read_current_session, start_session
-from .store import AgentDirDependencyError, AgentDirError, init_root, paths_for
+from .sessions import SessionState, current_session_path, end_session, read_current_session, start_session
+from .store import AgentDirDependencyError, AgentDirError, AgentDirStateError, init_root, paths_for
 
 DEFAULT_HOOKS = ("pre-commit", "post-commit", "pre-push", "post-checkout", "post-merge")
 MANAGED_MARKER = "# AgentDir managed hook"
 HOOKS_MANIFEST_NAME = "hooks.json"
+_HOOK_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _validate_hook_name(name: str) -> str:
+    if (
+        not isinstance(name, str)
+        or not _HOOK_NAME_RE.fullmatch(name)
+        or name in {".", ".."}
+        or ".." in name
+    ):
+        raise AgentDirError(
+            f"Invalid git hook name {name!r}; expected letters, digits, '.', '_', or '-' without '..'"
+        )
+    return name
+
+
+def _accepts_keyword(func: object, keyword: str) -> bool:
+    try:
+        sig = inspect.signature(func)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    return keyword in sig.parameters or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
+    )
+
+
+def _read_current_session_for_cwd(
+    root: str | Path,
+    cwd: str | Path | None = None,
+) -> SessionState | None:
+    if _accepts_keyword(read_current_session, "cwd"):
+        return read_current_session(root, cwd=cwd)  # type: ignore[call-arg]
+    if cwd is None:
+        return read_current_session(root)
+    path = current_session_path(root, cwd=cwd)
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return SessionState(**payload)
 
 
 @dataclass(frozen=True)
@@ -53,8 +94,8 @@ def git_hooks_dir(cwd: str | Path | None = None) -> Path:
 
 
 def hook_status(cwd: str | Path | None = None, hooks: list[str] | None = None) -> list[HookInfo]:
+    names = [_validate_hook_name(name) for name in (hooks or list(DEFAULT_HOOKS))]
     hooks_dir = git_hooks_dir(cwd)
-    names = hooks or list(DEFAULT_HOOKS)
     statuses: list[HookInfo] = []
     for name in names:
         path = hooks_dir / name
@@ -81,6 +122,7 @@ def preflight_install_hooks(
     force: bool = False,
 ) -> Path:
     """Validate the entire hook install before AgentDir mutates repository state."""
+    names = [_validate_hook_name(name) for name in (hooks or list(DEFAULT_HOOKS))]
     hooks_dir = resolve_git_hooks_dir(cwd)
     if hooks_dir.exists() and not hooks_dir.is_dir():
         raise AgentDirError(
@@ -89,7 +131,7 @@ def preflight_install_hooks(
             "that can write the Git hooks directory."
         )
 
-    for name in hooks or list(DEFAULT_HOOKS):
+    for name in names:
         target = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
         if target.exists() and not target.is_file():
@@ -147,11 +189,12 @@ def install_hooks(
     hooks: list[str] | None = None,
     force: bool = False,
 ) -> list[HookInfo]:
-    hooks_dir = preflight_install_hooks(cwd=cwd, hooks=hooks, force=force)
+    names = [_validate_hook_name(name) for name in (hooks or list(DEFAULT_HOOKS))]
+    hooks_dir = preflight_install_hooks(cwd=cwd, hooks=names, force=force)
     init_root(root)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     installed: list[HookInfo] = []
-    for name in hooks or list(DEFAULT_HOOKS):
+    for name in names:
         target = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
         owner: str | None = None
@@ -196,9 +239,10 @@ def uninstall_hooks(
     hooks: list[str] | None = None,
     root: str | Path | None = None,
 ) -> list[HookInfo]:
+    names = [_validate_hook_name(name) for name in (hooks or list(DEFAULT_HOOKS))]
     hooks_dir = git_hooks_dir(cwd)
     removed: list[HookInfo] = []
-    for name in hooks or list(DEFAULT_HOOKS):
+    for name in names:
         target = hooks_dir / name
         original = hooks_dir / f"{name}.agentdir-original"
         managed = target.is_file() and MANAGED_MARKER in target.read_text(encoding="utf-8", errors="ignore")
@@ -266,6 +310,13 @@ def hooks_manifest_issues(root: str | Path) -> list[str]:
             )
     for name in names:
         if not isinstance(name, str):
+            continue
+        try:
+            name = _validate_hook_name(name)
+        except AgentDirError:
+            issues.append(
+                f"AgentDir hooks manifest contains an invalid hook name {name!r}; ignoring it."
+            )
             continue
         path = hooks_dir / name
         if not path.is_file():
@@ -342,7 +393,8 @@ def record_hook_event(
     hook_args: list[str] | None = None,
     cwd: str | Path | None = None,
 ) -> None:
-    session = read_current_session(root)
+    hook = _validate_hook_name(hook)
+    session = _read_current_session_for_cwd(root, cwd=cwd)
     created_hook_session = session is None or session.status != "active"
     if created_hook_session:
         session = start_session(
@@ -385,19 +437,30 @@ def record_hook_event(
         tool_exit_code=original_exit_code,
     )
     if created_hook_session:
-        end_session(
-            root,
-            status="completed",
-            summary=f"Recorded git hook {hook} exit {original_exit_code}.",
-            actor="git",
-        )
+        end_kwargs: dict[str, object] = {
+            "status": "completed",
+            "summary": f"Recorded git hook {hook} exit {original_exit_code}.",
+            "actor": "git",
+            "expected_session_id": session.session_id,
+        }
+        if _accepts_keyword(end_session, "cwd"):
+            end_kwargs["cwd"] = cwd
+        try:
+            end_session(root, **end_kwargs)  # type: ignore[arg-type]
+        except AgentDirStateError:
+            # A concurrent caller replaced or ended the active session before
+            # the background hook finished; leave the replacement untouched.
+            pass
 
 
 def _hook_script(name: str, original: Path, root: Path) -> str:
+    name = _validate_hook_name(name)
+    quoted_name = shlex.quote(name)
+    quoted_original = shlex.quote(str(original))
     fallback_root = shlex.quote(str(root.resolve()))
     return f"""#!/bin/sh
 {MANAGED_MARKER}: {name}
-hook_name="{name}"
+hook_name={quoted_name}
 agentdir_root={fallback_root}
 worktree_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -n "$worktree_root" ]; then
@@ -425,7 +488,7 @@ if [ -n "$stdin_file" ]; then
   cat > "$stdin_file"
 fi
 
-original="{original}"
+original={quoted_original}
 original_status=0
 if [ -x "$original" ]; then
   if [ -n "$stdin_file" ]; then

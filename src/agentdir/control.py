@@ -15,6 +15,7 @@ from .audit import (
     session_audit_gaps,
 )
 from .context import (
+    _context_retrieval_query,
     audit_context_pack,
     brief_context_manifest,
     build_context_pack,
@@ -35,8 +36,8 @@ from .context_expansion import (
 )
 from .doctor import run_doctor
 from .events import emit_event
-from .federation import doctor_registered_roots, list_registered_roots, list_root_groups
-from .git import git_branch, git_head, git_status_short, workspace_name
+from .federation import doctor_registered_roots, list_root_groups
+from .git import git_branch, git_head, git_root, git_status_short, workspace_name
 from .index import update_index
 from .locking import lifecycle_lock
 from .memory import (
@@ -45,7 +46,7 @@ from .memory import (
     memory_stats,
     resolve_retrieval_mode,
 )
-from .review import evidence_brief, evidence_rows, format_evidence, format_summary, summarize_session
+from .review import evidence_brief, evidence_rows, format_evidence, summarize_session
 from .rendering import rich_status
 from .sessions import (
     SessionState,
@@ -57,13 +58,37 @@ from .sessions import (
     require_current_session,
     session_git_cwd,
     session_pointer_lock,
+    session_workspace_cwd,
     write_session_state,
 )
-from .store import AgentDirError, AgentDirStateError, init_root, paths_for, require_root
+from .store import (
+    AgentDirError,
+    AgentDirStateError,
+    init_root,
+    paths_for,
+    require_root,
+    validate_id,
+)
 
 EVENT_WORK_STARTED = "work.started"
 EVENT_WORK_FINISHED = "work.finished"
 EVENT_WORK_REPORT_FINAL = "work.report.final"
+
+_UNSET = object()
+
+
+def _repo_cwd_for_root(root: Path, explicit_root: bool) -> Path | None:
+    if not explicit_root:
+        return None
+    normalized = root.expanduser().resolve()
+    if normalized.name == ".agentdir" and normalized.parent.exists():
+        return normalized.parent
+    probe = normalized if normalized.exists() else normalized.parent
+    if probe.exists():
+        detected = git_root(probe)
+        if detected is not None:
+            return detected
+    return None
 
 
 def adopt_repo(
@@ -95,6 +120,7 @@ def build_status(
     *,
     scope: str | None = None,
     rebuild: bool = True,
+    cwd: str | Path | None = None,
 ) -> dict[str, Any]:
     paths = paths_for(root)
     initialized = (paths.meta / "VERSION").is_file()
@@ -106,10 +132,10 @@ def build_status(
             "version": _store_version(paths.root) if initialized else None,
         },
         "git": {
-            "workspace": workspace_name(),
-            "branch": git_branch(),
-            "head": git_head(),
-            "dirty": bool(git_status_short()),
+            "workspace": workspace_name(cwd),
+            "branch": git_branch(cwd),
+            "head": git_head(cwd),
+            "dirty": bool(git_status_short(cwd)),
         },
     }
     if not initialized:
@@ -120,7 +146,12 @@ def build_status(
                 "context": {"latest_pack": None},
                 "evidence": {"session_id": None, "count": 0},
                 "memory": {"indexed": False},
-                "federation": {"roots": [], "groups": []},
+                "federation": {
+                    "registered_roots": 0,
+                    "stale_roots": 0,
+                    "roots": [],
+                    "groups": [],
+                },
                 "health": doctor.as_dict(),
             }
         )
@@ -269,8 +300,8 @@ def format_status(status: dict[str, Any]) -> str:
         f"memory_documents={memory.get('memory_documents', 0)}",
         f"passages={memory.get('passages', 0)}",
         "",
-        f"registered_roots={federation['registered_roots']}",
-        f"stale_roots={federation['stale_roots']}",
+        f"registered_roots={federation.get('registered_roots', 0)}",
+        f"stale_roots={federation.get('stale_roots', 0)}",
         "",
         f"doctor_ok={str(health['ok']).lower()}",
         ]
@@ -316,6 +347,19 @@ def start_work(
             )
 
 
+def _validate_federation_target(root: Path, federation_group: str | None) -> None:
+    if federation_group:
+        groups = list_root_groups(root)
+        matched = next((group for group in groups if group["name"] == federation_group), None)
+        if matched is None:
+            raise AgentDirError(f"Unknown root group: {federation_group}")
+        if not matched.get("roots"):
+            raise AgentDirError(f"No registered roots in group {federation_group!r}")
+        return
+    if not doctor_registered_roots(root):
+        raise AgentDirError("No registered roots; run agentdir roots register <root>")
+
+
 def _start_work_locked(
     root: Path,
     task: str,
@@ -332,57 +376,59 @@ def _start_work_locked(
     invocation: tuple[str, ...],
 ) -> dict[str, Any]:
     paths = paths_for(root)
-    session = ensure_session(paths.root, title=task, actor=actor)
-    update_index(paths.root)
-    previous_context = build_context_projection(
-        paths.root,
-        session.session_id,
-        rebuild=False,
-    )
-    previous_audit = previous_context["blocking_audit"]
-    if previous_audit:
-        context_prefix = _scoped_command_prefix(
-            invocation,
-            ("work", "context"),
+    existing = read_current_session(paths.root)
+    active_session = existing if existing and existing.status == "active" else None
+    if active_session is not None or emit_context:
+        update_index(paths.root)
+    if active_session is not None:
+        previous_context = build_context_projection(
             paths.root,
+            active_session.session_id,
+            rebuild=False,
         )
-        previous_pack_id = previous_audit["pack_id"]
-        if previous_audit.get("error"):
-            raise AgentDirStateError(
-                f"Context pack {previous_pack_id} cannot be audited and cannot be superseded: "
-                f"{previous_audit['error']}"
+        previous_audit = previous_context["blocking_audit"]
+        if previous_audit:
+            context_prefix = _scoped_command_prefix(
+                invocation,
+                ("work", "context"),
+                paths.root,
             )
-        if not previous_audit.get("finish_allowed", False):
-            if previous_audit.get("review_status") != "pending":
+            previous_pack_id = previous_audit["pack_id"]
+            if previous_audit.get("error"):
                 raise AgentDirStateError(
-                    f"Context pack {previous_pack_id} is "
-                    f"{previous_audit.get('review_status') or 'invalid'} and cannot be superseded"
+                    f"Context pack {previous_pack_id} cannot be audited and cannot be superseded: "
+                    f"{previous_audit['error']}"
                 )
-            raise AgentDirStateError(
-                f"Context review is still pending for {previous_pack_id}. "
-                f"Re-open it with `{context_prefix} --show --pack {previous_pack_id}`, then run "
-                f"`{context_prefix} --pack {previous_pack_id} "
-                "--use <number> [--use <number> ...] --reason \"<how they help>\"` "
-                "in one terminal review, or record a reasoned no-relevant decision."
-            )
-    if session.title != task:
-        session.title = task
-        write_session_state(paths.root, session)
-    emit_event(
-        paths.root,
-        session_id=session.session_id,
-        event_type=EVENT_WORK_STARTED,
-        subject=f"work started: {task}",
-        body=f"task={task}\nsession_id={session.session_id}",
-        from_actor=actor,
-        workspace=session.workspace,
-        git_head=session.git_head,
-    )
+            if not previous_audit.get("finish_allowed", False):
+                if previous_audit.get("review_status") != "pending":
+                    raise AgentDirStateError(
+                        f"Context pack {previous_pack_id} is "
+                        f"{previous_audit.get('review_status') or 'invalid'} and cannot be superseded"
+                    )
+                raise AgentDirStateError(
+                    f"Context review is still pending for {previous_pack_id}. "
+                    f"Re-open it with `{context_prefix} --show --pack {previous_pack_id}`, then run "
+                    f"`{context_prefix} --pack {previous_pack_id} "
+                    "--use <number> [--use <number> ...] --reason \"<how they help>\"` "
+                    "in one terminal review, or record a reasoned no-relevant decision."
+                )
+
     if emit_context:
+        if active_session is None:
+            upcoming_workspace = workspace_name(session_workspace_cwd(paths.root))
+            filtered_query = _context_retrieval_query(task, upcoming_workspace)
+            unfiltered_query = _context_retrieval_query(task, None)
+            build_task = filtered_query if filtered_query != unfiltered_query else task
+            effective_query = filtered_query
+        else:
+            build_task = task
+            effective_query = _context_retrieval_query(task, active_session.workspace)
+        if (federated or federation_group) and not effective_query:
+            _validate_federation_target(paths.root, federation_group)
         pack = build_context_pack(
             paths.root,
-            task,
-            session_id=session.session_id,
+            build_task,
+            session_id=active_session.session_id if active_session is not None else None,
             memory_limit=memory_limit,
             evidence_limit=evidence_limit,
             recent_limit=recent_limit,
@@ -393,13 +439,14 @@ def _start_work_locked(
             exclude_session_from_memory=True,
             rebuild=False,
         )
+        pack["task"] = task
     else:
         effective_retrieval_mode = resolve_retrieval_mode(paths.root, retrieval_mode)
         pack = {
             "task": task,
             "retrieval_query": "",
             "retrieval_query_state": "disabled",
-            "session_id": session.session_id,
+            "session_id": active_session.session_id if active_session is not None else None,
             "memory_hits": [],
             "evidence": [],
             "recent_session_summaries": [],
@@ -409,6 +456,25 @@ def _start_work_locked(
             "requested_retrieval_mode": retrieval_mode,
             "instructions": [],
         }
+
+    if active_session is None:
+        session = ensure_session(paths.root, title=task, actor=actor)
+    else:
+        session = active_session
+        if session.title != task:
+            session.title = task
+            write_session_state(paths.root, session)
+    pack["session_id"] = session.session_id
+    emit_event(
+        paths.root,
+        session_id=session.session_id,
+        event_type=EVENT_WORK_STARTED,
+        subject=f"work started: {task}",
+        body=f"task={task}\nsession_id={session.session_id}",
+        from_actor=actor,
+        workspace=session.workspace,
+        git_head=session.git_head,
+    )
     emitted = emit_context_pack(
         paths.root,
         pack,
@@ -581,11 +647,16 @@ def show_work_context(
     paths = require_root(root)
     if session_id and pack_id:
         raise AgentDirError("Choose either a context session or pack, not both")
-    update_index(paths.root)
     if pack_id:
+        update_index(paths.root)
         resolved_pack_id = pack_id
     else:
-        session = _resolve_session(paths.root, session_id)
+        if session_id is not None:
+            validate_id(session_id, "session id")
+        else:
+            require_current_session(paths.root)
+        update_index(paths.root)
+        session = _resolve_session(paths.root, session_id, rebuild=False)
         latest_pack = latest_context_pack(
             paths.root,
             session.session_id,
@@ -633,8 +704,13 @@ def expand_work_context(
     if pack_id:
         resolved_pack_id = pack_id
     else:
-        session = _resolve_session(paths.root, session_id)
-        latest_pack = latest_context_pack(paths.root, session.session_id)
+        if session_id is not None:
+            validate_id(session_id, "session id")
+        else:
+            require_current_session(paths.root)
+        update_index(paths.root)
+        session = _resolve_session(paths.root, session_id, rebuild=False)
+        latest_pack = latest_context_pack(paths.root, session.session_id, rebuild=False)
         if latest_pack is None:
             raise AgentDirStateError(f"No context pack for session {session.session_id}")
         resolved_pack_id = latest_pack["pack_id"]
@@ -646,19 +722,6 @@ def expand_work_context(
         actor=actor,
         delivery=delivery,
     )
-
-
-def format_context_expansion(
-    result: dict[str, Any],
-    *,
-    invocation: tuple[str, ...] = ("agentdir",),
-    command_root: str | Path | None = None,
-) -> str:
-    return format_context_expansion_content(
-        result,
-        invocation=invocation,
-        command_root=command_root,
-    ) + format_context_expansion_completion(result)
 
 
 def format_context_expansion_content(
@@ -768,8 +831,13 @@ def review_work_context(
         resolved_pack_id = pack_id
         resolved_session_id = None
     else:
-        session = _resolve_session(paths.root, session_id)
-        latest_pack = latest_context_pack(paths.root, session.session_id)
+        if session_id is not None:
+            validate_id(session_id, "session id")
+        else:
+            require_current_session(paths.root)
+        update_index(paths.root)
+        session = _resolve_session(paths.root, session_id, rebuild=False)
+        latest_pack = latest_context_pack(paths.root, session.session_id, rebuild=False)
         if latest_pack is None:
             raise AgentDirStateError(
                 f"No context pack for session {session.session_id}. "
@@ -800,19 +868,39 @@ def finish_work(
     invocation: tuple[str, ...] = ("agentdir",),
 ) -> dict[str, Any]:
     paths = require_root(root)
+    if session_id is not None:
+        validate_id(session_id, "session id")
+    else:
+        require_current_session(paths.root)
+    doctor = run_doctor(paths.root).as_dict() if run_health_check else None
     with lifecycle_lock(paths.root, "work-start"):
         with session_pointer_lock(paths.root):
-            resolved_session = _resolve_session(paths.root, session_id)
-            with lifecycle_lock(paths.root, f"session:{resolved_session.session_id}"):
+            resolved_session_id = _resolve_session_id_for_finish(paths.root, session_id)
+            with lifecycle_lock(paths.root, f"session:{resolved_session_id}"):
                 return _finish_work_locked(
                     paths.root,
-                    session_id=resolved_session.session_id,
+                    session_id=resolved_session_id,
                     actor=actor,
                     run_health_check=run_health_check,
+                    doctor=doctor,
                     end=end,
                     claims_text=claims_text,
                     invocation=invocation,
                 )
+
+
+def _resolve_session_id_for_finish(root: Path, session_id: str | None) -> str:
+    if session_id is None:
+        return require_current_session(root).session_id
+    validate_id(session_id, "session id")
+    paths = paths_for(root)
+    if (
+        read_session_state(paths.root, session_id) is not None
+        or (paths.sessions / session_id).exists()
+        or (paths.archives / "sessions" / session_id).exists()
+    ):
+        return session_id
+    return _resolve_session(paths.root, session_id).session_id
 
 
 def _finish_work_locked(
@@ -821,19 +909,22 @@ def _finish_work_locked(
     session_id: str,
     actor: str,
     run_health_check: bool,
+    doctor: dict[str, Any] | None | object = _UNSET,
     end: bool,
     claims_text: str | None,
     invocation: tuple[str, ...],
 ) -> dict[str, Any]:
     paths = require_root(root)
-    session = _resolve_session(paths.root, session_id)
     report = build_final_report(
         paths.root,
-        session_id=session.session_id,
+        session_id=session_id,
         run_health_check=run_health_check,
         claims_text=claims_text,
         finishing=True,
+        doctor=doctor,
     )
+    resolved_session_id = str(report["session"]["session_id"])
+    session_workspace = str(report["session"]["workspace"])
     context_payload = report.get("context", {})
     context_audit = next(
         (
@@ -855,15 +946,15 @@ def _finish_work_locked(
             paths.root,
         )
         target = context_audit.get("pack_id")
-        selector = f"--pack {target}" if target else f"--session {session.session_id}"
+        selector = f"--pack {target}" if target else f"--session {resolved_session_id}"
         if context_audit.get("error"):
             raise AgentDirStateError(
-                f"Context review cannot be certified for {target or session.session_id}: "
+                f"Context review cannot be certified for {target or resolved_session_id}: "
                 f"{context_audit['error']}"
             )
         if context_audit.get("review_status") != "pending":
             raise AgentDirStateError(
-                f"Context review cannot be certified for {target or session.session_id}: "
+                f"Context review cannot be certified for {target or resolved_session_id}: "
                 f"status is {context_audit.get('review_status') or 'invalid'}. "
                 f"Inspect `{audit_prefix} --pack {target}`."
             )
@@ -876,31 +967,31 @@ def _finish_work_locked(
         )
     if end:
         current = read_current_session(paths.root)
-        if current is None or current.session_id != session.session_id:
+        if current is None or current.session_id != resolved_session_id:
             raise AgentDirStateError(
-                f"Session {session.session_id} is not the active session and cannot be ended. "
+                f"Session {resolved_session_id} is not the active session and cannot be ended. "
                 "Rerun with `--keep-session` to emit its final report without changing the active session."
             )
     rendered = format_final_report(report)
     ending_git_head = report["git"]["head"]
     event = emit_event(
         paths.root,
-        session_id=session.session_id,
+        session_id=resolved_session_id,
         event_type=EVENT_WORK_REPORT_FINAL,
         subject="final report",
         body=rendered,
         from_actor=actor,
-        workspace=session.workspace,
+        workspace=session_workspace,
         git_head=ending_git_head,
     )
     emit_event(
         paths.root,
-        session_id=session.session_id,
+        session_id=resolved_session_id,
         event_type=EVENT_WORK_FINISHED,
         subject=f"work finished: {report['task']}",
-        body=f"session_id={session.session_id}\nreport_event={event.path}",
+        body=f"session_id={resolved_session_id}\nreport_event={event.path}",
         from_actor=actor,
-        workspace=session.workspace,
+        workspace=session_workspace,
         git_head=ending_git_head,
     )
     ended = None
@@ -909,7 +1000,7 @@ def _finish_work_locked(
             paths.root,
             summary="AgentDir work finished; final report emitted.",
             actor=actor,
-            expected_session_id=session.session_id,
+            expected_session_id=resolved_session_id,
         )
     return {
         "report": report,
@@ -1154,11 +1245,16 @@ def build_final_report(
     run_health_check: bool = True,
     claims_text: str | None = None,
     finishing: bool = False,
+    doctor: dict[str, Any] | None | object = _UNSET,
 ) -> dict[str, Any]:
     paths = require_root(root)
-    session = _resolve_session(paths.root, session_id)
-    git_cwd = session_git_cwd(paths.root, session)
+    if session_id is not None:
+        validate_id(session_id, "session id")
+    else:
+        require_current_session(paths.root)
     update_index(paths.root)
+    session = _resolve_session(paths.root, session_id, rebuild=False)
+    git_cwd = session_git_cwd(paths.root, session)
     summary = summarize_session(paths.root, session.session_id, rebuild=False)
     evidence = evidence_rows(paths.root, session.session_id, rebuild=False)
     context_projection = build_context_projection(
@@ -1179,7 +1275,11 @@ def build_final_report(
         if audit_for_session
         else latest_pack
     )
-    doctor = run_doctor(paths.root).as_dict() if run_health_check else None
+    resolved_doctor: dict[str, Any] | None = (
+        (run_doctor(paths.root).as_dict() if run_health_check else None)
+        if doctor is _UNSET
+        else doctor  # type: ignore[assignment]
+    )
     session_audit = audit_session(
         paths.root,
         session.session_id,
@@ -1190,7 +1290,7 @@ def build_final_report(
         evidence=evidence,
         latest_pack=pack_for_session,
         context_audit=audit_for_session,
-        doctor=doctor,
+        doctor=resolved_doctor,
         expansion_inventory=expansion_inventory,
     )
     if claims_text is not None:
@@ -1213,13 +1313,13 @@ def build_final_report(
             evidence=evidence,
         )
         claims_audit = recorded if recorded["claims"] else None
-    gaps = _known_gaps(summary, evidence, context_audit, doctor, session_audit, claims_audit)
+    gaps = _known_gaps(summary, evidence, context_audit, resolved_doctor, session_audit, claims_audit)
     brief = evidence_brief(evidence)
     handoff = _agent_handoff(
         summary=summary,
         evidence_brief_payload=brief,
         context_audit=audit_for_session,
-        doctor=doctor,
+        doctor=resolved_doctor,
         session_audit=session_audit,
         claims_audit=claims_audit,
         known_gaps=gaps,
@@ -1248,7 +1348,7 @@ def build_final_report(
             "head": (git_head(git_cwd) if git_cwd else None) or session.git_head,
             "dirty": bool(git_status_short(git_cwd)) if git_cwd else False,
         },
-        "health": doctor,
+        "health": resolved_doctor,
         "known_gaps": gaps,
     }
 
@@ -1625,12 +1725,26 @@ def context_packs(
     )
 
 
-def _resolve_session(root: str | Path, session_id: str | None) -> SessionState:
-    if session_id:
+def _resolve_session(
+    root: str | Path,
+    session_id: str | None,
+    *,
+    rebuild: bool = True,
+) -> SessionState:
+    if session_id is not None:
+        validate_id(session_id, "session id")
         persisted = read_session_state(root, session_id)
         if persisted:
             return persisted
-        summary = summarize_session(root, session_id)
+        paths = paths_for(root)
+        summary = summarize_session(root, session_id, rebuild=rebuild)
+        exists = (
+            (paths.sessions / session_id).exists()
+            or (paths.archives / "sessions" / session_id).exists()
+            or summary["events"] > 0
+        )
+        if not exists:
+            raise AgentDirStateError(f"Unknown session: {session_id}")
         return SessionState(
             session_id=session_id,
             title=session_id,

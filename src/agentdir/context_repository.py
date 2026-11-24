@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -36,6 +37,28 @@ HEADER_CONTEXT_DECISION_ID = "X-AgentDir-Context-Decision-Id"
 HEADER_CONTEXT_DECISION_REVISION = "X-AgentDir-Context-Decision-Revision"
 HEADER_CONSUMPTION_PURPOSE = "X-AgentDir-Consumption-Purpose"
 HEADER_ENFORCEMENT_MODE = "X-AgentDir-Enforcement-Mode"
+HEADER_BLOB_SHA256 = "X-AgentDir-Blob-SHA256"
+
+_CANONICAL_HEADER_BY_LOWER = {
+    name.lower(): name
+    for name in (
+        HEADER_PROTOCOL,
+        HEADER_PACK_ID,
+        HEADER_CONTEXT_QUERY,
+        HEADER_CONTEXT_SCOPE,
+        HEADER_SOURCE_ID,
+        HEADER_REVIEWED_SOURCE_ID,
+        HEADER_USED_SOURCE_ID,
+        HEADER_DISMISSED_SOURCE_ID,
+        HEADER_CONTEXT_DISPOSITION,
+        HEADER_CONTEXT_DECISION_ID,
+        HEADER_CONTEXT_DECISION_REVISION,
+        HEADER_CONSUMPTION_PURPOSE,
+        HEADER_ENFORCEMENT_MODE,
+        HEADER_BLOB_SHA256,
+    )
+}
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 CONSUMPTION_PURPOSES = ("plan", "tool", "answer", "handoff")
 CONTEXT_DISPOSITIONS = ("used", "no_relevant", "skipped")
@@ -66,14 +89,38 @@ def read_context_manifest(
     )
     if identity_error:
         raise AgentDirError(f"Context pack creation identity is invalid: {identity_error}")
-    sha = event["headers"].get("X-AgentDir-Blob-SHA256")
-    if not sha:
+    sha_values = (event.get("header_values") or {}).get(HEADER_BLOB_SHA256)
+    if sha_values is None:
+        single_sha = (event.get("headers") or {}).get(HEADER_BLOB_SHA256)
+        sha_values = [single_sha] if single_sha else []
+    if not sha_values:
         raise AgentDirError(f"Context pack has no manifest artifact: {pack_id}")
+    if len(sha_values) != 1:
+        raise AgentDirError(f"Context pack has multiple manifest artifact headers: {pack_id}")
+    sha = sha_values[0]
+    if not _SHA256_RE.fullmatch(sha):
+        raise AgentDirError(f"Context pack manifest artifact digest is invalid: {sha}")
     manifest_file = artifact_path(root, sha)
+    if (
+        manifest_file.is_symlink()
+        or manifest_file.parent.is_symlink()
+        or manifest_file.parent.parent.is_symlink()
+    ):
+        raise AgentDirError(f"Context pack manifest artifact must not be a symlink: {sha}")
     if not manifest_file.is_file():
         raise AgentDirError(f"Context pack manifest artifact is missing: {sha}")
+    blobs_root = (paths_for(root).artifacts / "blobs" / "sha256").resolve()
     try:
-        manifest_bytes = manifest_file.read_bytes()
+        resolved_manifest = manifest_file.resolve(strict=True)
+        resolved_manifest.relative_to(blobs_root)
+    except (OSError, ValueError) as exc:
+        raise AgentDirError(
+            f"Context pack manifest artifact is outside artifact storage: {sha}"
+        ) from exc
+    if not resolved_manifest.is_file():
+        raise AgentDirError(f"Context pack manifest artifact is missing: {sha}")
+    try:
+        manifest_bytes = resolved_manifest.read_bytes()
     except OSError as exc:
         raise AgentDirError(f"Context pack manifest artifact is unreadable: {sha}") from exc
     actual_sha = hashlib.sha256(manifest_bytes).hexdigest()
@@ -113,9 +160,8 @@ def read_context_manifest(
         source_ids.append(source["source_id"])
     if len(source_ids) != len(set(source_ids)):
         raise AgentDirError(f"Context pack manifest contains duplicate source ids: {pack_id}")
-    briefing = manifest.get("briefing")
-    if briefing is not None:
-        _validate_briefing(pack_id, briefing, source_ids)
+    if "briefing" in manifest:
+        _validate_briefing(pack_id, manifest.get("briefing"), source_ids)
     return manifest
 
 
@@ -139,7 +185,11 @@ def context_events(
         """
         params: list[Any] = [EVENT_CONTEXT_PACK_CREATED]
     else:
-        clauses = ["hp.name = ?", "hp.value = ?", "m.event_type != ?"]
+        clauses = [
+            "lower(hp.name) = lower(?)",
+            "hp.value = ?",
+            "(m.event_type is null or m.event_type != ?)",
+        ]
         params = [HEADER_PACK_ID, pack_id, EVENT_CONTEXT_SOURCES_EXPANDED]
         if event_type:
             clauses.append("m.event_type = ?")
@@ -166,30 +216,14 @@ def context_events(
             if pack_id in set(row["pack_ids"])
             or pack_id in set(context_pack_body_ids(row.get("body_text") or ""))
         ]
-        archive_sessions = {
-            str(row.get("session_id"))
-            for row in rows
-            if row.get("session_id")
-        }
-        if archive_sessions:
-            for archived_session_id in sorted(archive_sessions):
-                rows.extend(
-                    _archived_context_events(
-                        root,
-                        pack_id,
-                        event_type=event_type,
-                        session_id=archived_session_id,
-                    )
-                )
-        else:
-            rows.extend(
-                _archived_context_events(
-                    root,
-                    pack_id,
-                    event_type=event_type,
-                    session_id=None,
-                )
+        rows.extend(
+            _archived_context_events(
+                root,
+                pack_id,
+                event_type=event_type,
+                session_id=None,
             )
+        )
     else:
         rows.extend(
             _archived_context_events(
@@ -318,10 +352,6 @@ def _validate_briefing(pack_id: str, briefing: Any, source_ids: list[str]) -> No
         raise AgentDirError(
             "Context pack manifest briefing references unknown sources: " + ", ".join(unknown)
         )
-    if bool(briefing_ids) != bool(source_ids):
-        raise AgentDirError(
-            f"Context pack manifest briefing does not present its available sources: {pack_id}"
-        )
     review_required = briefing.get("review_required")
     if not isinstance(review_required, bool) or review_required != bool(briefing_ids):
         raise AgentDirError(
@@ -426,27 +456,19 @@ def _pack_row(row: dict[str, Any], pack_id: str) -> dict[str, Any]:
 
 
 def _hydrate_context_event(row: dict[str, Any], headers: list[Any]) -> None:
-    row["headers"] = _header_map(headers)
-    row["pack_ids"] = [
-        header["value"] for header in headers if header["name"] == HEADER_PACK_ID
-    ]
-    row["source_ids"] = [
-        header["value"] for header in headers if header["name"] == HEADER_SOURCE_ID
-    ]
-    row["reviewed_source_ids"] = [
-        header["value"] for header in headers if header["name"] == HEADER_REVIEWED_SOURCE_ID
-    ]
-    explicit_used = [
-        header["value"] for header in headers if header["name"] == HEADER_USED_SOURCE_ID
-    ]
+    header_values = _header_values_map(headers)
+    row["header_values"] = header_values
+    row["headers"] = {name: values[0] for name, values in header_values.items() if values}
+    row["pack_ids"] = list(header_values.get(HEADER_PACK_ID, []))
+    row["source_ids"] = list(header_values.get(HEADER_SOURCE_ID, []))
+    row["reviewed_source_ids"] = list(header_values.get(HEADER_REVIEWED_SOURCE_ID, []))
+    explicit_used = list(header_values.get(HEADER_USED_SOURCE_ID, []))
     row["used_source_ids"] = (
         explicit_used
         if explicit_used
         else row["source_ids"] if row["event_type"] == EVENT_CONTEXT_PACK_CONSUMED else []
     )
-    row["dismissed_source_ids"] = [
-        header["value"] for header in headers if header["name"] == HEADER_DISMISSED_SOURCE_ID
-    ]
+    row["dismissed_source_ids"] = list(header_values.get(HEADER_DISMISSED_SOURCE_ID, []))
 
 
 def _archived_context_events(
@@ -472,7 +494,7 @@ def _archived_context_events(
             if not directory.is_dir():
                 continue
             for path in sorted(directory.iterdir()):
-                if not path.is_file() or path.name.startswith("."):
+                if path.is_symlink() or not path.is_file() or path.name.startswith("."):
                     continue
                 try:
                     contained = path.resolve(strict=True)
@@ -486,16 +508,14 @@ def _archived_context_events(
                 parsed_event_type = parsed.header("X-AgentDir-Event-Type")
                 if event_type and parsed_event_type != event_type:
                     continue
-                if not event_type and parsed_event_type not in {
-                    EVENT_CONTEXT_PACK_CREATED,
-                    EVENT_CONTEXT_PACK_CONSUMED,
-                    EVENT_CONTEXT_PACK_REVIEWED,
-                    EVENT_CONTEXT_SOURCES_CITED,
-                }:
+                if not event_type and parsed_event_type == EVENT_CONTEXT_SOURCES_EXPANDED:
                     continue
                 pack_ids = parsed.headers(HEADER_PACK_ID)
                 body_ids = context_pack_body_ids(parsed.body_text)
-                if pack_id not in set([*pack_ids, *body_ids]):
+                if parsed_event_type == EVENT_CONTEXT_PACK_CREATED:
+                    if pack_id not in set([*pack_ids, *body_ids]):
+                        continue
+                elif pack_id not in set(pack_ids):
                     continue
                 row = {
                     "id": 0,
@@ -545,11 +565,14 @@ def _context_event_order(row: dict[str, Any]) -> tuple[str, int, str, int]:
     )
 
 
-def _header_map(rows: list[Any]) -> dict[str, str]:
-    mapped: dict[str, str] = {}
+def _header_values_map(rows: list[Any]) -> dict[str, list[str]]:
+    mapped: dict[str, list[str]] = {}
+    first_name_by_lower: dict[str, str] = {}
     for row in rows:
-        name = row["name"]
-        value = row["value"]
-        if name not in mapped:
-            mapped[name] = value
+        raw_name = str(row["name"])
+        lower = raw_name.lower()
+        canonical = _CANONICAL_HEADER_BY_LOWER.get(lower)
+        if canonical is None:
+            canonical = first_name_by_lower.setdefault(lower, raw_name)
+        mapped.setdefault(canonical, []).append(str(row["value"]))
     return mapped

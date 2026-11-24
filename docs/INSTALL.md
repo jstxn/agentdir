@@ -121,8 +121,9 @@ AGENTDIR_FORCE_VENV=1 AGENTDIR_WHEEL=/path/to/agentdir_cli-0.10.0-py3-none-any.w
 
 ## Roll Back To The Previous Release
 
-Rollback does not rely on the installed `agentdir` binary. It fetches the
-installer from the target GitHub Release tag and reinstalls that wheel.
+Rollback does not rely on the installed `agentdir` binary. It runs the current
+installer targeting the requested GitHub Release tag and verifies the installed
+version.
 
 To return to the previous stable release:
 
@@ -171,7 +172,6 @@ than setup weight:
 ```bash
 pipx inject agentdir-cli 'agentdir-cli[semantic]'
 agentdir memory embeddings configure fastembed   # one-time model download
-agentdir memory backend configure sqlite-vec     # optional: faster large stores
 ```
 
 Once FastEmbed is configured and importable, normal automatic callers fuse its
@@ -186,13 +186,14 @@ Reach for it when:
 
 - queries are paraphrases rather than the recorded wording ("auth timeouts"
   should match "login requests hang for 30s"),
-- memory is federated across several repos with different vocabularies,
-- the store has grown past tens of thousands of passages and `sqlite-vec`
-  lookup speed starts to matter.
+- memory is federated across several repos with different vocabularies.
 
 Skip it for single-repo stores with recent, literally-worded memory; automatic
 retrieval will continue using the built-in backend without a model download.
-`agentdir memory backend status` shows which backends are active.
+`agentdir memory backend list` shows which backends are active. Note that
+`agentdir memory backend configure sqlite-vec` records backend configuration
+intent, while `sqlite-vec` retrieval currently reports `not-implemented` and
+active searches run on the built-in hybrid/FastEmbed SQLite index.
 
 ## Store Location Scopes
 

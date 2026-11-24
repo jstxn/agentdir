@@ -88,9 +88,13 @@ def rich_status(status: dict[str, Any]) -> str | None:
     table.add_row("evidence", "count", str(status["evidence"]["count"]))
     table.add_row("memory", "documents", str(memory.get("memory_documents", 0)))
     table.add_row("memory", "passages", str(memory.get("passages", 0)))
-    table.add_row("federation", "registered_roots", str(federation["registered_roots"]))
-    table.add_row("federation", "stale_roots", str(federation["stale_roots"]))
+    table.add_row("federation", "registered_roots", str(federation.get("registered_roots", 0)))
+    table.add_row("federation", "stale_roots", str(federation.get("stale_roots", 0)))
     table.add_row("health", "doctor_ok", _bool(health["ok"]))
+    for warning in health.get("warnings") or []:
+        table.add_row("health", "warning", str(warning))
+    for error in health.get("errors") or []:
+        table.add_row("health", "error", str(error))
     return _export(table, Console)
 
 
@@ -148,6 +152,7 @@ def _export(renderable: Any, Console: Any) -> str:
         record=True,
         force_terminal=False,
         color_system=None,
+        markup=False,
         width=120,
         file=io.StringIO(),
     )

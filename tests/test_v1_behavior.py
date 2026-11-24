@@ -158,7 +158,12 @@ def test_user_and_machine_scopes_resolve_without_explicit_root(tmp_path: Path) -
     machine = tmp_path / "machine"
     home.mkdir()
 
-    user_result = run_cli("init", "--scope", "user", env_extra={"HOME": str(home)})
+    user_result = run_cli(
+        "init",
+        "--scope",
+        "user",
+        env_extra={"HOME": str(home), "XDG_DATA_HOME": str(home / ".local" / "share")},
+    )
     machine_result = run_cli(
         "init",
         "--scope",

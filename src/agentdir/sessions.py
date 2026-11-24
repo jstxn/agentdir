@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -40,8 +41,11 @@ def now_iso() -> str:
 
 
 def safe_session_id(value: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "._@+-" else "-" for ch in value.strip())
-    safe = safe.strip(".-") or "agent-session"
+    safe = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch in "._@+-") else "-"
+        for ch in value.strip()
+    )
+    safe = safe.lstrip("._@+-").rstrip(".-") or "agent-session"
     return validate_id(safe[:128], "session id")
 
 
@@ -488,31 +492,76 @@ def _start_session_locked(
             git_head=git_head(session_cwd),
             started_at=now_iso(),
         )
-        write_session_state(root, state, cwd=session_cwd)
-        if emit_started:
-            body = "\n".join(
-                [
-                    f"session_id={state.session_id}",
-                    f"title={state.title}",
-                    f"actor={state.actor}",
-                    f"workspace={state.workspace}",
-                    f"git_head={state.git_head or ''}",
-                    f"started_at={state.started_at}",
-                    "",
-                    note or "AgentDir session started.",
-                ]
-            )
-            emit_event(
-                root,
-                session_id=state.session_id,
-                event_type="session.started",
-                body=body,
-                subject=state.title,
-                from_actor=actor,
-                workspace=state.workspace,
-                git_head=state.git_head,
-            )
+        pointer_snapshot = _snapshot_session_pointers(root, session_cwd)
+        try:
+            if emit_started:
+                body = "\n".join(
+                    [
+                        f"session_id={state.session_id}",
+                        f"title={state.title}",
+                        f"actor={state.actor}",
+                        f"workspace={state.workspace}",
+                        f"git_head={state.git_head or ''}",
+                        f"started_at={state.started_at}",
+                        "",
+                        note or "AgentDir session started.",
+                    ]
+                )
+                emit_event(
+                    root,
+                    session_id=state.session_id,
+                    event_type="session.started",
+                    body=body,
+                    subject=state.title,
+                    from_actor=actor,
+                    workspace=state.workspace,
+                    git_head=state.git_head,
+                )
+            write_session_state(root, state, cwd=session_cwd)
+        except Exception:
+            _restore_session_pointers(pointer_snapshot)
+            if not _session_has_delivered_events(live_session):
+                shutil.rmtree(live_session, ignore_errors=True)
+            raise
         return state
+
+
+def _snapshot_session_pointers(root: str | Path, session_cwd: Path) -> dict[Path, str | None]:
+    pointer_paths = {
+        scoped_current_session_path(root, session_cwd),
+        _legacy_scoped_current_session_path(root, session_cwd),
+        _legacy_current_session_path(root),
+    }
+    snapshot: dict[Path, str | None] = {}
+    for path in pointer_paths:
+        try:
+            snapshot[path] = path.read_text(encoding="utf-8") if path.is_file() else None
+        except OSError:
+            snapshot[path] = None
+    return snapshot
+
+
+def _restore_session_pointers(snapshot: dict[Path, str | None]) -> None:
+    for path, content in snapshot.items():
+        try:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(path, content)
+        except OSError:
+            pass
+
+
+def _session_has_delivered_events(session_dir: Path) -> bool:
+    maildir = session_dir / "Maildir"
+    for state in ("new", "cur"):
+        box = maildir / state
+        if box.is_dir() and any(
+            item.is_file() and not item.name.startswith(".") for item in box.iterdir()
+        ):
+            return True
+    return False
 
 
 def end_session(

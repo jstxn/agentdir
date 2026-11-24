@@ -95,8 +95,89 @@ download_wheel() {
   fail "no release wheel found for $AGENTDIR_VERSION"
 }
 
+compute_sha256() {
+  local file="$1"
+  local digest _rest
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | { read -r digest _rest; printf '%s\n' "$digest"; }
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | { read -r digest _rest; printf '%s\n' "$digest"; }
+  else
+    return 1
+  fi
+}
+
+lookup_sha256() {
+  local sums_file="$1"
+  local filename="$2"
+  local digest entry
+  while read -r digest entry || [ -n "$digest" ]; do
+    [ -n "$digest" ] || continue
+    entry="${entry#\*}"
+    if [ "$(basename "$entry")" = "$filename" ]; then
+      printf '%s\n' "$digest"
+      return 0
+    fi
+  done < "$sums_file"
+  return 1
+}
+
+download_checksums() {
+  local target_dir="$1"
+  local sums_path="$target_dir/SHA256SUMS"
+  if command -v curl >/dev/null 2>&1; then
+    local sums_url="https://github.com/$AGENTDIR_REPO/releases/download/$AGENTDIR_VERSION/SHA256SUMS"
+    if curl -fsSL -o "$sums_path" "$sums_url" 2>/dev/null && [ -s "$sums_path" ]; then
+      printf '%s\n' "$sums_path"
+      return 0
+    fi
+    rm -f "$sums_path"
+  fi
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if gh release download "$AGENTDIR_VERSION" \
+      --repo "$AGENTDIR_REPO" \
+      --pattern "SHA256SUMS" \
+      --dir "$target_dir" >/dev/null 2>&1 && [ -s "$sums_path" ]; then
+      printf '%s\n' "$sums_path"
+      return 0
+    fi
+    rm -f "$sums_path"
+  fi
+  return 0
+}
+
+verify_wheel_sha256() {
+  local wheel="$1"
+  local sums_file="${2:-}"
+  local wheel_name expected actual
+  wheel_name="$(basename "$wheel")"
+
+  if [ -n "${AGENTDIR_SHA256:-}" ]; then
+    expected="$(printf '%s' "$AGENTDIR_SHA256" | tr '[:upper:]' '[:lower:]')"
+    actual="$(compute_sha256 "$wheel" | tr '[:upper:]' '[:lower:]')" ||
+      fail "AGENTDIR_SHA256 is set, but neither sha256sum nor shasum is available"
+    [ "$actual" = "$expected" ] ||
+      fail "SHA-256 mismatch for $wheel_name: expected $expected, got $actual"
+    log "verified SHA-256 for $wheel_name"
+    return 0
+  fi
+
+  if [ -n "$sums_file" ] && [ -s "$sums_file" ]; then
+    expected="$(lookup_sha256 "$sums_file" "$wheel_name" | tr '[:upper:]' '[:lower:]')" ||
+      fail "no SHA-256 entry found for $wheel_name in SHA256SUMS"
+    if actual="$(compute_sha256 "$wheel" | tr '[:upper:]' '[:lower:]')"; then
+      [ "$actual" = "$expected" ] ||
+        fail "SHA-256 mismatch for $wheel_name: expected $expected, got $actual"
+      log "verified SHA-256 for $wheel_name against SHA256SUMS"
+    else
+      log "warning: SHA256SUMS fetched, but neither sha256sum nor shasum is available; skipping checksum verification"
+    fi
+  fi
+}
+
 install_with_pipx() {
   local wheel="$1"
+  local python_cmd="$2"
   command -v pipx >/dev/null 2>&1 || return 1
   log "installing with pipx"
   # The distribution was renamed agentdir -> agentdir-cli after v0.7.4; both
@@ -105,7 +186,7 @@ install_with_pipx() {
     agentdir_cli-*) pipx uninstall agentdir >/dev/null 2>&1 || true ;;
     agentdir-*) pipx uninstall agentdir-cli >/dev/null 2>&1 || true ;;
   esac
-  pipx install --force "$wheel"
+  pipx install --force --python "$python_cmd" "$wheel"
 }
 
 install_with_venv() {
@@ -114,7 +195,13 @@ install_with_venv() {
   local venv="$AGENTDIR_HOME/venv"
   log "installing into $venv"
   "$python_cmd" -m venv "$venv"
-  "$venv/bin/python" -m pip install --upgrade pip >/dev/null
+  if [ -z "${AGENTDIR_WHEEL:-}" ]; then
+    "$venv/bin/python" -m pip install --upgrade pip >/dev/null
+  fi
+  case "$(basename "$wheel")" in
+    agentdir_cli-*) "$venv/bin/python" -m pip uninstall -y agentdir >/dev/null 2>&1 || true ;;
+    agentdir-*) "$venv/bin/python" -m pip uninstall -y agentdir-cli >/dev/null 2>&1 || true ;;
+  esac
   "$venv/bin/python" -m pip install --force-reinstall "$wheel" >/dev/null
   mkdir -p "$AGENTDIR_PREFIX/bin"
   ln -sf "$venv/bin/agentdir" "$AGENTDIR_PREFIX/bin/agentdir"
@@ -131,8 +218,14 @@ main() {
 
   local wheel
   wheel="$(download_wheel "$tmp_dir")"
+  local sums_file=""
+  if [ -z "${AGENTDIR_WHEEL:-}" ] && [ -z "${AGENTDIR_SHA256:-}" ]; then
+    sums_file="$(download_checksums "$tmp_dir")"
+  fi
+  verify_wheel_sha256 "$wheel" "$sums_file"
+
   local installed_with_venv=0
-  if [ "${AGENTDIR_FORCE_VENV:-0}" != "1" ] && install_with_pipx "$wheel"; then
+  if [ "${AGENTDIR_FORCE_VENV:-0}" != "1" ] && install_with_pipx "$wheel" "$python_cmd"; then
     installed_with_venv=0
   else
     install_with_venv "$wheel" "$python_cmd"

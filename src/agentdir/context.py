@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .artifacts import add_artifact, artifact_headers, artifact_path
+from .artifacts import add_artifact, artifact_headers
 from .context_repository import (
     CONSUMPTION_PURPOSES,
-    CONTEXT_BRIEFING_PROTOCOL,
     CONTEXT_DISPOSITIONS,
     CONTEXT_ENFORCEMENT_MODE,
     CONTEXT_PROTOCOL,
@@ -20,7 +19,6 @@ from .context_repository import (
     EVENT_CONTEXT_PACK_CREATED,
     EVENT_CONTEXT_PACK_REVIEWED,
     EVENT_CONTEXT_SOURCES_CITED,
-    EVENT_CONTEXT_SOURCES_EXPANDED,
     HEADER_CONSUMPTION_PURPOSE,
     HEADER_CONTEXT_DECISION_ID,
     HEADER_CONTEXT_DECISION_REVISION,
@@ -35,8 +33,6 @@ from .context_repository import (
     HEADER_SOURCE_ID,
     HEADER_USED_SOURCE_ID,
     context_events as _context_events,
-    context_pack_body_ids,
-    context_pack_identity_error,
     read_context_manifest,
 )
 from .context_review import (
@@ -44,7 +40,6 @@ from .context_review import (
     canonical_source_ids as _canonical_source_ids,
     context_decision_id as _context_decision_id,
     context_review_result as _context_review_result,
-    event_body_value as _event_body_value,
     fold_context_review as _fold_context_review,
     format_context_review_body as _format_context_review_body,
     latest_context_decision as _latest_context_decision,
@@ -52,43 +47,28 @@ from .context_review import (
     unique_source_ids as _unique_source_ids,
 )
 from .context_selection import (
-    CONTEXT_BRIEFING_LIMIT,
     CONTEXT_GENERIC_TERMS,
-    CONTEXT_MAX_PER_CLASS_FIRST_PASS,
-    CONTEXT_MAX_PER_SESSION,
-    CONTEXT_QUALITY_ORDER,
-    CONTEXT_QUALITY_POLICY,
-    CONTEXT_QUALITY_THRESHOLDS,
-    CONTEXT_REDUNDANT_WITH_DECISION_SESSION,
     CONTEXT_SEARCH_CANDIDATE_MULTIPLIER,
-    CONTEXT_SOURCE_PREFERENCE_ORDER,
-    CONTEXT_SOURCE_SELECTION_TIERS,
     CONTEXT_TOKEN_RE,
-    EVIDENCE_EVENTS,
-    LIFECYCLE_EVENTS,
-    MEMORY_STOPWORDS,
     brief_context_manifest,
     build_context_briefing as _build_context_briefing,
     diversify_memory_hits as _diversify_memory_hits,
+    filter_eligible_memory_hits as _filter_eligible_memory_hits,
     match_quality as _match_quality,
     pack_retrieval_query as _pack_retrieval_query,
     source_class as _source_class,
     source_role as _source_role,
 )
 from .events import emit_event
-from .envelope import parse_envelope
 from .federation import search_federated_memory
 from .fsutil import atomic_write_text
-from .index import connect_index, update_index
+from .index import update_index
 from .jev import filter_context_hits
 from .locking import lifecycle_lock
 from .memory import (
     DEFAULT_MIN_SCORE,
     RETRIEVAL_AUTO,
-    RETRIEVAL_DOCUMENT,
     RETRIEVAL_HYBRID,
-    RETRIEVAL_SEMANTIC,
-    RETRIEVAL_SEMANTIC_HYBRID,
     recent_session_summaries,
     resolve_retrieval_mode,
     search_memory,
@@ -171,6 +151,11 @@ def build_context_pack(
         ][:recent_limit]
     else:
         recent = recent_session_summaries(root, limit=recent_limit)
+    memory_hits = _filter_eligible_memory_hits(
+        memory_hits,
+        retrieval_query=retrieval_query,
+        task_intent=task,
+    )
     memory_hits, reranking = filter_context_hits(
         root, task, memory_hits, federated=bool(federated or federation_group),
     )
@@ -246,7 +231,7 @@ def build_context_manifest(
         )
         for row in pack.get("evidence") or []
     ]
-    sources = _dedupe_sources([*memory_sources, *recent_summaries, *evidence])
+    sources = _dedupe_sources([*evidence, *memory_sources, *recent_summaries])
     briefing = _build_context_briefing(
         sources,
         retrieval_query,
@@ -283,6 +268,47 @@ def build_context_manifest(
     }
 
 
+def session_has_ended(root: str | Path, session_id: str) -> bool:
+    return bool(
+        query_messages(
+            root,
+            session_id=session_id,
+            event_type="session.ended",
+            limit=1,
+        )
+    )
+
+
+def _require_mutable_session(
+    root: str | Path,
+    session_id: str,
+    *,
+    action: str,
+) -> None:
+    validate_id(session_id, "session id")
+    if (paths_for(root).archives / "sessions" / session_id).exists():
+        raise AgentDirStateError(
+            f"Cannot {action} for archived session {session_id}; start a new session"
+        )
+    if session_has_ended(root, session_id):
+        raise AgentDirStateError(
+            f"Cannot {action} for ended session {session_id}; start a new session"
+        )
+
+
+def _resolve_pack_session_id(root: str | Path, pack_id: str) -> str:
+    paths = paths_for(root)
+    if paths.index_path.is_file():
+        try:
+            manifest = read_context_manifest(root, pack_id, rebuild=False)
+            return str(manifest["session_id"])
+        except (AgentDirError, sqlite3.DatabaseError):
+            pass
+    update_index(root)
+    manifest = read_context_manifest(root, pack_id, rebuild=False)
+    return str(manifest["session_id"])
+
+
 def emit_context_pack(
     root: str | Path,
     pack: dict[str, Any],
@@ -294,17 +320,10 @@ def emit_context_pack(
     session_id = pack.get("session_id")
     if not session_id:
         raise AgentDirError("Context pack emission requires an active or explicit session")
-    with lifecycle_lock(root, f"session:{session_id}"):
+    resolved_session = validate_id(str(session_id), "session id")
+    with lifecycle_lock(root, f"session:{resolved_session}"):
         update_index(root)
-        if query_messages(
-            root,
-            session_id=session_id,
-            event_type="session.ended",
-            limit=1,
-        ):
-            raise AgentDirStateError(
-                f"Cannot emit a context pack for ended session {session_id}; start a new session"
-            )
+        _require_mutable_session(root, resolved_session, action="emit a context pack")
         return _emit_context_pack_locked(
             root,
             pack,
@@ -378,37 +397,48 @@ def consume_context_sources(
 ) -> dict[str, Any]:
     if purpose not in CONSUMPTION_PURPOSES:
         raise AgentDirError(f"Unknown consumption purpose: {purpose}")
-    with lifecycle_lock(root, f"pack:{pack_id}"):
-        update_index(root)
-        manifest = read_context_manifest(root, pack_id, rebuild=False)
-        existing_audit = audit_context_pack(root, pack_id, rebuild=False)
-        if _latest_context_decision(existing_audit["events"]):
-            raise AgentDirStateError(
-                "Context review is already terminal; lower-level consumption cannot change its decision"
-            )
-        selected = _select_manifest_sources(manifest, source_ids)
-        manifest_session = manifest["session_id"]
-        if session_id and session_id != manifest_session:
-            raise AgentDirError(
-                f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
-            )
-        resolved_session = manifest_session
-        body = _format_source_event_body("context_consumed", pack_id, purpose, selected)
-        event = emit_event(
-            root,
-            session_id=resolved_session,
-            event_type=EVENT_CONTEXT_PACK_CONSUMED,
-            subject=f"context consumed: {pack_id}",
-            body=body,
-            from_actor=actor,
-            extra_headers={
-                HEADER_PROTOCOL: CONTEXT_PROTOCOL,
-                HEADER_PACK_ID: pack_id,
-                HEADER_SOURCE_ID: [source["source_id"] for source in selected],
-                HEADER_CONSUMPTION_PURPOSE: purpose,
-                HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
-            },
+    pack_session = _resolve_pack_session_id(root, pack_id)
+    if session_id and session_id != pack_session:
+        raise AgentDirError(
+            f"Context pack {pack_id} belongs to session {pack_session}, not {session_id}"
         )
+    with lifecycle_lock(root, f"session:{pack_session}"):
+        with lifecycle_lock(root, f"pack:{pack_id}"):
+            update_index(root)
+            manifest = read_context_manifest(root, pack_id, rebuild=False)
+            manifest_session = str(manifest["session_id"])
+            if session_id and session_id != manifest_session:
+                raise AgentDirError(
+                    f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
+                )
+            _require_mutable_session(
+                root,
+                manifest_session,
+                action="consume context sources",
+            )
+            existing_audit = audit_context_pack(root, pack_id, rebuild=False)
+            if _latest_context_decision(existing_audit["events"]):
+                raise AgentDirStateError(
+                    "Context review is already terminal; lower-level consumption cannot change its decision"
+                )
+            selected = _select_manifest_sources(manifest, source_ids)
+            resolved_session = manifest_session
+            body = _format_source_event_body("context_consumed", pack_id, purpose, selected)
+            event = emit_event(
+                root,
+                session_id=resolved_session,
+                event_type=EVENT_CONTEXT_PACK_CONSUMED,
+                subject=f"context consumed: {pack_id}",
+                body=body,
+                from_actor=actor,
+                extra_headers={
+                    HEADER_PROTOCOL: CONTEXT_PROTOCOL,
+                    HEADER_PACK_ID: pack_id,
+                    HEADER_SOURCE_ID: [source["source_id"] for source in selected],
+                    HEADER_CONSUMPTION_PURPOSE: purpose,
+                    HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
+                },
+            )
     return {
         "pack_id": pack_id,
         "purpose": purpose,
@@ -439,129 +469,156 @@ def review_context_pack(
     redacted_reason = redact_text(normalized_reason)
     persisted_reason = redacted_reason.text
 
-    with lifecycle_lock(root, f"pack:{pack_id}"):
-        update_index(root)
-        manifest = read_context_manifest(root, pack_id, rebuild=False)
-        briefing_source_ids = _briefing_source_ids(manifest)
-        selected = (
-            _select_manifest_sources_by_selector(manifest, source_selectors or [])
-            if disposition == "used"
-            else []
+    pack_session = _resolve_pack_session_id(root, pack_id)
+    if session_id and session_id != pack_session:
+        raise AgentDirError(
+            f"Context pack {pack_id} belongs to session {pack_session}, not {session_id}"
         )
-        if disposition == "used" and not selected:
-            raise AgentDirError("At least one context source is required for a used decision")
-        if disposition != "used" and source_selectors:
-            raise AgentDirError(f"Context disposition {disposition} does not accept used sources")
-
-        existing_audit = audit_context_pack(root, pack_id, rebuild=False)
-        if disposition in {"no_relevant", "skipped"} and existing_audit["consumed_count"]:
-            raise AgentDirStateError("Context already has consumed sources; record a used review instead")
-
-        selected_ids = [source["source_id"] for source in selected]
-        used_ids = _canonical_source_ids(
-            [*existing_audit["consumed_source_ids"], *selected_ids],
-            manifest,
-        )
-        reviewed_ids = [] if disposition == "skipped" else list(briefing_source_ids)
-        dismissed_ids = (
-            []
-            if disposition == "skipped"
-            else [source_id for source_id in briefing_source_ids if source_id not in set(used_ids)]
-        )
-        manifest_session = manifest["session_id"]
-        if session_id and session_id != manifest_session:
-            raise AgentDirError(
-                f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
+    with lifecycle_lock(root, f"session:{pack_session}"):
+        with lifecycle_lock(root, f"pack:{pack_id}"):
+            update_index(root)
+            manifest = read_context_manifest(root, pack_id, rebuild=False)
+            manifest_session = str(manifest["session_id"])
+            if session_id and session_id != manifest_session:
+                raise AgentDirError(
+                    f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
+                )
+            _require_mutable_session(
+                root,
+                manifest_session,
+                action="review a context pack",
             )
-        resolved_session = manifest_session
-        resolved_purpose = purpose if disposition == "used" else None
-        decision_id = _context_decision_id(
-            pack_id=pack_id,
-            disposition=disposition,
-            purpose=resolved_purpose,
-            reason=persisted_reason,
-            reviewed_source_ids=reviewed_ids,
-            used_source_ids=used_ids,
-            dismissed_source_ids=dismissed_ids,
-        )
+            briefing_source_ids = _briefing_source_ids(manifest)
+            selected = (
+                _select_manifest_sources_by_selector(manifest, source_selectors or [])
+                if disposition == "used"
+                else []
+            )
+            if disposition == "used" and not selected:
+                raise AgentDirError("At least one context source is required for a used decision")
+            if disposition != "used" and source_selectors:
+                raise AgentDirError(
+                    f"Context disposition {disposition} does not accept used sources"
+                )
 
-        previous = _latest_context_decision(existing_audit["events"])
-        if previous:
-            if _same_context_decision(
-                previous,
-                decision_id=decision_id,
+            existing_audit = audit_context_pack(root, pack_id, rebuild=False)
+            if disposition in {"no_relevant", "skipped"} and existing_audit["used_count"]:
+                raise AgentDirStateError(
+                    "Context already has consumed sources; record a used review instead"
+                )
+
+            selected_ids = [source["source_id"] for source in selected]
+            used_ids = (
+                _canonical_source_ids(
+                    [*existing_audit["consumed_source_ids"], *selected_ids],
+                    manifest,
+                )
+                if disposition == "used"
+                else []
+            )
+            reviewed_ids = [] if disposition == "skipped" else list(briefing_source_ids)
+            dismissed_ids = (
+                []
+                if disposition == "skipped"
+                else [
+                    source_id
+                    for source_id in briefing_source_ids
+                    if source_id not in set(used_ids)
+                ]
+            )
+            resolved_session = manifest_session
+            resolved_purpose = purpose if disposition == "used" else None
+            decision_id = _context_decision_id(
+                pack_id=pack_id,
                 disposition=disposition,
                 purpose=resolved_purpose,
                 reason=persisted_reason,
                 reviewed_source_ids=reviewed_ids,
                 used_source_ids=used_ids,
                 dismissed_source_ids=dismissed_ids,
-            ):
-                return _context_review_result(
-                    pack_id=pack_id,
+            )
+
+            previous = _latest_context_decision(existing_audit["events"])
+            if previous:
+                if _same_context_decision(
+                    previous,
                     decision_id=decision_id,
-                    revision=1,
                     disposition=disposition,
                     purpose=resolved_purpose,
                     reason=persisted_reason,
                     reviewed_source_ids=reviewed_ids,
                     used_source_ids=used_ids,
                     dismissed_source_ids=dismissed_ids,
-                    event_path=previous.get("file_path"),
-                    recorded=False,
+                ):
+                    return _context_review_result(
+                        pack_id=pack_id,
+                        decision_id=decision_id,
+                        revision=1,
+                        disposition=disposition,
+                        purpose=resolved_purpose,
+                        reason=persisted_reason,
+                        reviewed_source_ids=reviewed_ids,
+                        used_source_ids=used_ids,
+                        dismissed_source_ids=dismissed_ids,
+                        event_path=previous.get("file_path"),
+                        recorded=False,
+                    )
+                raise AgentDirStateError(
+                    "Context review is already terminal with a different decision; start a new context pack"
                 )
-            raise AgentDirStateError(
-                "Context review is already terminal with a different decision; start a new context pack"
-            )
 
-        event_type = EVENT_CONTEXT_PACK_CONSUMED if disposition == "used" else EVENT_CONTEXT_PACK_REVIEWED
-        review_headers: dict[str, str | list[str] | None] = {
-            HEADER_PROTOCOL: CONTEXT_PROTOCOL,
-            HEADER_PACK_ID: pack_id,
-            HEADER_SOURCE_ID: used_ids if disposition == "used" else reviewed_ids,
-            HEADER_REVIEWED_SOURCE_ID: reviewed_ids,
-            HEADER_USED_SOURCE_ID: used_ids,
-            HEADER_DISMISSED_SOURCE_ID: dismissed_ids,
-            HEADER_CONTEXT_DISPOSITION: disposition,
-            HEADER_CONTEXT_DECISION_ID: decision_id,
-            HEADER_CONTEXT_DECISION_REVISION: "1",
-            HEADER_CONSUMPTION_PURPOSE: resolved_purpose,
-            HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
-        }
-        if redacted_reason.replacements:
-            review_headers["X-AgentDir-Redactions"] = str(redacted_reason.replacements)
-            review_headers["X-AgentDir-Redaction-Labels"] = ",".join(redacted_reason.labels)
-        event = emit_event(
-            root,
-            session_id=resolved_session,
-            event_type=event_type,
-            subject=f"context review {disposition}: {pack_id}",
-            body=_format_context_review_body(
+            event_type = (
+                EVENT_CONTEXT_PACK_CONSUMED
+                if disposition == "used"
+                else EVENT_CONTEXT_PACK_REVIEWED
+            )
+            review_headers: dict[str, str | list[str] | None] = {
+                HEADER_PROTOCOL: CONTEXT_PROTOCOL,
+                HEADER_PACK_ID: pack_id,
+                HEADER_SOURCE_ID: used_ids if disposition == "used" else reviewed_ids,
+                HEADER_REVIEWED_SOURCE_ID: reviewed_ids,
+                HEADER_USED_SOURCE_ID: used_ids,
+                HEADER_DISMISSED_SOURCE_ID: dismissed_ids,
+                HEADER_CONTEXT_DISPOSITION: disposition,
+                HEADER_CONTEXT_DECISION_ID: decision_id,
+                HEADER_CONTEXT_DECISION_REVISION: "1",
+                HEADER_CONSUMPTION_PURPOSE: resolved_purpose,
+                HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
+            }
+            if redacted_reason.replacements:
+                review_headers["X-AgentDir-Redactions"] = str(redacted_reason.replacements)
+                review_headers["X-AgentDir-Redaction-Labels"] = ",".join(redacted_reason.labels)
+            event = emit_event(
+                root,
+                session_id=resolved_session,
+                event_type=event_type,
+                subject=f"context review {disposition}: {pack_id}",
+                body=_format_context_review_body(
+                    pack_id=pack_id,
+                    disposition=disposition,
+                    purpose=resolved_purpose,
+                    reason=persisted_reason,
+                    presented_count=len(briefing_source_ids),
+                    reviewed_source_ids=reviewed_ids,
+                    used_source_ids=used_ids,
+                    dismissed_source_ids=dismissed_ids,
+                ),
+                from_actor=actor,
+                extra_headers=review_headers,
+            )
+            return _context_review_result(
                 pack_id=pack_id,
+                decision_id=decision_id,
+                revision=1,
                 disposition=disposition,
                 purpose=resolved_purpose,
                 reason=persisted_reason,
-                presented_count=len(briefing_source_ids),
                 reviewed_source_ids=reviewed_ids,
                 used_source_ids=used_ids,
                 dismissed_source_ids=dismissed_ids,
-            ),
-            from_actor=actor,
-            extra_headers=review_headers,
-        )
-        return _context_review_result(
-            pack_id=pack_id,
-            decision_id=decision_id,
-            revision=1,
-            disposition=disposition,
-            purpose=resolved_purpose,
-            reason=persisted_reason,
-            reviewed_source_ids=reviewed_ids,
-            used_source_ids=used_ids,
-            dismissed_source_ids=dismissed_ids,
-            event_path=str(event.path),
-            recorded=True,
-        )
+                event_path=str(event.path),
+                recorded=True,
+            )
 
 
 def cite_context_sources(
@@ -573,51 +630,62 @@ def cite_context_sources(
     session_id: str | None = None,
     actor: str = "agent",
 ) -> dict[str, Any]:
-    with lifecycle_lock(root, f"pack:{pack_id}"):
-        update_index(root)
-        manifest = read_context_manifest(root, pack_id, rebuild=False)
-        existing_audit = audit_context_pack(root, pack_id, rebuild=False)
-        selected_ids = source_ids or _default_citation_sources(manifest, existing_audit)
-        selected = _select_manifest_sources(manifest, selected_ids)
-        if existing_audit["review_required"]:
-            not_used = [
-                source["source_id"]
-                for source in selected
-                if source["source_id"] not in set(existing_audit["consumed_source_ids"])
-            ]
-            if not_used:
-                raise AgentDirStateError(
-                    "Cannot cite context before use: " + ", ".join(not_used)
-                )
-        manifest_session = manifest["session_id"]
-        if session_id and session_id != manifest_session:
-            raise AgentDirError(
-                f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
-            )
-        resolved_session = manifest_session
-        citation = {
-            "protocol": CONTEXT_PROTOCOL,
-            "pack_id": pack_id,
-            "generated_at": now_iso(),
-            "enforcement_mode": CONTEXT_ENFORCEMENT_MODE,
-            "sources": selected,
-            "source_counts": _source_counts(selected),
-        }
-        rendered = format_context_citation(citation, output_format=output_format)
-        event = emit_event(
-            root,
-            session_id=resolved_session,
-            event_type=EVENT_CONTEXT_SOURCES_CITED,
-            subject=f"context cited: {pack_id}",
-            body=rendered,
-            from_actor=actor,
-            extra_headers={
-                HEADER_PROTOCOL: CONTEXT_PROTOCOL,
-                HEADER_PACK_ID: pack_id,
-                HEADER_SOURCE_ID: [source["source_id"] for source in selected],
-                HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
-            },
+    pack_session = _resolve_pack_session_id(root, pack_id)
+    if session_id and session_id != pack_session:
+        raise AgentDirError(
+            f"Context pack {pack_id} belongs to session {pack_session}, not {session_id}"
         )
+    with lifecycle_lock(root, f"session:{pack_session}"):
+        with lifecycle_lock(root, f"pack:{pack_id}"):
+            update_index(root)
+            manifest = read_context_manifest(root, pack_id, rebuild=False)
+            manifest_session = str(manifest["session_id"])
+            if session_id and session_id != manifest_session:
+                raise AgentDirError(
+                    f"Context pack {pack_id} belongs to session {manifest_session}, not {session_id}"
+                )
+            _require_mutable_session(
+                root,
+                manifest_session,
+                action="cite context sources",
+            )
+            existing_audit = audit_context_pack(root, pack_id, rebuild=False)
+            selected_ids = source_ids or _default_citation_sources(manifest, existing_audit)
+            selected = _select_manifest_sources(manifest, selected_ids)
+            if existing_audit["review_required"]:
+                not_used = [
+                    source["source_id"]
+                    for source in selected
+                    if source["source_id"] not in set(existing_audit["consumed_source_ids"])
+                ]
+                if not_used:
+                    raise AgentDirStateError(
+                        "Cannot cite context before use: " + ", ".join(not_used)
+                    )
+            resolved_session = manifest_session
+            citation = {
+                "protocol": CONTEXT_PROTOCOL,
+                "pack_id": pack_id,
+                "generated_at": now_iso(),
+                "enforcement_mode": CONTEXT_ENFORCEMENT_MODE,
+                "sources": selected,
+                "source_counts": _source_counts(selected),
+            }
+            rendered = format_context_citation(citation, output_format=output_format)
+            event = emit_event(
+                root,
+                session_id=resolved_session,
+                event_type=EVENT_CONTEXT_SOURCES_CITED,
+                subject=f"context cited: {pack_id}",
+                body=rendered,
+                from_actor=actor,
+                extra_headers={
+                    HEADER_PROTOCOL: CONTEXT_PROTOCOL,
+                    HEADER_PACK_ID: pack_id,
+                    HEADER_SOURCE_ID: [source["source_id"] for source in selected],
+                    HEADER_ENFORCEMENT_MODE: CONTEXT_ENFORCEMENT_MODE,
+                },
+            )
     citation["event_path"] = str(event.path)
     citation["rendered"] = format_context_citation(citation, output_format=output_format)
     return citation

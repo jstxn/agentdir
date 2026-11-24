@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,13 @@ from typing import Iterable
 from .store import AgentDirError
 
 AGENTDIR_VERSION = "0.1"
+
+_CRLF_RUN_RE = re.compile(r"[\r\n]+")
+_SINGLE_ADDRESS_LOCAL_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:\.[A-Za-z0-9_+-]+)*\Z")
+_SINGLE_ADDRESS_DOMAIN_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z"
+)
 
 
 def header_value(value: object) -> str:
@@ -70,12 +78,42 @@ class ParsedEnvelope:
         return hashlib.sha256(self.body_text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _sanitize_header_value(value: str) -> str:
+    return _CRLF_RUN_RE.sub(" ", str(value)).strip()
+
+
+def _validate_header_name(name: str) -> str:
+    if (
+        not isinstance(name, str)
+        or not name
+        or not name.isascii()
+        or any(ch in name for ch in "\r\n:")
+        or any(ord(ch) < 33 or ord(ch) > 126 for ch in name)
+    ):
+        raise AgentDirError(f"Invalid header name: {name!r}")
+    return name
+
+
+def _safe_local_part(value: str) -> str:
+    safe = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch in "._+-") else "-"
+        for ch in value
+    )
+    safe = re.sub(r"\.{2,}", ".", safe).strip(".")
+    return safe or "agentdir"
+
+
 def actor_address(actor: str | None) -> str:
-    local = (actor or "agentdir").strip() or "agentdir"
+    local = _sanitize_header_value(actor or "agentdir") or "agentdir"
     if "@" in local:
-        return local
-    safe = "".join(ch if ch.isalnum() or ch in "._+-" else "-" for ch in local)
-    return f"{safe}@agentdir.local"
+        parts = local.split("@")
+        if (
+            len(parts) == 2
+            and _SINGLE_ADDRESS_LOCAL_RE.fullmatch(parts[0])
+            and _SINGLE_ADDRESS_DOMAIN_RE.fullmatch(parts[1])
+        ):
+            return local
+    return f"{_safe_local_part(local)}@agentdir.local"
 
 
 def build_envelope(
@@ -97,17 +135,21 @@ def build_envelope(
     extra_headers: dict[str, str | Iterable[str]] | None = None,
     message_id: str | None = None,
 ) -> EmailMessage:
-    if not event_type:
+    clean_event_type = _sanitize_header_value(event_type) if event_type else ""
+    if not clean_event_type:
         raise AgentDirError("event_type is required")
 
+    clean_message_id = _sanitize_header_value(message_id) if message_id else ""
+    clean_subject = _sanitize_header_value(subject) if subject is not None else ""
+
     msg = EmailMessage(policy=policy.default)
-    msg["Message-ID"] = message_id or make_msgid(domain="agentdir.local")
+    msg["Message-ID"] = clean_message_id or make_msgid(domain="agentdir.local")
     msg["Date"] = format_datetime(datetime.now(UTC))
     msg["From"] = actor_address(from_actor)
     msg["To"] = actor_address(to_actor or session_id or "agentdir")
-    msg["Subject"] = subject or event_type
+    msg["Subject"] = clean_subject or clean_event_type
     msg["X-AgentDir-Version"] = AGENTDIR_VERSION
-    msg["X-AgentDir-Event-Type"] = event_type
+    msg["X-AgentDir-Event-Type"] = clean_event_type
     msg["X-AgentDir-Created-Ns"] = str(time.time_ns())
 
     optional = {
@@ -120,13 +162,20 @@ def build_envelope(
     }
     for name, value in optional.items():
         if value:
-            msg[name] = value
+            cleaned = _sanitize_header_value(value)
+            if cleaned:
+                msg[name] = cleaned
 
-    if parent_message_id:
-        msg["In-Reply-To"] = parent_message_id
-    refs = list(references or [])
-    if parent_message_id and parent_message_id not in refs:
-        refs.append(parent_message_id)
+    clean_parent = _sanitize_header_value(parent_message_id) if parent_message_id else ""
+    if clean_parent:
+        msg["In-Reply-To"] = clean_parent
+    refs = [
+        cleaned
+        for ref in (references or [])
+        if (cleaned := _sanitize_header_value(ref))
+    ]
+    if clean_parent and clean_parent not in refs:
+        refs.append(clean_parent)
     if refs:
         msg["References"] = " ".join(refs)
 
@@ -134,12 +183,13 @@ def build_envelope(
         for name, value in source.items():
             if value is None:
                 continue
+            header_name = _validate_header_name(name)
             if isinstance(value, str):
-                msg[name] = value
+                msg[header_name] = _sanitize_header_value(value)
                 continue
             for item in value:
                 if item is not None:
-                    msg[name] = str(item)
+                    msg[header_name] = _sanitize_header_value(str(item))
 
     msg.set_content(body, subtype="plain", charset="utf-8")
     return msg

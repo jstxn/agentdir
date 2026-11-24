@@ -249,7 +249,7 @@ def summarize_session(root: str | Path, session_id: str | None = None, *, rebuil
     resolved = resolve_review_session(root, session_id)
     if rebuild:
         ensure_index(root)
-    rows = query_messages(root, session_id=resolved, limit=10_000)
+    rows = query_messages(root, session_id=resolved, limit=None)
     counts = Counter(row.get("event_type") or "unknown" for row in rows)
     tool_results = [row for row in rows if row.get("event_type") == "tool.result"]
     failure_state = evidence_failure_state(tool_results)
@@ -287,7 +287,7 @@ def evidence_rows(root: str | Path, session_id: str | None = None, *, rebuild: b
     resolved = resolve_review_session(root, session_id)
     if rebuild:
         ensure_index(root)
-    rows = query_messages(root, session_id=resolved, limit=10_000)
+    rows = query_messages(root, session_id=resolved, limit=None)
     wanted = {"tool.call", "tool.result", "file.diff"}
     evidence = [
         row
@@ -348,10 +348,10 @@ def classify_evidence_command(argv: Sequence[str], *, tool_name: str | None = No
     env_family = _env_command_family(executable, command[1:])
     if env_family is not None:
         return env_family
-    uv_family = _uv_command_family(executable, lowered[1:])
+    uv_family = _uv_command_family(executable, command[1:])
     if uv_family is not None:
         return uv_family
-    python_family = _python_command_family(executable, lowered[1:])
+    python_family = _python_command_family(executable, command[1:])
     if python_family is not None:
         return python_family
     package_family = _package_command_family(executable, command[1:])
@@ -493,8 +493,18 @@ def _parse_env_short_option(value: str) -> tuple[str, str | None]:
 
 
 def _is_env_assignment(value: str) -> bool:
+    if (
+        "<redacted:key-value-secret>" in value
+        and not value.startswith("-")
+        and not any(character.isspace() for character in value)
+    ):
+        return True
     name, separator, _ = value.partition("=")
     return bool(name and separator)
+
+
+def _uv_option_key(value: str) -> str:
+    return value.lower() if value.startswith("--") else value
 
 
 def _uv_command_family(executable: str, argv: Sequence[str]) -> str | None:
@@ -509,31 +519,39 @@ def _uv_command_family(executable: str, argv: Sequence[str]) -> str | None:
     index = 0
     while index < len(wrapped):
         part = wrapped[index]
+        option_key = _uv_option_key(part)
         if part == "--":
             command = wrapped[index + 1 :]
             return classify_evidence_command(command) if command else "diagnostic"
-        if part in {"-m", "--module"}:
+        if option_key in {"-m", "--module"}:
             if index + 1 >= len(wrapped):
                 return "diagnostic"
             return classify_evidence_command(["python", "-m", *wrapped[index + 1 :]])
-        if part.startswith("--module="):
+        if option_key.startswith("--module="):
             module = part.split("=", 1)[1]
             return classify_evidence_command(["python", "-m", module, *wrapped[index + 1 :]])
-        if part in {"-s", "--script", "--gui-script"}:
+        if option_key in {"-s", "--script", "--gui-script"}:
             if index + 1 >= len(wrapped):
                 return "diagnostic"
             return classify_evidence_command(["python", *wrapped[index + 1 :]])
-        if part.startswith(("--script=", "--gui-script=")):
+        if option_key.startswith(("--script=", "--gui-script=")):
             script = part.split("=", 1)[1]
             return classify_evidence_command(["python", script, *wrapped[index + 1 :]])
-        if part in _UV_OPTIONS_WITH_VALUES:
+        if option_key in _UV_OPTIONS_WITH_VALUES:
             index += 2
             continue
-        if any(part.startswith(f"{option}=") for option in _UV_OPTIONS_WITH_VALUES if option.startswith("--")):
+        if part.startswith("--") and any(
+            option_key.startswith(f"{option}=")
+            for option in _UV_OPTIONS_WITH_VALUES
+            if option.startswith("--")
+        ):
             index += 1
             continue
-        if part in _UV_FLAG_OPTIONS or (
-            len(part) > 2 and part.startswith("-") and set(part[1:]) <= {"q", "v"}
+        if option_key in _UV_FLAG_OPTIONS or (
+            len(part) > 2
+            and part.startswith("-")
+            and not part.startswith("--")
+            and set(part[1:]) <= {"q", "v"}
         ):
             index += 1
             continue
@@ -550,16 +568,24 @@ def _uv_run_index(argv: Sequence[str]) -> int | None:
     index = 0
     while index < len(argv):
         part = argv[index]
-        if part == "run":
+        if part.lower() == "run":
             return index
-        if part in _UV_OPTIONS_WITH_VALUES:
+        option_key = _uv_option_key(part)
+        if option_key in _UV_OPTIONS_WITH_VALUES:
             index += 2
             continue
-        if any(part.startswith(f"{option}=") for option in _UV_OPTIONS_WITH_VALUES if option.startswith("--")):
+        if part.startswith("--") and any(
+            option_key.startswith(f"{option}=")
+            for option in _UV_OPTIONS_WITH_VALUES
+            if option.startswith("--")
+        ):
             index += 1
             continue
-        if part in _UV_FLAG_OPTIONS or (
-            len(part) > 2 and part.startswith("-") and set(part[1:]) <= {"q", "v"}
+        if option_key in _UV_FLAG_OPTIONS or (
+            len(part) > 2
+            and part.startswith("-")
+            and not part.startswith("--")
+            and set(part[1:]) <= {"q", "v"}
         ):
             index += 1
             continue
@@ -619,23 +645,58 @@ def _evidence_command_argv(row: dict[str, Any]) -> list[str]:
     return []
 
 
+_PYTHON_FLAG_OPTIONS = frozenset("BEIOPSbdiqsuvx")
+
+
 def _python_command_family(executable: str, argv: Sequence[str]) -> str | None:
     if not executable.startswith("python"):
         return None
-    if "-c" in argv:
-        return "diagnostic"
-    if "-m" in argv:
-        module_index = argv.index("-m") + 1
-        if module_index >= len(argv):
+    index = 0
+    while index < len(argv):
+        part = argv[index]
+        if part in {"-", "--"}:
             return "diagnostic"
-        module = argv[module_index].split(".", 1)[0]
-        module_family = _identity_family(module)
-        if module_family:
-            return module_family
-        return "diagnostic"
-    if not argv or argv[0].startswith("-"):
-        return "diagnostic"
-    return _identity_family(Path(argv[0]).name) or "diagnostic"
+        if not part.startswith("-"):
+            return _identity_family(Path(part).name) or "diagnostic"
+        if part == "--check-hash-based-pycs":
+            if index + 1 >= len(argv):
+                return "diagnostic"
+            index += 2
+            continue
+        if part.startswith("--check-hash-based-pycs="):
+            index += 1
+            continue
+        if part.startswith("--"):
+            return "diagnostic"
+        consumed_value = False
+        for offset, option in enumerate(part[1:], start=1):
+            if option == "c":
+                return "diagnostic"
+            if option == "m":
+                attached = part[offset + 1 :]
+                if attached:
+                    module_arg = attached
+                else:
+                    if index + 1 >= len(argv):
+                        return "diagnostic"
+                    module_arg = argv[index + 1]
+                module = module_arg.split(".", 1)[0]
+                return _identity_family(module) or "diagnostic"
+            if option in {"W", "X"}:
+                attached = part[offset + 1 :]
+                if attached:
+                    index += 1
+                else:
+                    if index + 1 >= len(argv):
+                        return "diagnostic"
+                    index += 2
+                consumed_value = True
+                break
+            if option not in _PYTHON_FLAG_OPTIONS:
+                return "diagnostic"
+        if not consumed_value:
+            index += 1
+    return "diagnostic"
 
 
 def _package_command_family(executable: str, argv: Sequence[str]) -> str | None:

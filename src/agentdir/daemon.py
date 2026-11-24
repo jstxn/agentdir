@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - AgentDir targets Unix-like developer machines.
+    fcntl = None
 
 from .federation import rebuild_registered_roots
 from .fsutil import atomic_write_text
@@ -19,6 +26,8 @@ from .store import AgentDirError, init_root, paths_for, require_root
 DAEMON_STATE_FILE = "memory-daemon.json"
 DAEMON_STOP_FILE = "memory-daemon.stop"
 DAEMON_LOG_FILE = "memory-daemon.log"
+DAEMON_LOCK_FILE = ".memory-daemon.lock"
+DAEMON_START_WAIT_SECONDS = 5.0
 
 
 def start_memory_daemon(
@@ -30,8 +39,12 @@ def start_memory_daemon(
 ) -> dict[str, Any]:
     paths = init_root(root)
     current = memory_daemon_status(paths.root)
-    if current["running"] and not force:
-        return {**current, "started": False}
+    if current["running"]:
+        if not force:
+            return {**current, "started": False}
+        stopped = stop_memory_daemon(paths.root)
+        if stopped["running"]:
+            raise AgentDirError("Existing memory daemon did not stop before restart")
     _stop_path(paths.root).unlink(missing_ok=True)
     log_path = paths.state / DAEMON_LOG_FILE
     command = [
@@ -48,18 +61,27 @@ def start_memory_daemon(
     ]
     if group:
         command.extend(["--group", group])
-    log = log_path.open("ab")
-    process = subprocess.Popen(
-        command,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        cwd=Path.cwd(),
-        env=os.environ.copy(),
-        start_new_session=True,
-    )
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=Path.cwd(),
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
     state = _daemon_state(paths.root, pid=process.pid, interval=interval, group=group)
     state.update({"started": True, "log_path": str(log_path)})
     _write_state(paths.root, state)
+    if fcntl is not None:
+        deadline = time.monotonic() + DAEMON_START_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            locked, lock_pid = _daemon_lock_state(paths.root)
+            if locked and lock_pid == process.pid:
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.02)
     return memory_daemon_status(paths.root) | {"started": True}
 
 
@@ -71,31 +93,41 @@ def run_memory_daemon(
     once: bool = False,
 ) -> dict[str, Any]:
     paths = init_root(root)
-    state = _daemon_state(paths.root, pid=os.getpid(), interval=interval, group=group)
-    _write_state(paths.root, state)
-    _refresh(paths.root, group=group)
-    if once:
-        return memory_daemon_status(paths.root)
-    if _watchfiles_available():
-        _watch_loop(paths.root, group=group, interval=interval)
-    else:
-        _poll_loop(paths.root, group=group, interval=interval)
+    with _daemon_lock(paths.root):
+        state = _daemon_state(paths.root, pid=os.getpid(), interval=interval, group=group)
+        _write_state(paths.root, state)
+        _refresh(paths.root, group=group)
+        if not once:
+            if _watchfiles_available():
+                _watch_loop(paths.root, group=group, interval=interval)
+            else:
+                _poll_loop(paths.root, group=group, interval=interval)
     return memory_daemon_status(paths.root)
 
 
 def stop_memory_daemon(root: str | Path, *, timeout: float = 5.0) -> dict[str, Any]:
     paths = require_root(root)
-    _stop_path(paths.root).write_text(now_iso() + "\n", encoding="utf-8")
-    status = memory_daemon_status(paths.root)
-    pid = status.get("pid")
-    if pid and status["running"]:
-        try:
-            os.kill(int(pid), signal.SIGTERM)
-        except OSError:
-            pass
+    _stop_path(paths.root).parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(_stop_path(paths.root), now_iso() + "\n")
+    running, pid = _daemon_liveness(paths.root)
+    if running and fcntl is not None and pid is None:
+        # Wait briefly if the daemon just acquired the lock before flushing its PID.
+        pid_deadline = time.monotonic() + min(timeout, 0.25)
+        while time.monotonic() < pid_deadline:
+            running, pid = _daemon_lock_state(paths.root)
+            if not running or pid is not None:
+                break
+            time.sleep(0.01)
+    if running:
+        if pid:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except OSError:
+                pass
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not _pid_running(int(pid)):
+            still_running, _ = _daemon_liveness(paths.root)
+            if not still_running:
                 break
             time.sleep(0.05)
     return memory_daemon_status(paths.root)
@@ -104,8 +136,9 @@ def stop_memory_daemon(root: str | Path, *, timeout: float = 5.0) -> dict[str, A
 def memory_daemon_status(root: str | Path) -> dict[str, Any]:
     paths = require_root(root)
     state = _read_state(paths.root)
-    pid = state.get("pid")
-    running = _pid_running(int(pid)) if pid else False
+    running, lock_pid = _daemon_liveness(paths.root, state=state)
+    if running and lock_pid is not None:
+        state = {**state, "pid": lock_pid}
     return {
         **state,
         "running": running,
@@ -170,7 +203,7 @@ def _refresh(root: Path, *, group: str | None) -> None:
     state = _read_state(root)
     try:
         result = update_index(root)
-        roots = rebuild_registered_roots(root, group=group)
+        roots = rebuild_registered_roots(root, group=group, stale_only=True)
     except Exception as exc:
         state.update(
             {
@@ -195,7 +228,7 @@ def _refresh(root: Path, *, group: str | None) -> None:
 
 def _watch_paths(root: Path) -> list[str]:
     paths = paths_for(root)
-    candidates = [paths.sessions, paths.actors, paths.queues, paths.state]
+    candidates = [paths.sessions, paths.actors, paths.queues]
     return [str(path) for path in candidates if path.exists()]
 
 
@@ -236,6 +269,80 @@ def _stop_path(root: Path) -> Path:
     return paths_for(root).state / DAEMON_STOP_FILE
 
 
+def _lock_path(root: Path) -> Path:
+    return paths_for(root).state / DAEMON_LOCK_FILE
+
+
+@contextmanager
+def _daemon_lock(root: Path):
+    lock_path = _lock_path(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise AgentDirError("Memory daemon is already running for this root") from exc
+                raise
+        lock.seek(0)
+        lock.truncate()
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _daemon_lock_state(root: Path) -> tuple[bool, int | None]:
+    if fcntl is None:
+        return False, None
+    lock_path = _lock_path(root)
+    if not lock_path.is_file():
+        return False, None
+    try:
+        with lock_path.open("r+", encoding="utf-8") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    lock.seek(0)
+                    return True, _parse_lock_pid(lock.read())
+                raise
+            try:
+                return False, None
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except FileNotFoundError:
+        return False, None
+
+
+def _daemon_liveness(
+    root: Path,
+    *,
+    state: dict[str, Any] | None = None,
+) -> tuple[bool, int | None]:
+    if fcntl is not None:
+        return _daemon_lock_state(root)
+    current = _read_state(root) if state is None else state
+    raw_pid = current.get("pid")
+    pid = int(raw_pid) if raw_pid else None
+    return (_pid_running(pid) if pid else False), pid
+
+
+def _parse_lock_pid(raw: str) -> int | None:
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
 def _pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -243,6 +350,14 @@ def _pid_running(pid: int) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.is_file():
+        try:
+            fields = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if fields and fields[0] == "Z":
+                return False
+        except (OSError, IndexError):
+            return False
     return True
 
 

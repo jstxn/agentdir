@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .actors import create_actor, send_message
@@ -41,6 +43,7 @@ from .context import (
 )
 from .capture import DEFAULT_MAX_CAPTURE_BYTES, run_tool
 from .control import (
+    _repo_cwd_for_root,
     adopt_repo,
     brief_work_finish,
     build_final_report,
@@ -71,6 +74,7 @@ from .federation import format_root_diagnostics, format_root_groups, format_root
 from .federation import list_registered_roots, list_root_groups, rebuild_registered_roots, register_root, remove_registered_root
 from .federation import remove_root_from_group, suggest_roots
 from .federation import search_federated_memory
+from .git import git_common_root
 from .gitignore import GITIGNORE_CHOICES, ensure_agentdir_ignored, gitignore_plan
 from .hooks import (
     DEFAULT_HOOKS,
@@ -139,9 +143,29 @@ from .upgrade import UpgradeOptions, format_upgrade_result, upgrade_agentdir, up
 
 
 def read_body(path: str | None) -> str:
-    if not path or path == "-":
+    if path is None or path == "-":
         return sys.stdin.read()
-    return Path(path).expanduser().read_text(encoding="utf-8")
+    if not path:
+        raise AgentDirError("Input file path cannot be empty; provide a file path or '-' for stdin")
+    target = Path(path).expanduser()
+    try:
+        return target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentDirError(f"Could not decode UTF-8 file {path}: {exc}") from exc
+    except OSError as exc:
+        raise AgentDirError(f"Could not read file {path}: {exc}") from exc
+
+
+def _has_explicit_root(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "root_option", None)
+        or getattr(args, "root", None)
+        or (getattr(args, "scope", None) is None and os.environ.get("AGENTDIR_ROOT"))
+    )
+
+
+def _repo_cwd_for_args(args: argparse.Namespace, root: Path) -> Path | None:
+    return _repo_cwd_for_root(root, _has_explicit_root(args))
 
 
 def read_body_or_literal(value: str | None) -> str | None:
@@ -205,7 +229,8 @@ class _ContextExpansionCliDelivery:
 
 def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
     root = command_root(args, create=False)
-    environment = detect_environment()
+    repo_cwd = _repo_cwd_for_args(args, root)
+    environment = detect_environment(cwd=repo_cwd)
     selection = resolve_setup_selection(args, environment)
     already_adopted = bool(
         mode == "adopt"
@@ -236,7 +261,12 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
     skill_target = getattr(args, "codex_skill", getattr(args, "install_skill", "none"))
     codex_skill = None
     if skill_target != "none":
-        path = codex_skill_path_no_create(root, target=skill_target)
+        path = codex_skill_path_no_create(
+            root,
+            target=skill_target,
+            cwd=repo_cwd,
+            create=False,
+        )
         codex_skill = {
             "target": skill_target,
             "path": str(path),
@@ -246,7 +276,12 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
         }
     generic = None
     if selection["install_legacy_generic"]:
-        path = generic_guidance_path_no_create(root, target=args.install_generic)
+        path = generic_guidance_path_no_create(
+            root,
+            target=args.install_generic,
+            cwd=repo_cwd,
+            create=False,
+        )
         generic = {
             "target": args.install_generic,
             "path": str(path),
@@ -261,7 +296,7 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
         "root": str(root),
         "already_adopted": False,
         "would_create_root": not (root / "VERSION").is_file(),
-        "hooks": [] if args.no_hooks else hooks_install_plan(force=args.force),
+        "hooks": [] if args.no_hooks else hooks_install_plan(force=args.force, cwd=repo_cwd),
         "codex_skill": codex_skill,
         "generic_guidance": generic,
         "integrations": integration_plan(
@@ -269,8 +304,12 @@ def setup_plan(args: argparse.Namespace, *, mode: str) -> dict[str, object]:
             names,
             target=args.integration_target,
             force=args.force,
+            cwd=repo_cwd,
         ) if names else [],
-        "gitignore": gitignore_plan(target=getattr(args, "gitignore", "none"), cwd=Path.cwd()),
+        "gitignore": gitignore_plan(
+            target=getattr(args, "gitignore", "none"),
+            cwd=repo_cwd or Path.cwd(),
+        ),
         "environment": environment,
         "adjustments": selection["adjustments"],
         "warnings": selection["warnings"],
@@ -457,8 +496,13 @@ def format_gitignore_result(result: dict[str, object] | None) -> str:
     return f"{target}:{action}:{changed_text}{suffix}"
 
 
-def hooks_install_plan(*, force: bool = False, hooks: list[str] | None = None) -> list[dict[str, object]]:
-    hooks_dir = git_hooks_dir_no_create()
+def hooks_install_plan(
+    *,
+    force: bool = False,
+    hooks: list[str] | None = None,
+    cwd: str | Path | None = None,
+) -> list[dict[str, object]]:
+    hooks_dir = git_hooks_dir_no_create(cwd)
     plan: list[dict[str, object]] = []
     for name in hooks or list(DEFAULT_HOOKS):
         path = hooks_dir / name
@@ -492,8 +536,12 @@ def hooks_install_plan(*, force: bool = False, hooks: list[str] | None = None) -
     return plan
 
 
-def hooks_uninstall_plan(hooks: list[str] | None = None) -> list[dict[str, object]]:
-    hooks_dir = git_hooks_dir_no_create()
+def hooks_uninstall_plan(
+    hooks: list[str] | None = None,
+    *,
+    cwd: str | Path | None = None,
+) -> list[dict[str, object]]:
+    hooks_dir = git_hooks_dir_no_create(cwd)
     plan: list[dict[str, object]] = []
     for name in hooks or list(DEFAULT_HOOKS):
         path = hooks_dir / name
@@ -522,8 +570,8 @@ def hooks_uninstall_plan(hooks: list[str] | None = None) -> list[dict[str, objec
     return plan
 
 
-def git_hooks_dir_no_create() -> Path:
-    return resolve_git_hooks_dir()
+def git_hooks_dir_no_create(cwd: str | Path | None = None) -> Path:
+    return resolve_git_hooks_dir(cwd)
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -841,7 +889,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
     root = command_root(args)
     update_index(root)
     if args.json:
-        rows = query_messages(root, session_id=args.session, limit=10_000)
+        rows = query_messages(root, session_id=args.session, limit=None)
         print_json(
             [
                 {
@@ -921,7 +969,7 @@ def cmd_session_start(args: argparse.Namespace) -> int:
         session_id=args.session_id,
         title=args.title,
         actor=args.actor,
-        note=read_body(args.note) if args.note else None,
+        note=read_body(args.note) if args.note is not None else None,
     )
     if args.json:
         print_json(asdict(state))
@@ -1019,8 +1067,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_hooks_install(args: argparse.Namespace) -> int:
     root = command_root(args, create=False)
+    repo_cwd = _repo_cwd_for_args(args, root)
     infos = install_hooks(
         root,
+        cwd=repo_cwd,
         hooks=args.hooks,
         force=args.force,
     )
@@ -1030,13 +1080,15 @@ def cmd_hooks_install(args: argparse.Namespace) -> int:
         for info in infos:
             suffix = f" (chains {info.owner})" if info.owner else ""
             print(f"{info.hook}: installed {info.path}{suffix}")
-        for warning in hook_manager_warnings(detect_environment()):
+        for warning in hook_manager_warnings(detect_environment(cwd=repo_cwd)):
             print(f"warning: {warning}")
     return 0
 
 
 def cmd_hooks_status(args: argparse.Namespace) -> int:
-    infos = hook_status(hooks=args.hooks)
+    root = command_root(args, create=False)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    infos = hook_status(cwd=repo_cwd, hooks=args.hooks)
     if args.json:
         print_json([asdict(info) for info in infos])
     else:
@@ -1048,7 +1100,9 @@ def cmd_hooks_status(args: argparse.Namespace) -> int:
 
 
 def cmd_hooks_uninstall(args: argparse.Namespace) -> int:
-    infos = uninstall_hooks(hooks=args.hooks, root=command_root(args, create=False))
+    root = command_root(args, create=False)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    infos = uninstall_hooks(cwd=repo_cwd, hooks=args.hooks, root=root)
     if args.json:
         print_json([asdict(info) for info in infos])
     else:
@@ -1061,12 +1115,20 @@ def cmd_hooks_record(args: argparse.Namespace) -> int:
     hook_args = list(args.hook_args or [])
     if hook_args and hook_args[0] == "--":
         hook_args = hook_args[1:]
+    root = command_root(args, create=True)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    if repo_cwd is not None:
+        caller_common = git_common_root()
+        target_common = git_common_root(repo_cwd)
+        if caller_common is not None and caller_common == target_common:
+            repo_cwd = None
     record_hook_event(
-        command_root(args, create=True),
+        root,
         hook=args.hook,
         original_exit_code=args.original_exit_code,
         stdin_file=args.stdin_file,
         hook_args=hook_args,
+        cwd=repo_cwd,
     )
     if args.json:
         print_json(
@@ -1080,10 +1142,13 @@ def cmd_hooks_record(args: argparse.Namespace) -> int:
 
 
 def cmd_skills_install_codex(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    repo_cwd = _repo_cwd_for_args(args, root)
     installed = install_codex_skill(
-        command_root(args, create=True),
+        root,
         target=args.target,
         force=args.force,
+        cwd=repo_cwd,
     )
     if args.json:
         print_json(installed_skill_payload(installed))
@@ -1095,10 +1160,13 @@ def cmd_skills_install_codex(args: argparse.Namespace) -> int:
 
 
 def cmd_skills_install_generic(args: argparse.Namespace) -> int:
+    root = command_root(args, create=True)
+    repo_cwd = _repo_cwd_for_args(args, root)
     installed = install_generic_guidance(
-        command_root(args, create=True),
+        root,
         target=args.target,
         force=args.force,
+        cwd=repo_cwd,
     )
     if args.json:
         print_json(installed_skill_payload(installed))
@@ -1118,24 +1186,39 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print_setup_plan(result)
         return 0
     root = command_root(args, create=False)
-    environment = detect_environment()
+    repo_cwd = _repo_cwd_for_args(args, root)
+    environment = detect_environment(cwd=repo_cwd)
     selection = resolve_setup_selection(args, environment)
     if args.no_hooks:
         init_root(root)
         hooks = []
     else:
-        hooks = install_hooks(root, force=args.force)
+        hooks = install_hooks(root, cwd=repo_cwd, force=args.force)
     skill = None
     if args.codex_skill != "none":
-        skill = install_codex_skill(root, target=args.codex_skill, force=args.force)
+        skill = install_codex_skill(root, target=args.codex_skill, force=args.force, cwd=repo_cwd)
     generic = None
     if selection["install_legacy_generic"]:
-        generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
+        generic = install_generic_guidance(
+            root,
+            target=args.install_generic,
+            force=args.force,
+            cwd=repo_cwd,
+        )
     integrations = []
     names = selection["integrations"]
     if names:
-        integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
-    gitignore = ensure_agentdir_ignored(target=selected_gitignore_target(args), cwd=Path.cwd())
+        integrations = install_integrations(
+            root,
+            names,
+            target=args.integration_target,
+            force=args.force,
+            cwd=repo_cwd,
+        )
+    gitignore = ensure_agentdir_ignored(
+        target=selected_gitignore_target(args),
+        cwd=repo_cwd or Path.cwd(),
+    )
     result = {
         "root": str(root),
         "hooks": [asdict(info) for info in hooks],
@@ -1175,7 +1258,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             print_setup_plan(result)
         return 0
     root = command_root(args, create=False)
-    environment = detect_environment()
+    repo_cwd = _repo_cwd_for_args(args, root)
+    environment = detect_environment(cwd=repo_cwd)
     selection = resolve_setup_selection(args, environment)
     if args.if_needed and (root / "VERSION").is_file():
         paths = require_root(root)
@@ -1215,18 +1299,32 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         init_root(root)
         hooks = []
     else:
-        hooks = install_hooks(root, force=args.force)
+        hooks = install_hooks(root, cwd=repo_cwd, force=args.force)
     skill = None
     if args.install_skill != "none":
-        skill = install_codex_skill(root, target=args.install_skill, force=args.force)
+        skill = install_codex_skill(root, target=args.install_skill, force=args.force, cwd=repo_cwd)
     generic = None
     if selection["install_legacy_generic"]:
-        generic = install_generic_guidance(root, target=args.install_generic, force=args.force)
+        generic = install_generic_guidance(
+            root,
+            target=args.install_generic,
+            force=args.force,
+            cwd=repo_cwd,
+        )
     integrations = []
     names = selection["integrations"]
     if names:
-        integrations = install_integrations(root, names, target=args.integration_target, force=args.force)
-    gitignore = ensure_agentdir_ignored(target=selected_gitignore_target(args), cwd=Path.cwd())
+        integrations = install_integrations(
+            root,
+            names,
+            target=args.integration_target,
+            force=args.force,
+            cwd=repo_cwd,
+        )
+    gitignore = ensure_agentdir_ignored(
+        target=selected_gitignore_target(args),
+        cwd=repo_cwd or Path.cwd(),
+    )
     result = adopt_repo(
         root,
         install_hooks_result=[asdict(info) for info in hooks],
@@ -1261,9 +1359,28 @@ def cmd_adopt(args: argparse.Namespace) -> int:
 
 def cmd_unadopt(args: argparse.Namespace) -> int:
     root = command_root(args, create=False)
-    hooks = [] if args.no_hooks else uninstall_hooks(root=root) if args.apply else hooks_uninstall_plan()
-    project_integrations = uninstall_integrations(root, ["all", "rulesync"], target="project", apply=args.apply)
-    store_integrations = uninstall_integrations(root, ["all", "rulesync"], target="store", apply=args.apply)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    hooks = (
+        []
+        if args.no_hooks
+        else uninstall_hooks(cwd=repo_cwd, root=root)
+        if args.apply
+        else hooks_uninstall_plan(cwd=repo_cwd)
+    )
+    project_integrations = uninstall_integrations(
+        root,
+        ["all", "rulesync"],
+        target="project",
+        apply=args.apply,
+        cwd=repo_cwd,
+    )
+    store_integrations = uninstall_integrations(
+        root,
+        ["all", "rulesync"],
+        target="store",
+        apply=args.apply,
+        cwd=repo_cwd,
+    )
     result = {
         "root": str(root),
         "applied": args.apply,
@@ -1287,7 +1404,14 @@ def cmd_unadopt(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    status = build_status(command_root(args), scope=args.scope, rebuild=not args.no_rebuild)
+    root = command_root(args)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    status = build_status(
+        root,
+        scope=args.scope,
+        rebuild=not args.no_rebuild,
+        cwd=repo_cwd,
+    )
     if args.json:
         print_json(status)
     else:
@@ -1330,6 +1454,8 @@ def cmd_work_context(args: argparse.Namespace) -> int:
     if args.page is not None and not args.expand_source:
         raise AgentDirError("--page requires --expand")
     if args.expand_source:
+        if getattr(args, "quiet", False) and not args.json:
+            raise AgentDirError("--quiet cannot be combined with --expand without --json")
         page = 1 if args.page is None else args.page
         if page < 1:
             raise AgentDirError("Context expansion page must be at least 1")
@@ -1395,7 +1521,7 @@ def cmd_work_context(args: argparse.Namespace) -> int:
 def cmd_work_finish(args: argparse.Namespace) -> int:
     if args.brief and not args.json:
         raise AgentDirError("--brief requires --json")
-    claims_text = read_body(args.claims) if args.claims else None
+    claims_text = read_body(args.claims) if args.claims is not None else None
     result = finish_work(
         command_root(args),
         session_id=args.session,
@@ -1418,7 +1544,7 @@ def cmd_work_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_report_final(args: argparse.Namespace) -> int:
-    claims_text = read_body(args.claims) if args.claims else None
+    claims_text = read_body(args.claims) if args.claims is not None else None
     report = build_final_report(
         command_root(args),
         session_id=args.session,
@@ -1470,7 +1596,14 @@ def cmd_timeline(args: argparse.Namespace) -> int:
 
 def cmd_integrations_install(args: argparse.Namespace) -> int:
     root = command_root(args, create=args.target == "store")
-    result = install_integrations(root, [args.name], target=args.target, force=args.force)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    result = install_integrations(
+        root,
+        [args.name],
+        target=args.target,
+        force=args.force,
+        cwd=repo_cwd,
+    )
     if args.json:
         print_json(result)
     else:
@@ -1480,7 +1613,9 @@ def cmd_integrations_install(args: argparse.Namespace) -> int:
 
 
 def cmd_integrations_doctor(args: argparse.Namespace) -> int:
-    result = integration_doctor(command_root(args, create=False), ["all"], target=args.target)
+    root = command_root(args, create=False)
+    repo_cwd = _repo_cwd_for_args(args, root)
+    result = integration_doctor(root, ["all"], target=args.target, cwd=repo_cwd)
     if args.json:
         print_json(result)
     else:
@@ -2168,6 +2303,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_install.add_argument("--json", action="store_true")
     hooks_install.set_defaults(func=cmd_hooks_install)
     hooks_status = hooks_sub.add_parser("status")
+    add_scope_args(hooks_status)
     hooks_status.add_argument("--hook", action="append", dest="hooks")
     hooks_status.add_argument("--json", action="store_true")
     hooks_status.set_defaults(func=cmd_hooks_status)
@@ -2527,7 +2663,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_scope_args(audit_claims_parser)
     audit_claims_parser.add_argument(
         "--text",
-        help="audit prose instead of recorded claims ('-' reads stdin)",
+        help="path to prose file, or '-' for stdin (audits prose instead of recorded claims)",
     )
     audit_claims_parser.add_argument("--session")
     audit_claims_parser.add_argument("--strict", action="store_true")
@@ -2594,27 +2730,34 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.invocation = command_invocation(argv)
-    wants_json = bool(getattr(args, "json", False) or getattr(args, "upgrade_json", False))
-    if getattr(args, "quiet", False) and not wants_json:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
-    try:
-        if args.upgrade:
-            return int(cmd_upgrade(args))
-        if not hasattr(args, "func"):
-            parser.print_help(sys.stderr)
-            return 2
-        return int(args.func(args))
-    except AgentDirError as exc:
-        exit_code = getattr(exc, "exit_code", 2)
-        if wants_json:
-            print_json(
-                {
-                    "success": False,
-                    "exit_code": exit_code,
-                    "error": str(exc),
-                    "error_code": type(exc).__name__,
-                    "data": None,
-                }
-            )
-        print(f"agentdir: {exc}", file=sys.stderr)
-        return int(exit_code)
+    wants_json = bool(
+        getattr(args, "json", False)
+        or getattr(args, "upgrade_json", False)
+        or getattr(args, "format", None) == "json"
+    )
+    quiet_stdout = bool(getattr(args, "quiet", False) and not wants_json)
+    with contextlib.ExitStack() as stack:
+        if quiet_stdout:
+            devnull = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+            stack.enter_context(contextlib.redirect_stdout(devnull))
+        try:
+            if args.upgrade:
+                return int(cmd_upgrade(args))
+            if not hasattr(args, "func"):
+                parser.print_help(sys.stderr)
+                return 2
+            return int(args.func(args))
+        except AgentDirError as exc:
+            exit_code = getattr(exc, "exit_code", 2)
+            if wants_json:
+                print_json(
+                    {
+                        "success": False,
+                        "exit_code": exit_code,
+                        "error": str(exc),
+                        "error_code": type(exc).__name__,
+                        "data": None,
+                    }
+                )
+            print(f"agentdir: {exc}", file=sys.stderr)
+            return int(exit_code)

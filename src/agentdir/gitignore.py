@@ -5,10 +5,44 @@ from pathlib import Path
 from typing import Any
 
 from .git import git_output, git_root
+from .store import AgentDirError
 
 GITIGNORE_CHOICES = ("ask", "project", "user", "none")
 AGENTDIR_IGNORE_PATTERN = ".agentdir/"
 _AGENTDIR_PATTERN_VARIANTS = {".agentdir", ".agentdir/", "/.agentdir", "/.agentdir/"}
+
+
+def _ensure_within_project(project: Path, destination: Path) -> None:
+    resolved_project = project.resolve(strict=False)
+    try:
+        relative = destination.relative_to(project)
+        base = project
+    except ValueError:
+        try:
+            relative = destination.relative_to(resolved_project)
+            base = resolved_project
+        except ValueError as exc:
+            raise AgentDirError(
+                f"Refusing to access path outside project root {resolved_project}: {destination}"
+            ) from exc
+
+    current = base
+    if current.is_symlink():
+        raise AgentDirError(f"Refusing to follow symlink at project root: {current}")
+    for part in relative.parts:
+        if part == "..":
+            raise AgentDirError(
+                f"Refusing to traverse parent directory outside project root {resolved_project}: {destination}"
+            )
+        current = current / part
+        if current.is_symlink():
+            raise AgentDirError(f"Refusing to follow symlink inside project: {current}")
+
+    resolved_destination = destination.resolve(strict=False)
+    if not resolved_destination.is_relative_to(resolved_project):
+        raise AgentDirError(
+            f"Refusing to access path outside project root {resolved_project}: {destination}"
+        )
 
 
 def gitignore_plan(
@@ -51,6 +85,10 @@ def ensure_agentdir_ignored(
         return {**plan, "changed": False}
 
     path = Path(str(plan["path"]))
+    if target == "project":
+        root = git_root(cwd)
+        if root is not None:
+            _ensure_within_project(root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _append_pattern(path)
     return {**plan, "changed": True}
@@ -68,7 +106,11 @@ def user_gitignore_path() -> Path:
 def _ignore_path(target: str, cwd: str | Path | None) -> Path | None:
     if target == "project":
         root = git_root(cwd)
-        return (root / ".gitignore") if root else None
+        if root is None:
+            return None
+        destination = root / ".gitignore"
+        _ensure_within_project(root, destination)
+        return destination
     if target == "user":
         return user_gitignore_path()
     return None

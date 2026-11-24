@@ -253,6 +253,20 @@ def match_quality(
     return quality, reasons
 
 
+def filter_eligible_memory_hits(
+    hits: list[dict[str, Any]],
+    *,
+    retrieval_query: str = "",
+    task_intent: str | None = None,
+) -> list[dict[str, Any]]:
+    task_terms = _selection_terms(task_intent or retrieval_query)
+    return [
+        row
+        for row in hits
+        if _selection_preference(row, task_terms=task_terms) is not None
+    ]
+
+
 def diversify_memory_hits(
     hits: list[dict[str, Any]],
     limit: int,
@@ -535,7 +549,8 @@ def _prefer_context_sources(
         str(source.get("session_id"))
         for source in sources
         if source.get("session_id")
-        and _source_preference(source) in {"current_evidence", "evidence", "decision"}
+        and _selection_preference(source, task_terms=task_terms)
+        in {"current_evidence", "evidence", "decision"}
     }
     nonredundant = [
         source
@@ -552,7 +567,8 @@ def _prefer_context_sources(
         if _selection_preference(source, task_terms=task_terms) is not None
     ]
     has_higher_signal = any(
-        _selection_preference(source, task_terms=task_terms) != "final_report"
+        _selection_preference(source, task_terms=task_terms)
+        not in {"final_report", "historical_tool"}
         and _source_match_quality(source, retrieval_query) in HIGHER_SIGNAL_QUALITIES
         for source in eligible
     )

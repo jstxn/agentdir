@@ -265,6 +265,7 @@ def test_run_returns_wrapped_command_exit_code(tmp_path: Path) -> None:
 
 def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
+    run_cli("init", cwd=repo)
 
     result = run_cli(
         "--upgrade",
@@ -283,6 +284,7 @@ def test_upgrade_dry_run_plans_install_and_adoption(tmp_path: Path) -> None:
 
 def test_update_subcommand_matches_legacy_upgrade_json(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
+    run_cli("init", cwd=repo)
 
     legacy = run_cli(
         "--upgrade",
@@ -1316,8 +1318,9 @@ def test_build_final_report_rebuilds_index_once(tmp_path: Path, monkeypatch) -> 
         "python",
         "--",
         sys.executable,
-        "-c",
-        "print('tests passed')",
+        "-m",
+        "unittest",
+        "--help",
         cwd=repo,
     )
 
@@ -1363,8 +1366,9 @@ def test_status_context_pack_and_audit_rebuild_index_once(tmp_path: Path, monkey
         "python",
         "--",
         sys.executable,
-        "-c",
-        "print('tests passed')",
+        "-m",
+        "unittest",
+        "--help",
         cwd=repo,
     )
 

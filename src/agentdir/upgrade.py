@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .store import AgentDirError
+from .git import git_root
+from .store import AgentDirDependencyError, AgentDirError
 
 DEFAULT_REPO = "jstxn/agentdir"
 
@@ -29,8 +31,29 @@ class UpgradeOptions:
 def upgrade_agentdir(options: UpgradeOptions) -> dict[str, Any]:
     target_version = options.version or _latest_release_tag(options.repo, dry_run=options.dry_run)
     cwd = Path.cwd()
-    repo_root = _git_root(cwd) if options.adopt else None
+    detected_repo = git_root(cwd) if options.adopt else None
+    repo_root = (
+        detected_repo
+        if detected_repo is not None and (detected_repo / ".agentdir" / "VERSION").is_file()
+        else None
+    )
+    adopt_skip_reason: str | None = None
+    if not options.adopt:
+        adopt_skip_reason = "disabled"
+    elif detected_repo is None:
+        adopt_skip_reason = "not_in_git_repository"
+    elif repo_root is None:
+        adopt_skip_reason = "not_adopted"
     before = _command_version(_agentdir_bin())
+    adopt_info: dict[str, Any] = {
+        "planned": bool(repo_root),
+        "ok": None,
+        "root": str(repo_root) if repo_root else None,
+        "install_skill": options.install_skill,
+        "hooks": options.hooks,
+    }
+    if adopt_skip_reason is not None:
+        adopt_info["reason"] = adopt_skip_reason
     result: dict[str, Any] = {
         "current_process_version": __version__,
         "installed_version_before": before,
@@ -38,13 +61,7 @@ def upgrade_agentdir(options: UpgradeOptions) -> dict[str, Any]:
         "repo": options.repo,
         "dry_run": options.dry_run,
         "install": {"planned": True, "ok": None},
-        "adopt": {
-            "planned": bool(repo_root),
-            "ok": None,
-            "root": str(repo_root) if repo_root else None,
-            "install_skill": options.install_skill,
-            "hooks": options.hooks,
-        },
+        "adopt": adopt_info,
         "doctor": {"planned": bool(repo_root), "ok": None},
     }
     if options.dry_run:
@@ -90,6 +107,15 @@ def upgrade_agentdir(options: UpgradeOptions) -> dict[str, Any]:
     return result
 
 
+def _adopt_skip_line(result: dict[str, Any]) -> str:
+    reason = result.get("adopt", {}).get("reason")
+    if reason == "not_adopted":
+        return "adopt=skipped (repository is not adopted)"
+    if reason == "disabled":
+        return "adopt=skipped (--no-adopt)"
+    return "adopt=skipped outside git repository"
+
+
 def format_upgrade_result(result: dict[str, Any]) -> str:
     lines = [
         f"current_process_version={result['current_process_version']}",
@@ -101,7 +127,7 @@ def format_upgrade_result(result: dict[str, Any]) -> str:
         if result["adopt"]["planned"]:
             lines.append(f"adopt={result['adopt']['command']}")
         else:
-            lines.append("adopt=skipped outside git repository")
+            lines.append(_adopt_skip_line(result))
         return "\n".join(lines)
 
     lines.append(f"install_ok={str(bool(result['install']['ok'])).lower()}")
@@ -114,7 +140,7 @@ def format_upgrade_result(result: dict[str, Any]) -> str:
         lines.append(f"adopt_ok={str(bool(result['adopt']['ok'])).lower()}")
         lines.append(f"adopt_root={result['adopt']['root']}")
     else:
-        lines.append("adopt=skipped outside git repository")
+        lines.append(_adopt_skip_line(result))
     if result["doctor"]["planned"]:
         lines.append(f"doctor_ok={str(bool(result['doctor']['ok'])).lower()}")
         doctor_result = result["doctor"].get("result")
@@ -143,12 +169,19 @@ def upgrade_exit_code(result: dict[str, Any]) -> int:
 def _latest_release_tag(repo: str, *, dry_run: bool) -> str:
     if dry_run:
         return "latest"
-    result = subprocess.run(
-        ["gh", "api", f"repos/{repo}/releases/latest", "--jq", ".tag_name"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/releases/latest", "--jq", ".tag_name"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise AgentDirDependencyError(
+            "GitHub CLI ('gh') is required to resolve the latest release; install gh or pass --version"
+        ) from exc
+    except OSError as exc:
+        raise AgentDirDependencyError(f"failed to run GitHub CLI ('gh'): {exc}") from exc
     if result.returncode != 0 or not result.stdout.strip():
         raise AgentDirError(result.stderr.strip() or f"could not resolve latest release for {repo}")
     return result.stdout.strip()
@@ -157,18 +190,25 @@ def _latest_release_tag(repo: str, *, dry_run: bool) -> str:
 def _run_installer(repo: str, version: str) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="agentdir-upgrade.") as tmp:
         install_script = Path(tmp) / "install-agentdir.sh"
-        fetch = subprocess.run(
-            [
-                "gh",
-                "api",
-                "-H",
-                "Accept: application/vnd.github.raw",
-                f"repos/{repo}/contents/scripts/install.sh?ref={version}",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            fetch = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "-H",
+                    "Accept: application/vnd.github.raw",
+                    f"repos/{repo}/contents/scripts/install.sh?ref={version}",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise AgentDirDependencyError(
+                "GitHub CLI ('gh') is required to download the release installer; install gh and authenticate"
+            ) from exc
+        except OSError as exc:
+            raise AgentDirDependencyError(f"failed to run GitHub CLI ('gh'): {exc}") from exc
         if fetch.returncode != 0:
             return fetch
         install_script.write_text(fetch.stdout, encoding="utf-8")
@@ -177,13 +217,16 @@ def _run_installer(repo: str, version: str) -> subprocess.CompletedProcess[str]:
         env["AGENTDIR_REPO"] = repo
         env["AGENTDIR_VERSION"] = version
         env["AGENTDIR_WHEEL"] = ""
-        return subprocess.run(
-            ["bash", str(install_script)],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=env,
-        )
+        try:
+            return subprocess.run(
+                ["bash", str(install_script)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+        except OSError as exc:
+            raise AgentDirDependencyError(f"failed to execute release installer with bash: {exc}") from exc
 
 
 def _run_adopt(
@@ -196,19 +239,6 @@ def _run_adopt(
     if not hooks:
         command.append("--no-hooks")
     return subprocess.run(command, cwd=repo_root, text=True, capture_output=True, check=False)
-
-
-def _git_root(cwd: Path) -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return Path(result.stdout.strip()).resolve()
 
 
 def _agentdir_bin() -> str:
@@ -231,7 +261,11 @@ def _command_version(command: str) -> str | None:
 def _version_matches(version_output: str | None, target_version: str) -> bool:
     if not version_output:
         return False
-    return target_version.lstrip("v") in version_output
+    expected_norm = target_version.strip().removeprefix("v")
+    if not expected_norm:
+        return False
+    pattern = rf"(?<![0-9A-Za-z._+-])v?{re.escape(expected_norm)}(?![0-9A-Za-z._+-])"
+    return re.search(pattern, version_output) is not None
 
 
 def _json_or_text(text: str) -> Any:
