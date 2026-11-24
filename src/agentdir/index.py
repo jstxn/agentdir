@@ -5,7 +5,7 @@ import os
 import sqlite3
 import time
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -25,7 +25,32 @@ from .memory import (
     index_session_summaries,
     memory_schema_sql,
 )
-from .store import AgentDirError, RootPaths, discover_mailboxes, paths_for, require_root
+from .store import RootPaths, discover_mailboxes, paths_for, require_root
+
+SQLITE_BUSY_TIMEOUT_MS = 5000
+
+ROWID_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "headers_message_idx",
+        "create index if not exists headers_message_idx on headers(message_rowid)",
+    ),
+    (
+        "headers_lower_name_value_idx",
+        "create index if not exists headers_lower_name_value_idx on headers(lower(name), value)",
+    ),
+    (
+        "message_artifacts_message_idx",
+        "create index if not exists message_artifacts_message_idx on message_artifacts(message_rowid)",
+    ),
+    (
+        "memory_documents_message_idx",
+        "create index if not exists memory_documents_message_idx on memory_documents(message_rowid)",
+    ),
+    (
+        "memory_passages_message_idx",
+        "create index if not exists memory_passages_message_idx on memory_passages(message_rowid)",
+    ),
+)
 
 SCHEMA = """
 pragma foreign_keys = on;
@@ -66,6 +91,8 @@ create table if not exists headers (
   name text not null,
   value text not null
 );
+create index if not exists headers_message_idx on headers(message_rowid);
+create index if not exists headers_lower_name_value_idx on headers(lower(name), value);
 create table if not exists artifacts (
   sha256 text primary key,
   path text not null,
@@ -77,6 +104,7 @@ create table if not exists message_artifacts (
   message_rowid integer not null references messages(id) on delete cascade,
   sha256 text not null
 );
+create index if not exists message_artifacts_message_idx on message_artifacts(message_rowid);
 """
 
 
@@ -91,9 +119,20 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _ensure_rowid_indexes(conn: sqlite3.Connection) -> None:
+    existing = {
+        row[0]
+        for row in conn.execute("select name from sqlite_master where type = 'index'")
+    }
+    for name, ddl in ROWID_INDEXES:
+        if name not in existing:
+            conn.execute(ddl)
+
+
 def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.executescript(memory_schema_sql())
+    _ensure_rowid_indexes(conn)
     conn.execute("insert or replace into metadata(key, value) values('schema_version', '3')")
     conn.execute("insert or replace into metadata(key, value) values('vector_memory', 'yes')")
     conn.execute("insert or replace into metadata(key, value) values('hybrid_passages', 'yes')")
@@ -110,8 +149,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
 def connect_index(root: str | Path) -> sqlite3.Connection:
     paths = require_root(root)
-    conn = sqlite3.connect(paths.index_path)
+    conn = sqlite3.connect(paths.index_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("pragma foreign_keys = on")
     return conn
 
@@ -146,38 +186,56 @@ def update_index(root: str | Path) -> IndexResult:
     rebuild when the index is missing or has an unexpected schema.
     """
     paths = require_root(root)
-    if not paths.index_path.exists() or not _index_schema_current(paths.index_path):
-        return rebuild_index(root)
     with index_rebuild_lock(paths.indexes):
-        conn = sqlite3.connect(paths.index_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("pragma foreign_keys = on")
-            result = _update_into(conn, root)
-            conn.commit()
-            return result
-        except sqlite3.DatabaseError:
-            conn.close()
-            conn = None
+        if not paths.index_path.exists() or not _index_schema_current(paths.index_path):
             return _rebuild_index_locked(paths)
-        finally:
-            if conn is not None:
-                conn.close()
+        try:
+            with closing(connect_index(paths.root)) as conn:
+                _ensure_rowid_indexes(conn)
+                result = _update_into(conn, paths.root)
+                conn.commit()
+                return result
+        except sqlite3.DatabaseError as exc:
+            if _is_rebuildable_index_error(exc):
+                return _rebuild_index_locked(paths)
+            raise
+
+
+def _is_lock_error(exc: sqlite3.DatabaseError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _is_rebuildable_index_error(exc: sqlite3.DatabaseError) -> bool:
+    if _is_lock_error(exc):
+        return False
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "malformed",
+            "no such table",
+            "no such column",
+            "not a database",
+            "corrupt",
+        )
+    )
 
 
 def _index_schema_current(index_path: Path) -> bool:
     try:
-        conn = sqlite3.connect(index_path)
-        try:
+        with closing(sqlite3.connect(index_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)) as conn:
+            conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
             row = conn.execute("select value from metadata where key = 'schema_version'").fetchone()
-        finally:
-            conn.close()
-    except sqlite3.DatabaseError:
+    except sqlite3.DatabaseError as exc:
+        if _is_lock_error(exc):
+            raise
         return False
     return bool(row) and row[0] == "3"
 
 
 def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
+    _ensure_rowid_indexes(conn)
     paths = paths_for(root)
     existing: dict[str, int] = {
         row["file_path"]: row["id"]
@@ -194,35 +252,40 @@ def _update_into(conn: sqlite3.Connection, root: str | Path) -> IndexResult:
 
     # Forward-clean telemetry that an older AgentDir version may have indexed
     # before it knew these events were intentionally excluded from memory.
-    if MEMORY_EXCLUDED_EVENT_TYPES or MEMORY_EXCLUDED_HEADER_NAMES:
+    predicates: list[str] = []
+    excluded_params: list[str] = []
+    if MEMORY_EXCLUDED_EVENT_TYPES:
         event_marks = ",".join("?" for _ in MEMORY_EXCLUDED_EVENT_TYPES)
+        predicates.append(f"m.event_type in ({event_marks})")
+        excluded_params.extend(sorted(MEMORY_EXCLUDED_EVENT_TYPES))
+    if MEMORY_EXCLUDED_HEADER_NAMES:
         header_marks = ",".join("?" for _ in MEMORY_EXCLUDED_HEADER_NAMES)
-        excluded_params = (
-            *sorted(MEMORY_EXCLUDED_EVENT_TYPES),
-            *sorted(MEMORY_EXCLUDED_HEADER_NAMES),
+        predicates.append(
+            f"exists (select 1 from headers h where h.message_rowid = m.id and lower(h.name) in ({header_marks}))"
         )
+        excluded_params.extend(sorted(MEMORY_EXCLUDED_HEADER_NAMES))
+    if predicates:
         excluded_rows = conn.execute(
             f"""
-            select id, session_id from messages
-            where event_type in ({event_marks})
-               or exists (
-                 select 1 from headers h
-                 where h.message_rowid = messages.id
-                   and lower(h.name) in ({header_marks})
-               )
+            select distinct m.id, m.session_id
+            from messages m
+            join memory_documents md on md.message_rowid = m.id
+            where {' or '.join(predicates)}
             """,
             excluded_params,
         ).fetchall()
         excluded_ids = [row["id"] for row in excluded_rows]
         if excluded_ids:
-            id_marks = ",".join("?" for _ in excluded_ids)
-            conn.execute(
-                f"""
-                delete from memory_documents
-                where message_rowid in ({id_marks})
-                """,
-                excluded_ids,
-            )
+            for start in range(0, len(excluded_ids), 500):
+                chunk = excluded_ids[start : start + 500]
+                id_marks = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"""
+                    delete from memory_documents
+                    where message_rowid in ({id_marks})
+                    """,
+                    chunk,
+                )
             affected_sessions.update(
                 row["session_id"] for row in excluded_rows if row["session_id"]
             )
@@ -288,22 +351,20 @@ def _rebuild_index_locked(paths: RootPaths) -> IndexResult:
     temp_path = paths.index_path.with_name(
         f"{paths.index_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     )
-    conn = sqlite3.connect(temp_path)
-    conn.row_factory = sqlite3.Row
     replaced = False
     try:
-        conn.execute("pragma foreign_keys = on")
-        initialize_schema(conn)
-        result = _index_into(conn, paths.root)
-        conn.commit()
-        _carry_forward_semantic_embeddings(conn, paths.index_path)
-        conn.close()
+        with closing(sqlite3.connect(temp_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+            conn.execute("pragma foreign_keys = on")
+            initialize_schema(conn)
+            result = _index_into(conn, paths.root)
+            conn.commit()
+            _carry_forward_semantic_embeddings(conn, paths.index_path)
         os.replace(temp_path, paths.index_path)
         replaced = True
         return result
     finally:
-        if not replaced:
-            conn.close()
         if not replaced and temp_path.exists():
             temp_path.unlink()
 
@@ -388,6 +449,7 @@ def _insert_record(
     relative_mailbox = str(mailbox.relative_to(root))
     relative_file = str(path.relative_to(root))
     errors: list[str] = []
+    parsed = None
     try:
         parsed = parse_envelope(path)
         errors.extend(validate_required(parsed))
@@ -400,7 +462,7 @@ def _insert_record(
         body_sha = None
         errors.append(f"parse error: {exc}")
 
-    get = msg.get if msg is not None else lambda _name, _default=None: None
+    get = parsed.header if parsed is not None else lambda _name: None
     malformed = bool(errors)
     message_id = get("Message-ID")
     event_type = get("X-AgentDir-Event-Type")
@@ -454,16 +516,16 @@ def _insert_record(
         ),
     )
     rowid = int(cursor.lastrowid)
-    if msg is not None:
+    if msg is not None and parsed is not None:
         for name, value in msg.items():
             conn.execute(
                 "insert into headers(message_rowid, name, value) values (?, ?, ?)",
                 (rowid, name, header_value(value)),
             )
-        for sha in msg.get_all("X-AgentDir-Blob-SHA256", []):
+        for sha in parsed.headers("X-AgentDir-Blob-SHA256"):
             conn.execute(
                 "insert into message_artifacts(message_rowid, sha256) values (?, ?)",
-                (rowid, header_value(sha)),
+                (rowid, sha),
             )
     try:
         conn.execute(
@@ -473,8 +535,8 @@ def _insert_record(
     except sqlite3.DatabaseError:
         pass
     memory_excluded_by_header = bool(
-        msg is not None
-        and any(msg.get_all(name, []) for name in MEMORY_EXCLUDED_HEADER_NAMES)
+        parsed is not None
+        and any(parsed.headers(name) for name in MEMORY_EXCLUDED_HEADER_NAMES)
     )
     if event_type not in MEMORY_EXCLUDED_EVENT_TYPES and not memory_excluded_by_header:
         index_memory_document(

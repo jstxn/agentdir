@@ -25,28 +25,55 @@ def fold_context_review(
     events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Fold immutable pack actions into one terminal-review projection."""
+    briefing = manifest.get("briefing") or {}
+    presented = briefing_source_ids(manifest)
+    presented_set = set(presented)
+    review_required = bool(briefing.get("review_required"))
+
     consumed: list[str] = []
+    consumed_before_decision: set[str] = set()
     cited: list[str] = []
     cited_without_use: list[str] = []
     consumed_seen: set[str] = set()
     terminal_decision_seen = False
     consume_after_decision = False
+    used_omits_prior_presented = False
+    prior_consumption_errors: list[str] = []
     for event in events:
-        disposition_header = event.get("headers", {}).get(HEADER_CONTEXT_DISPOSITION)
+        disposition_values = _event_header_values(event, HEADER_CONTEXT_DISPOSITION)
+        disposition_header = disposition_values[0] if disposition_values else None
+        if disposition_header == "used":
+            decision_used = set(event.get("used_source_ids") or [])
+            missing_prior = [
+                source_id
+                for source_id in presented
+                if source_id in consumed_before_decision and source_id not in decision_used
+            ]
+            if missing_prior:
+                used_omits_prior_presented = True
+                event_label = str(
+                    event.get("file_path") or event.get("message_id") or "decision event"
+                )
+                prior_consumption_errors.append(
+                    f"{event_label}: used decision omits previously consumed presented sources: "
+                    + ", ".join(missing_prior)
+                )
         if event["event_type"] == EVENT_CONTEXT_PACK_CONSUMED:
-            if terminal_decision_seen and not disposition_header:
+            if terminal_decision_seen and not disposition_values:
                 consume_after_decision = True
             for source_id in event["used_source_ids"]:
                 if source_id not in consumed_seen:
                     consumed.append(source_id)
                     consumed_seen.add(source_id)
+                if not terminal_decision_seen and not disposition_values:
+                    consumed_before_decision.add(source_id)
         if event["event_type"] == EVENT_CONTEXT_SOURCES_CITED:
             for source_id in event["source_ids"]:
                 if source_id not in cited:
                     cited.append(source_id)
                 if source_id not in consumed_seen and source_id not in cited_without_use:
                     cited_without_use.append(source_id)
-        if disposition_header:
+        if disposition_values:
             terminal_decision_seen = True
 
     source_by_id = {source["source_id"]: source for source in manifest["sources"]}
@@ -74,33 +101,33 @@ def fold_context_review(
             "context citation references unknown sources: " + ", ".join(unknown_cited)
         )
 
-    briefing = manifest.get("briefing") or {}
-    presented = briefing_source_ids(manifest)
-    review_required = bool(briefing.get("review_required"))
+    presented_consumed = [source_id for source_id in consumed if source_id in presented_set]
+    additional_consumed = [source_id for source_id in consumed if source_id not in presented_set]
     decisions = context_decisions(events)
     latest_decision = decisions[-1] if decisions else None
     decision_signatures = {computed_context_decision_signature(event) for event in decisions}
     decision_validation_errors = [
-        error
-        for event in decisions
-        for error in context_decision_validation_errors(event, manifest, presented)
+        *[
+            error
+            for event in decisions
+            for error in context_decision_validation_errors(event, manifest, presented)
+        ],
+        *prior_consumption_errors,
     ]
     disposition = (
-        latest_decision["headers"].get(HEADER_CONTEXT_DISPOSITION)
+        _event_header(latest_decision, HEADER_CONTEXT_DISPOSITION)
         if latest_decision
         else None
     )
     transition_conflict = bool(
         consume_after_decision
         or len(decision_signatures) > 1
-        or (disposition in {"no_relevant", "skipped"} and consumed)
+        or used_omits_prior_presented
+        or (disposition in {"no_relevant", "skipped"} and presented_consumed)
         or decision_validation_errors
         or source_validation_errors
         or session_validation_errors
     )
-    presented_set = set(presented)
-    presented_consumed = [source_id for source_id in consumed if source_id in presented_set]
-    additional_consumed = [source_id for source_id in consumed if source_id not in presented_set]
     declared_reviewed = latest_decision["reviewed_source_ids"] if latest_decision else []
     declared_dismissed = latest_decision["dismissed_source_ids"] if latest_decision else []
     reviewed = [
@@ -119,7 +146,11 @@ def fold_context_review(
         if source_id not in set(reviewed) and source_id not in set(dismissed)
     ]
     compatibility_use_complete = bool(presented) and set(presented).issubset(consumed_seen)
-    compatibility_use_partial = bool(consumed) and disposition is None and not compatibility_use_complete
+    compatibility_use_partial = (
+        bool(presented_consumed)
+        and disposition is None
+        and not compatibility_use_complete
+    )
     if transition_conflict:
         review_status = "conflict"
     elif not presented:
@@ -183,12 +214,12 @@ def fold_context_review(
             )
         ),
         "decision_id": (
-            latest_decision["headers"].get(HEADER_CONTEXT_DECISION_ID)
+            _event_header(latest_decision, HEADER_CONTEXT_DECISION_ID)
             if latest_decision
             else None
         ),
         "decision_revision": (
-            latest_decision["headers"].get(HEADER_CONTEXT_DECISION_REVISION)
+            _event_header(latest_decision, HEADER_CONTEXT_DECISION_REVISION)
             if latest_decision
             else None
         ),
@@ -243,7 +274,7 @@ def latest_context_decision(events: list[dict[str, Any]]) -> dict[str, Any] | No
 
 
 def context_decisions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [event for event in events if event.get("headers", {}).get(HEADER_CONTEXT_DISPOSITION)]
+    return [event for event in events if _event_header_values(event, HEADER_CONTEXT_DISPOSITION)]
 
 
 def same_context_decision(
@@ -257,16 +288,30 @@ def same_context_decision(
     used_source_ids: list[str],
     dismissed_source_ids: list[str],
 ) -> bool:
-    headers = event.get("headers") or {}
-    stored_decision_id = headers.get(HEADER_CONTEXT_DECISION_ID)
+    pack_ids = (
+        event.get("pack_ids")
+        if "pack_ids" in event
+        else _event_header_values(event, HEADER_PACK_ID)
+    ) or []
+    if len(pack_ids) != 1:
+        return False
+    if (
+        len(_event_header_values(event, HEADER_CONTEXT_DISPOSITION)) != 1
+        or len(_event_header_values(event, HEADER_CONTEXT_DECISION_ID)) != 1
+        or len(_event_header_values(event, HEADER_CONTEXT_DECISION_REVISION)) != 1
+        or len(_event_header_values(event, HEADER_CONSUMPTION_PURPOSE)) > 1
+        or len(_event_body_values(event, "reason")) != 1
+    ):
+        return False
+    stored_decision_id = _event_header(event, HEADER_CONTEXT_DECISION_ID)
     if stored_decision_id != decision_id:
         return False
-    if headers.get(HEADER_CONTEXT_DECISION_REVISION) != "1":
+    if _event_header(event, HEADER_CONTEXT_DECISION_REVISION) != "1":
         return False
     return (
         computed_context_decision_signature(event) == decision_id
-        and headers.get(HEADER_CONTEXT_DISPOSITION) == disposition
-        and headers.get(HEADER_CONSUMPTION_PURPOSE) == purpose
+        and _event_header(event, HEADER_CONTEXT_DISPOSITION) == disposition
+        and _event_header(event, HEADER_CONSUMPTION_PURPOSE) == purpose
         and event_body_value(event, "reason") == reason
         and event.get("reviewed_source_ids") == reviewed_source_ids
         and event.get("used_source_ids") == used_source_ids
@@ -394,11 +439,10 @@ def canonical_source_ids(
 
 
 def computed_context_decision_signature(event: dict[str, Any]) -> str:
-    headers = event.get("headers") or {}
     return context_decision_id(
-        pack_id=headers.get(HEADER_PACK_ID) or "",
-        disposition=headers.get(HEADER_CONTEXT_DISPOSITION) or "",
-        purpose=headers.get(HEADER_CONSUMPTION_PURPOSE),
+        pack_id=_event_header(event, HEADER_PACK_ID) or "",
+        disposition=_event_header(event, HEADER_CONTEXT_DISPOSITION) or "",
+        purpose=_event_header(event, HEADER_CONSUMPTION_PURPOSE),
         reason=event_body_value(event, "reason") or "",
         reviewed_source_ids=event.get("reviewed_source_ids") or [],
         used_source_ids=event.get("used_source_ids") or [],
@@ -411,9 +455,8 @@ def context_decision_validation_errors(
     manifest: dict[str, Any],
     presented_source_ids: list[str],
 ) -> list[str]:
-    headers = event.get("headers") or {}
-    disposition = headers.get(HEADER_CONTEXT_DISPOSITION) or ""
-    purpose = headers.get(HEADER_CONSUMPTION_PURPOSE)
+    disposition = _event_header(event, HEADER_CONTEXT_DISPOSITION) or ""
+    purpose = _event_header(event, HEADER_CONSUMPTION_PURPOSE)
     reason = event_body_value(event, "reason") or ""
     reviewed = event.get("reviewed_source_ids") or []
     used = event.get("used_source_ids") or []
@@ -421,8 +464,44 @@ def context_decision_validation_errors(
     event_label = str(event.get("file_path") or event.get("message_id") or "decision event")
     errors: list[str] = []
 
+    pack_ids = (
+        event.get("pack_ids")
+        if "pack_ids" in event
+        else _event_header_values(event, HEADER_PACK_ID)
+    ) or []
+    if len(pack_ids) != 1:
+        errors.append(
+            f"{event_label}: expected exactly one {HEADER_PACK_ID} header, found {len(pack_ids)}"
+        )
+    for header_name in (
+        HEADER_CONTEXT_DISPOSITION,
+        HEADER_CONTEXT_DECISION_ID,
+        HEADER_CONTEXT_DECISION_REVISION,
+        HEADER_CONSUMPTION_PURPOSE,
+    ):
+        found_values = _event_header_values(event, header_name)
+        if len(found_values) > 1:
+            errors.append(
+                f"{event_label}: expected at most one {header_name} header, found {len(found_values)}"
+            )
+
+    body_pack_ids = _event_body_values(event, "pack_id")
+    if len(body_pack_ids) > 1:
+        errors.append(f"{event_label}: decision body contains duplicate pack_id fields")
+    elif body_pack_ids and body_pack_ids[0] != manifest.get("pack_id"):
+        errors.append(f"{event_label}: decision body pack_id does not match the manifest")
+    body_dispositions = _event_body_values(event, "disposition")
+    if len(body_dispositions) > 1:
+        errors.append(f"{event_label}: decision body contains duplicate disposition fields")
+    elif body_dispositions and body_dispositions[0] != disposition:
+        errors.append(f"{event_label}: decision body disposition does not match header")
+    body_reasons = _event_body_values(event, "reason")
+    if len(body_reasons) > 1:
+        errors.append(f"{event_label}: decision body contains duplicate reason fields")
+
+    header_pack_id = _event_header(event, HEADER_PACK_ID) or ""
     expected_id = context_decision_id(
-        pack_id=headers.get(HEADER_PACK_ID) or "",
+        pack_id=header_pack_id,
         disposition=disposition,
         purpose=purpose,
         reason=reason,
@@ -430,17 +509,17 @@ def context_decision_validation_errors(
         used_source_ids=used,
         dismissed_source_ids=dismissed,
     )
-    stored_id = headers.get(HEADER_CONTEXT_DECISION_ID)
+    stored_id = _event_header(event, HEADER_CONTEXT_DECISION_ID)
     if not stored_id:
         errors.append(f"{event_label}: decision id is missing")
     elif stored_id != expected_id:
         errors.append(f"{event_label}: decision id does not match its payload")
-    revision = headers.get(HEADER_CONTEXT_DECISION_REVISION)
+    revision = _event_header(event, HEADER_CONTEXT_DECISION_REVISION)
     if revision is None:
         errors.append(f"{event_label}: decision revision is missing")
     elif revision != "1":
         errors.append(f"{event_label}: unsupported decision revision {revision!r}")
-    if headers.get(HEADER_PACK_ID) != manifest.get("pack_id"):
+    if header_pack_id != manifest.get("pack_id"):
         errors.append(f"{event_label}: decision pack id does not match the manifest")
     if not reason:
         errors.append(f"{event_label}: decision reason is missing")
@@ -498,3 +577,42 @@ def context_decision_validation_errors(
         if purpose is not None:
             errors.append(f"{event_label}: skipped decision cannot include a purpose")
     return errors
+
+
+def _event_body_values(event: dict[str, Any] | None, key: str) -> list[str]:
+    if not event:
+        return []
+    prefix = f"{key}="
+    return [
+        line.split("=", 1)[1].strip()
+        for line in str(event.get("body_text") or "").splitlines()
+        if line.startswith(prefix)
+    ]
+
+
+def _event_header_values(event: dict[str, Any] | None, name: str) -> list[str]:
+    if not event:
+        return []
+    lower = name.lower()
+    raw_values = event.get("header_values")
+    if isinstance(raw_values, dict):
+        matched: list[str] = []
+        for key, values in raw_values.items():
+            if str(key).lower() != lower:
+                continue
+            if isinstance(values, list):
+                matched.extend(str(value) for value in values if value is not None)
+            elif values is not None:
+                matched.append(str(values))
+        return matched
+    raw_headers = event.get("headers")
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if str(key).lower() == lower and value is not None:
+                return [str(value)]
+    return []
+
+
+def _event_header(event: dict[str, Any] | None, name: str) -> str | None:
+    values = _event_header_values(event, name)
+    return values[0] if values else None

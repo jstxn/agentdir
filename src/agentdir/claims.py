@@ -106,7 +106,7 @@ def recorded_claims(
     resolved = resolve_review_session(root, session_id)
     if rebuild:
         ensure_index(root)
-    rows = query_messages(root, session_id=resolved, limit=10_000)
+    rows = query_messages(root, session_id=resolved, event_type=CLAIM_EVENT_TYPE, limit=None)
     latest: dict[str, dict[str, Any]] = {}
     for row in rows:
         if row.get("event_type") != CLAIM_EVENT_TYPE:

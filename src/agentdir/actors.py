@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Iterable
 
 from .envelope import build_envelope, envelope_bytes
 from .mailbox import atomic_deliver
-from .redaction import redact_text
+from .redaction import redact_envelope_fields
 from .store import actor_mailbox
 
 
@@ -25,23 +26,25 @@ def send_message(
     session_id: str | None = None,
     task_id: str | None = None,
     message_id: str | None = None,
+    extra_headers: dict[str, str | Iterable[str]] | None = None,
+    redact: bool = True,
 ) -> tuple[Path, Path]:
     create_actor(root, from_actor)
     create_actor(root, to_actor)
-    redacted = redact_text(body)
-    extra_headers = {}
-    if redacted.replacements:
-        extra_headers["X-AgentDir-Redactions"] = str(redacted.replacements)
-        extra_headers["X-AgentDir-Redaction-Labels"] = ",".join(redacted.labels)
+    headers: dict[str, Any] = dict(extra_headers or {})
+    if redact:
+        body_text, subject_text = redact_envelope_fields(body, subject, headers)
+    else:
+        body_text, subject_text = body, subject
     msg = build_envelope(
         event_type=event_type,
-        body=redacted.text,
-        subject=subject,
+        body=body_text,
+        subject=subject_text,
         from_actor=from_actor,
         to_actor=to_actor,
         session_id=session_id,
         task_id=task_id,
-        extra_headers=extra_headers,
+        extra_headers=headers,
         message_id=message_id,
     )
     data = envelope_bytes(msg)

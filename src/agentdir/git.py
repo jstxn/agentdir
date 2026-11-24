@@ -30,6 +30,8 @@ def git_output(args: list[str], cwd: str | Path | None = None) -> str | None:
             ["git", *args],
             cwd=Path(cwd).expanduser().resolve() if cwd else None,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
@@ -37,7 +39,7 @@ def git_output(args: list[str], cwd: str | Path | None = None) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.strip()
+    return result.stdout.strip("\r\n")
 
 
 def git_root(cwd: str | Path | None = None) -> Path | None:
@@ -65,12 +67,6 @@ def git_common_root(cwd: str | Path | None = None) -> Path | None:
         # Bare repositories and unusual layouts have no enclosing working tree.
         return None
     return common.parent
-
-
-def is_linked_worktree(cwd: str | Path | None = None) -> bool:
-    root = git_root(cwd)
-    main = git_common_root(cwd)
-    return bool(root and main and root != main)
 
 
 def git_head(cwd: str | Path | None = None, *, short: bool = False) -> str | None:

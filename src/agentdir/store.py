@@ -16,7 +16,7 @@ SCOPE_CHOICES = ("project", "user", "global", "machine")
 WORKTREE_STORE_ENV = "AGENTDIR_WORKTREE_STORE"
 WORKTREE_STORE_MODES = ("shared", "local")
 
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}\Z")
 
 
 class AgentDirError(Exception):
@@ -210,7 +210,13 @@ def resolve_root(
 
 
 def validate_id(value: str, label: str = "id") -> str:
-    if not _ID_RE.match(value) or "/" in value or ":" in value or value.startswith("."):
+    if (
+        not isinstance(value, str)
+        or not _ID_RE.fullmatch(value)
+        or "/" in value
+        or ":" in value
+        or value.startswith(".")
+    ):
         raise AgentDirError(
             f"Invalid {label} {value!r}; use filesystem-safe letters, numbers, dot, underscore, at, plus, or dash"
         )
@@ -292,15 +298,6 @@ def actor_mailbox(root: str | Path, actor_id: str, box: str, create: bool = True
     if box not in {"inbox", "outbox"}:
         raise AgentDirError(f"Unknown actor mailbox {box!r}")
     mailbox = actor_dir(root, actor_id) / box / "Maildir"
-    if create:
-        ensure_mailbox(mailbox)
-    return mailbox
-
-
-def queue_mailbox(root: str | Path, queue_id: str, create: bool = True) -> Path:
-    paths = require_root(root)
-    validate_id(queue_id, "queue id")
-    mailbox = paths.queues / queue_id / "Maildir"
     if create:
         ensure_mailbox(mailbox)
     return mailbox

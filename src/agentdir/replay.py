@@ -7,14 +7,14 @@ from .index import rebuild_index
 from .query import query_messages
 
 
-def replay_session(root: str | Path, session_id: str) -> list[str]:
+def replay_session(root: str | Path, session_id: str, *, limit: int | None = None) -> list[str]:
     try:
-        rows = query_messages(root, session_id=session_id, limit=10_000)
+        rows = query_messages(root, session_id=session_id, limit=limit)
     except sqlite3.DatabaseError as exc:
         if not _looks_like_missing_index(exc):
             raise
         rebuild_index(root)
-        rows = query_messages(root, session_id=session_id, limit=10_000)
+        rows = query_messages(root, session_id=session_id, limit=limit)
     lines: list[str] = []
     for row in rows:
         date = row.get("date_header") or row.get("indexed_at") or "unknown-date"

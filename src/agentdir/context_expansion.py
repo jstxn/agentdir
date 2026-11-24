@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import stat
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -25,11 +26,22 @@ from .federation import (
 from .index import connect_index, update_index
 from .locking import lifecycle_lock
 from .mailbox import iter_records
-from .memory import build_memory_text, session_memory_summary
+from .memory import (
+    MEMORY_EXCLUDED_HEADER_NAMES,
+    build_memory_text,
+    session_memory_summary,
+)
 from .query import query_messages
 from .redaction import redact_text
 from .sessions import read_current_session, session_pointer_lock
-from .store import AgentDirError, AgentDirStateError, paths_for, require_root, validate_id
+from .store import (
+    AgentDirError,
+    AgentDirStateError,
+    RootPaths,
+    paths_for,
+    require_root,
+    validate_id,
+)
 
 CONTEXT_EXPANSION_PROTOCOL = "agentdir.context-view.v1"
 CONTEXT_EXPANSION_REPRESENTATION = "redacted-canonical-body.v1"
@@ -87,9 +99,7 @@ def expand_context_source(
         raise AgentDirError("Context expansion page size must be at least 4 bytes")
 
     paths = require_root(root)
-    update_index(paths.root)
-    initial_manifest = read_context_manifest(paths.root, pack_id, rebuild=False)
-    session_id = str(initial_manifest["session_id"])
+    session_id, pre_updated, before_snapshot = _lookup_pack_session(paths, pack_id)
 
     # Active-session ownership and receipt creation are one transaction. The
     # same locks also make an expansion either wholly before or wholly after a
@@ -97,7 +107,8 @@ def expand_context_source(
     with session_pointer_lock(paths.root):
         with lifecycle_lock(paths.root, f"session:{session_id}"):
             with lifecycle_lock(paths.root, f"pack:{pack_id}"):
-                update_index(paths.root)
+                if not pre_updated or _session_state_snapshot(paths, session_id) != before_snapshot:
+                    update_index(paths.root)
                 manifest = read_context_manifest(paths.root, pack_id, rebuild=False)
                 source, source_ref = _displayed_source(manifest, source_selector)
                 resolution = _resolve_source(paths.root, manifest, source)
@@ -181,6 +192,7 @@ def audit_context_expansion(
         for source in manifest.get("sources") or []
         if source.get("source_id")
     }
+    resolution_cache: dict[tuple[str, str | None], dict[str, Any]] = {}
     for event in events:
         payload, errors = _validate_receipt(
             root,
@@ -188,6 +200,7 @@ def audit_context_expansion(
             manifest,
             ref_by_id,
             source_by_id,
+            resolution_cache=resolution_cache,
         )
         validation_errors.extend(errors)
         if payload is not None and not errors:
@@ -489,6 +502,8 @@ def _resolve_envelope_candidates(
             parsed = parse_envelope(candidate)
         except (AgentDirError, OSError):
             continue
+        if validate_required(parsed):
+            continue
         if not _matches_source_metadata(parsed, source):
             continue
         body_sha = parsed.body_sha256
@@ -626,12 +641,16 @@ def _candidate_envelopes(
             validate_id(session_id, "session id")
         except AgentDirError:
             session_id = None
-    if session_id:
-        for mailbox in (
-            paths.sessions / session_id / "Maildir",
-            paths.archives / "sessions" / session_id / "Maildir",
-        ):
-            candidates.extend(record.path for record in iter_records(mailbox))
+        if session_id:
+            for mailbox in (
+                paths.sessions / session_id / "Maildir",
+                paths.archives / "sessions" / session_id / "Maildir",
+            ):
+                try:
+                    records = iter_records(mailbox)
+                except OSError:
+                    continue
+                candidates.extend(record.path for record in records)
 
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -646,30 +665,91 @@ def _candidate_envelopes(
     return deduped
 
 
+def _is_delivered_envelope_relative(relative: Path) -> bool:
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return False
+    filename = parts[-1]
+    if filename.startswith("."):
+        return False
+    try:
+        if len(parts) == 5 and parts[0] in {"sessions", "queues"}:
+            validate_id(parts[1], "mailbox id")
+            return parts[2] == "Maildir" and parts[3] in {"new", "cur"}
+        if len(parts) == 6 and parts[0] == "archives" and parts[1] == "sessions":
+            validate_id(parts[2], "session id")
+            return parts[3] == "Maildir" and parts[4] in {"new", "cur"}
+        if len(parts) == 6 and parts[0] == "actors":
+            validate_id(parts[1], "actor id")
+            return (
+                parts[2] in {"inbox", "outbox"}
+                and parts[3] == "Maildir"
+                and parts[4] in {"new", "cur"}
+            )
+    except AgentDirError:
+        return False
+    return False
+
+
 def _contained_relative_path(root: Path, value: Any) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
     relative = Path(value)
-    if relative.is_absolute():
+    if relative.is_absolute() or not _is_delivered_envelope_relative(relative):
         return None
-    candidate = (root / relative).resolve()
-    try:
-        candidate.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return candidate
+    return root.resolve() / relative
 
 
 def _contained_file(root: Path, candidate: Path) -> Path | None:
     try:
+        root_resolved = root.resolve(strict=True)
+    except OSError:
+        return None
+    try:
+        relative = candidate.relative_to(root_resolved)
+    except ValueError:
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            return None
+        candidate = root_resolved / relative
+    if not _is_delivered_envelope_relative(relative):
+        return None
+    current = root_resolved
+    for part in relative.parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return None
+        except OSError:
+            return None
+    try:
+        lstat_result = candidate.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(lstat_result.st_mode):
+        return None
+    try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root.resolve())
+        resolved_relative = resolved.relative_to(root_resolved)
     except (OSError, ValueError):
         return None
-    return resolved if resolved.is_file() else None
+    if resolved != candidate or not _is_delivered_envelope_relative(resolved_relative):
+        return None
+    return resolved
 
 
 def _matches_source_metadata(parsed: ParsedEnvelope, source: dict[str, Any]) -> bool:
+    if not (
+        _normalized_metadata(source.get("message_id"))
+        or _normalized_metadata(source.get("event_type"))
+    ):
+        return False
+    if not (
+        _normalized_metadata(parsed.message_id)
+        or _normalized_metadata(parsed.header("X-AgentDir-Event-Type"))
+    ):
+        return False
     checks = (
         ("message_id", parsed.message_id),
         ("session_id", parsed.header("X-AgentDir-Session")),
@@ -719,7 +799,10 @@ def _session_rows(root: Path, session_id: str) -> list[dict[str, Any]]:
         paths.sessions / session_id / "Maildir",
         paths.archives / "sessions" / session_id / "Maildir",
     ):
-        records.extend(iter_records(mailbox))
+        try:
+            records.extend(iter_records(mailbox))
+        except OSError:
+            continue
     rows: list[dict[str, Any]] = []
     for record in records:
         contained = _contained_file(paths.root, record.path)
@@ -731,12 +814,17 @@ def _session_rows(root: Path, session_id: str) -> list[dict[str, Any]]:
             continue
         if parsed.header("X-AgentDir-Session") != session_id:
             continue
+        excluded_by_header = any(
+            name.lower() in MEMORY_EXCLUDED_HEADER_NAMES
+            for name in parsed.message.keys()
+        )
         rows.append(
             {
                 "event_type": parsed.header("X-AgentDir-Event-Type"),
                 "tool": parsed.header("X-AgentDir-Tool"),
                 "tool_exit_code": _int_or_none(parsed.header("X-AgentDir-Tool-Exit-Code")),
                 "body_text": parsed.body_text,
+                "memory_excluded_by_header": excluded_by_header,
                 "_date": _date_key(parsed.header("Date")),
                 "_created_ns": _int_or_none(parsed.header("X-AgentDir-Created-Ns")) or 0,
                 "_path": str(contained),
@@ -1003,6 +1091,72 @@ def _view_id(payload: dict[str, str]) -> str:
     return "ctxview-" + hashlib.sha256(encoded).hexdigest()[:32]
 
 
+def _lookup_pack_session(
+    paths: RootPaths,
+    pack_id: str,
+) -> tuple[str, bool, Any]:
+    if paths.index_path.is_file():
+        try:
+            manifest = read_context_manifest(paths.root, pack_id, rebuild=False)
+            return str(manifest["session_id"]), False, None
+        except (AgentDirError, sqlite3.DatabaseError):
+            pass
+    update_index(paths.root)
+    initial_manifest = read_context_manifest(paths.root, pack_id, rebuild=False)
+    session_id = str(initial_manifest["session_id"])
+    return session_id, True, _session_state_snapshot(paths, session_id)
+
+
+def _session_state_snapshot(paths: RootPaths, session_id: str) -> tuple[Any, ...]:
+    def _dir_names(directory: Path) -> tuple[str, ...]:
+        try:
+            return tuple(sorted(entry.name for entry in directory.iterdir()))
+        except OSError:
+            return ()
+
+    try:
+        index_stat = paths.index_path.stat()
+        index_sig: tuple[int, int] | None = (index_stat.st_mtime_ns, index_stat.st_size)
+    except OSError:
+        index_sig = None
+
+    live = paths.sessions / session_id / "Maildir"
+    archived = paths.archives / "sessions" / session_id / "Maildir"
+    return (
+        _dir_names(live / "new"),
+        _dir_names(live / "cur"),
+        _dir_names(archived / "new"),
+        _dir_names(archived / "cur"),
+        index_sig,
+    )
+
+
+def _hydrate_header_values(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> None:
+    by_id: dict[int, dict[str, list[str]]] = {}
+    row_ids: list[int] = []
+    for row in rows:
+        mapped: dict[str, list[str]] = {}
+        row["header_values"] = mapped
+        row_id = row.get("id")
+        if isinstance(row_id, int):
+            by_id[row_id] = mapped
+            row_ids.append(row_id)
+    for start in range(0, len(row_ids), 500):
+        chunk = row_ids[start : start + 500]
+        marks = ",".join("?" for _ in chunk)
+        headers = conn.execute(
+            f"select message_rowid, name, value from headers where message_rowid in ({marks}) order by rowid",
+            chunk,
+        ).fetchall()
+        for header in headers:
+            mapped = by_id.get(int(header["message_rowid"]))
+            if mapped is not None:
+                mapped.setdefault(str(header["name"]), []).append(str(header["value"]))
+
+
 def _expansion_events(
     root: str | Path,
     pack_id: str,
@@ -1025,15 +1179,7 @@ def _expansion_events(
                     (EVENT_CONTEXT_SOURCES_EXPANDED, HEADER_VIEW_PACK_ID, pack_id),
                 ).fetchall()
             ]
-            for row in rows:
-                headers = conn.execute(
-                    "select name, value from headers where message_rowid = ? order by rowid",
-                    (row["id"],),
-                ).fetchall()
-                mapped: dict[str, list[str]] = {}
-                for header in headers:
-                    mapped.setdefault(str(header["name"]), []).append(str(header["value"]))
-                row["header_values"] = mapped
+            _hydrate_header_values(conn, rows)
         if session_id:
             rows.extend(_archived_expansion_events(root, pack_id, session_id))
         rows.sort(key=_event_order)
@@ -1048,15 +1194,15 @@ def _session_expansion_events(root: str | Path, session_id: str) -> list[dict[st
     except AgentDirError:
         return []
     sql = """
-        select distinct m.*
+        select m.*
         from messages m
         where m.mailbox_path = ?
           and (
             m.event_type = ?
-            or exists (
-              select 1 from headers hv
-              where hv.message_rowid = m.id
-                and lower(hv.name) in (lower(?), lower(?), lower(?))
+            or m.id in (
+              select hv.message_rowid
+              from headers hv
+              where lower(hv.name) in (lower(?), lower(?), lower(?))
             )
           )
         order by coalesce(m.date_utc, m.indexed_at), coalesce(m.created_ns, 0), m.file_path, m.id
@@ -1076,15 +1222,7 @@ def _session_expansion_events(root: str | Path, session_id: str) -> list[dict[st
                     ),
                 ).fetchall()
             ]
-            for row in rows:
-                headers = conn.execute(
-                    "select name, value from headers where message_rowid = ? order by rowid",
-                    (row["id"],),
-                ).fetchall()
-                mapped: dict[str, list[str]] = {}
-                for header in headers:
-                    mapped.setdefault(str(header["name"]), []).append(str(header["value"]))
-                row["header_values"] = mapped
+            _hydrate_header_values(conn, rows)
         rows.extend(_archived_expansion_events(root, None, session_id))
         deduped = {
             _event_identity(row): row
@@ -1107,7 +1245,11 @@ def _archived_expansion_events(
         return []
     rows: list[dict[str, Any]] = []
     mailbox = paths.archives / "sessions" / session_id / "Maildir"
-    for record in iter_records(mailbox):
+    try:
+        records = iter_records(mailbox)
+    except OSError:
+        return []
+    for record in records:
         contained = _contained_file(paths.root, record.path)
         if contained is None:
             continue
@@ -1158,6 +1300,8 @@ def _validate_receipt(
     manifest: dict[str, Any],
     ref_by_id: dict[str, str],
     source_by_id: dict[str, dict[str, Any]],
+    *,
+    resolution_cache: dict[tuple[str, str | None], dict[str, Any]] | None = None,
 ) -> tuple[dict[str, str] | None, list[str]]:
     values = _header_values(event)
     errors: list[str] = []
@@ -1319,7 +1463,13 @@ def _validate_receipt(
     if str(event.get("body_text") or "").strip() != expected_body.strip():
         errors.append(f"{_event_label(event)}: receipt body is not metadata-only canonical form")
     if source is not None and not errors:
-        resolution = _resolve_source(require_root(root).root, manifest, source)
+        cache_key = (source_id, _string_or_none(source.get("source_root_id")))
+        if resolution_cache is not None and cache_key in resolution_cache:
+            resolution = resolution_cache[cache_key]
+        else:
+            resolution = _resolve_source(require_root(root).root, manifest, source)
+            if resolution_cache is not None:
+                resolution_cache[cache_key] = resolution
         if resolution["integrity"] in CANONICAL_INTEGRITY_STATES:
             try:
                 expected_result = _delivery_result(

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .artifacts import add_artifact, artifact_headers
 from .envelope import build_envelope, envelope_bytes
 from .mailbox import atomic_deliver
-from .redaction import redact_text
+from .redaction import parse_redaction_count, redact_envelope_fields
 from .store import init_root, session_mailbox
 
 
@@ -36,18 +36,19 @@ def emit_event(
     artifact: str | Path | None = None,
     extra_headers: dict[str, str | Iterable[str]] | None = None,
     message_id: str | None = None,
+    redact: bool = True,
 ) -> EmittedEvent:
     init_root(root)
     stored_artifact = add_artifact(root, artifact) if artifact else None
-    redacted = redact_text(body)
-    headers = dict(extra_headers or {})
-    if redacted.replacements:
-        headers["X-AgentDir-Redactions"] = str(_redaction_count(headers) + redacted.replacements)
-        headers["X-AgentDir-Redaction-Labels"] = ",".join(redacted.labels)
+    headers: dict[str, Any] = dict(extra_headers or {})
+    if redact:
+        body_text, subject_text = redact_envelope_fields(body, subject, headers)
+    else:
+        body_text, subject_text = body, subject
     message = build_envelope(
         event_type=event_type,
-        body=redacted.text,
-        subject=subject,
+        body=body_text,
+        subject=subject_text,
         from_actor=from_actor,
         to_actor=to_actor,
         session_id=session_id,
@@ -66,7 +67,4 @@ def emit_event(
 
 
 def _redaction_count(headers: dict[str, str | Iterable[str]]) -> int:
-    try:
-        return int(str(headers.get("X-AgentDir-Redactions") or "0"))
-    except ValueError:
-        return 0
+    return parse_redaction_count(headers.get("X-AgentDir-Redactions"))

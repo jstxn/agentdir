@@ -7,10 +7,12 @@ import math
 import os
 import re
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .fsutil import atomic_write_text
 from .store import AgentDirError, require_root
 
 DEFAULT_VECTOR_DIM = 1024
@@ -107,6 +109,7 @@ def memory_schema_sql() -> str:
       indexed_at text not null
     );
     create index if not exists memory_documents_source_idx on memory_documents(source_kind, source_id);
+    create index if not exists memory_documents_message_idx on memory_documents(message_rowid);
     create index if not exists memory_documents_session_idx on memory_documents(session_id);
     create index if not exists memory_documents_event_type_idx on memory_documents(event_type);
     create table if not exists memory_passages (
@@ -129,6 +132,7 @@ def memory_schema_sql() -> str:
       text_sha256 text not null
     );
     create index if not exists memory_passages_document_idx on memory_passages(memory_document_id);
+    create index if not exists memory_passages_message_idx on memory_passages(message_rowid);
     create index if not exists memory_passages_source_idx on memory_passages(source_kind, source_id);
     create table if not exists memory_terms (
       term text not null,
@@ -676,10 +680,8 @@ def _search_memory_documents(
         sql += " where " + " and ".join(clauses)
     sql += " order by coalesce(md.date_utc, md.indexed_at), md.source_id"
 
-    paths = require_root(root)
     hits: list[dict[str, Any]] = []
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         for row in conn.execute(sql, params).fetchall():
             score = cosine_similarity(query_vector, deserialize_vector(row["vector_json"]))
             if row["source_kind"] == SOURCE_SESSION_SUMMARY:
@@ -720,8 +722,9 @@ def _search_memory_semantic(
     if not _module_available("fastembed"):
         raise AgentDirError("Semantic retrieval requires the optional semantic extra: fastembed")
 
+    model_name = embeddings.get("model") or DEFAULT_FASTEMBED_MODEL
     clauses: list[str] = []
-    params: list[Any] = []
+    params: list[Any] = [model_name]
     _append_memory_filters(
         clauses,
         params,
@@ -736,19 +739,47 @@ def _search_memory_semantic(
         until=until,
         source_id=source_id,
     )
-    sql = "select md.* from memory_documents md"
+    sql = """
+        select
+          md.id,
+          md.source_kind,
+          md.source_id,
+          md.message_rowid,
+          md.message_id,
+          md.session_id,
+          md.event_type,
+          md.subject,
+          md.from_actor,
+          md.to_actor,
+          md.task_id,
+          md.git_head,
+          md.workspace,
+          md.tool,
+          md.tool_exit_code,
+          md.date_header,
+          md.date_utc,
+          md.file_path,
+          md.body_text,
+          md.vector_dim,
+          md.text_sha256,
+          md.token_count,
+          md.indexed_at,
+          se.vector_json as cached_semantic_vector_json
+        from memory_documents md
+        left join semantic_embeddings se
+          on se.source_id = md.source_id
+         and se.model = ?
+         and se.text_sha256 = md.text_sha256
+    """
     if clauses:
         sql += " where " + " and ".join(clauses)
     sql += " order by coalesce(md.date_utc, md.indexed_at), md.source_id"
-    model_name = embeddings.get("model") or DEFAULT_FASTEMBED_MODEL
-    paths = require_root(root)
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
-        if not rows:
-            return []
-        query_vector = _fastembed_vectors(root, model_name, [query])[0]
-        document_vectors = _semantic_vectors_for_rows(root, conn, model_name, rows)
+    if not rows:
+        return []
+    query_vector = _fastembed_vectors(root, model_name, [query])[0]
+    document_vectors = _semantic_vectors_for_rows(root, None, model_name, rows)
 
     hits: list[dict[str, Any]] = []
     for row, vector in zip(rows, document_vectors, strict=True):
@@ -825,10 +856,8 @@ def _search_memory_hybrid(
     """
     params.append(candidate_limit)
 
-    paths = require_root(root)
     best_by_source: dict[str, dict[str, Any]] = {}
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         rows = conn.execute(sql, params).fetchall()
         for row in rows:
             vector_score = cosine_similarity(query_vector, deserialize_vector(row["passage_vector_json"]))
@@ -856,9 +885,7 @@ def _search_memory_hybrid(
 
 
 def memory_stats(root: str | Path) -> dict[str, Any]:
-    paths = require_root(root)
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         totals = conn.execute(
             """
             select
@@ -950,14 +977,11 @@ def memory_backend_status(root: str | Path) -> dict[str, Any]:
             {
                 "name": "sqlite-vec",
                 "kind": "optional-extra",
-                "enabled": bool(config.get("vector_backend") == "sqlite-vec" and sqlite_vec_available),
+                "enabled": False,
                 "dependencies": ["sqlite-vec"],
                 "available": sqlite_vec_available,
                 "configured": config.get("vector_backend") == "sqlite-vec",
-                "status": _optional_status(
-                    configured=config.get("vector_backend") == "sqlite-vec",
-                    available=sqlite_vec_available,
-                ),
+                "status": "not-implemented",
             },
             {
                 "name": "local-embeddings",
@@ -976,26 +1000,20 @@ def memory_backend_status(root: str | Path) -> dict[str, Any]:
             {
                 "name": "qdrant",
                 "kind": "optional-extra",
-                "enabled": bool(config.get("team_backend") == "qdrant" and _module_available("qdrant_client")),
+                "enabled": False,
                 "dependencies": ["qdrant client or service"],
                 "available": _module_available("qdrant_client"),
                 "configured": config.get("team_backend") == "qdrant",
-                "status": _optional_status(
-                    configured=config.get("team_backend") == "qdrant",
-                    available=_module_available("qdrant_client"),
-                ),
+                "status": "not-implemented",
             },
             {
                 "name": "lancedb",
                 "kind": "optional-extra",
-                "enabled": bool(config.get("team_backend") == "lancedb" and _module_available("lancedb")),
+                "enabled": False,
                 "dependencies": ["lancedb"],
                 "available": _module_available("lancedb"),
                 "configured": config.get("team_backend") == "lancedb",
-                "status": _optional_status(
-                    configured=config.get("team_backend") == "lancedb",
-                    available=_module_available("lancedb"),
-                ),
+                "status": "not-implemented",
             },
         ],
     }
@@ -1142,9 +1160,7 @@ def format_memory_explanation(explanation: dict[str, Any]) -> str:
 
 
 def recent_session_summaries(root: str | Path, *, limit: int = 5) -> list[dict[str, Any]]:
-    paths = require_root(root)
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         rows = conn.execute(
             """
             select *
@@ -1177,10 +1193,14 @@ def format_memory_hits(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _open_index(root: str | Path) -> closing[sqlite3.Connection]:
+    from .index import connect_index
+
+    return closing(connect_index(root))
+
+
 def _memory_document(root: str | Path, source_id: str) -> dict[str, Any]:
-    paths = require_root(root)
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _open_index(root) as conn:
         row = conn.execute("select * from memory_documents where source_id = ?", (source_id,)).fetchone()
     if row is None:
         raise AgentDirError(f"Unknown memory source: {source_id}")
@@ -1189,51 +1209,123 @@ def _memory_document(root: str | Path, source_id: str) -> dict[str, Any]:
 
 def _public_memory_row(row: dict[str, Any]) -> dict[str, Any]:
     row.pop("vector_json", None)
+    row.pop("cached_semantic_vector_json", None)
     return row
 
 
-def _semantic_vectors_for_rows(
+def _semantic_text_for_row(row: dict[str, Any]) -> str:
+    if row.get("source_kind") == SOURCE_SESSION_SUMMARY:
+        return (row.get("body_text") or "").strip()
+    return build_memory_text(
+        message_id=row.get("message_id"),
+        session_id=row.get("session_id"),
+        event_type=row.get("event_type"),
+        subject=row.get("subject"),
+        tool=row.get("tool"),
+        workspace=row.get("workspace"),
+        git_head=row.get("git_head"),
+        body_text=row.get("body_text"),
+    ).strip()
+
+
+def _load_cached_semantic_vectors(
     root: str | Path,
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     model_name: str,
     rows: list[dict[str, Any]],
-) -> list[list[float]]:
-    vectors: list[list[float] | None] = []
-    missing: list[dict[str, Any]] = []
-    for row in rows:
-        cached = conn.execute(
-            """
-            select vector_json
-            from semantic_embeddings
-            where source_id = ? and model = ? and text_sha256 = ?
-            """,
-            (row["source_id"], model_name, row["text_sha256"]),
-        ).fetchone()
-        if cached:
-            vectors.append(json.loads(cached["vector_json"]))
-        else:
-            vectors.append(None)
-            missing.append(row)
-    if missing:
-        embedded = _fastembed_vectors(root, model_name, [row["body_text"] for row in missing])
-        now = now_iso()
-        for row, vector in zip(missing, embedded, strict=True):
-            conn.execute(
+) -> dict[str, tuple[str, str]]:
+    source_ids = [str(row["source_id"]) for row in rows if row.get("source_id") is not None]
+    if not source_ids:
+        return {}
+
+    def query(active_conn: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+        cached: dict[str, tuple[str, str]] = {}
+        for start in range(0, len(source_ids), 500):
+            chunk = source_ids[start : start + 500]
+            marks = ",".join("?" for _ in chunk)
+            for found in active_conn.execute(
+                f"""
+                select source_id, text_sha256, vector_json
+                from semantic_embeddings
+                where model = ? and source_id in ({marks})
+                """,
+                (model_name, *chunk),
+            ).fetchall():
+                cached[str(found["source_id"])] = (
+                    str(found["text_sha256"]),
+                    str(found["vector_json"]),
+                )
+        return cached
+
+    if conn is not None:
+        return query(conn)
+    with _open_index(root) as read_conn:
+        return query(read_conn)
+
+
+def _persist_semantic_embeddings(
+    root: str | Path,
+    model_name: str,
+    rows: list[dict[str, Any]],
+    vectors: list[list[float]],
+) -> None:
+    from .index import connect_index, index_rebuild_lock
+
+    paths = require_root(root)
+    now = now_iso()
+    records = [
+        (
+            row["source_id"],
+            model_name,
+            row["text_sha256"],
+            len(vector),
+            json.dumps(vector),
+            now,
+        )
+        for row, vector in zip(rows, vectors, strict=True)
+    ]
+    with index_rebuild_lock(paths.indexes):
+        with closing(connect_index(paths.root)) as write_conn:
+            write_conn.executemany(
                 """
                 insert or replace into semantic_embeddings(
                   source_id, model, text_sha256, dimensions, vector_json, indexed_at
                 ) values (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    row["source_id"],
-                    model_name,
-                    row["text_sha256"],
-                    len(vector),
-                    json.dumps(vector),
-                    now,
-                ),
+                records,
             )
-        conn.commit()
+            write_conn.commit()
+
+
+def _semantic_vectors_for_rows(
+    root: str | Path,
+    conn: sqlite3.Connection | None,
+    model_name: str,
+    rows: list[dict[str, Any]],
+) -> list[list[float]]:
+    prejoined = all("cached_semantic_vector_json" in row for row in rows)
+    cached_by_source = (
+        {}
+        if prejoined
+        else _load_cached_semantic_vectors(root, conn, model_name, rows)
+    )
+    vectors: list[list[float] | None] = []
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        if prejoined:
+            cached_json = row.pop("cached_semantic_vector_json")
+        else:
+            entry = cached_by_source.get(str(row["source_id"]))
+            cached_json = entry[1] if entry is not None and entry[0] == row["text_sha256"] else None
+        if cached_json is not None:
+            vectors.append(json.loads(cached_json))
+        else:
+            vectors.append(None)
+            missing.append(row)
+    if missing:
+        texts = [_semantic_text_for_row(row) for row in missing]
+        embedded = _fastembed_vectors(root, model_name, texts)
+        _persist_semantic_embeddings(root, model_name, missing, embedded)
         iterator = iter(embedded)
         vectors = [next(iterator) if vector is None else vector for vector in vectors]
     return [vector for vector in vectors if vector is not None]
@@ -1423,40 +1515,6 @@ def _append_memory_filters(
         params.append(until)
 
 
-def _best_passage_for_document(
-    root: str | Path,
-    document_id: int,
-    query_vector: dict[int, float],
-) -> dict[str, Any]:
-    paths = require_root(root)
-    with sqlite3.connect(paths.index_path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            select id, ordinal, body_text, vector_json, text_sha256, token_count
-            from memory_passages
-            where memory_document_id = ?
-            order by ordinal
-            """,
-            (document_id,),
-        ).fetchall()
-    best: dict[str, Any] = {}
-    best_score = -1.0
-    for row in rows:
-        score = cosine_similarity(query_vector, deserialize_vector(row["vector_json"]))
-        if score > best_score:
-            best_score = score
-            best = {
-                "passage_id": row["id"],
-                "passage_ordinal": row["ordinal"],
-                "passage_body_text": row["body_text"],
-                "passage_text_sha256": row["text_sha256"],
-                "passage_token_count": row["token_count"],
-                "passage_score": round(score, 6),
-            }
-    return best
-
-
 def _hit_sort_key(row: dict[str, Any]) -> tuple[float, str, str]:
     # memory_score already includes SESSION_SUMMARY_PENALTY; sort on it as-is.
     return (
@@ -1499,7 +1557,7 @@ def _memory_config_path(root: str | Path) -> Path:
 def _write_memory_config(root: str | Path, config: dict[str, Any]) -> None:
     path = _memory_config_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(config, indent=2, sort_keys=True) + "\n")
 
 
 def _module_available(module: str) -> bool:

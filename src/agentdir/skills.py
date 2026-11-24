@@ -117,9 +117,8 @@ user when reporting evidence, blockers, or setup problems.
 - Emit important plans, blockers, diffs, review decisions, and final handoffs as immutable events.
 - Use `agentdir memory daemon status` to inspect warm indexing when repeated
   large-store or cross-repo work depends on fresh memory.
-- Use `agentdir memory embeddings configure fastembed` or
-  `agentdir memory backend configure sqlite-vec` only when optional semantic
-  extras are intentionally installed for this environment.
+- Use `agentdir memory embeddings configure fastembed` only when the optional
+  `semantic` extra is intentionally installed for this environment.
 - Use `agentdir index rebuild` if query, replay, memory, summarize, or evidence output looks stale.
 - Use `agentdir evidence --brief` before claiming tests or checks passed.
 
@@ -208,6 +207,46 @@ class InstalledSkill:
     skipped: str | None = None
 
 
+def _ensure_within_project(project: Path, destination: Path) -> None:
+    resolved_project = project.resolve(strict=False)
+    try:
+        relative = destination.relative_to(project)
+        base = project
+    except ValueError:
+        try:
+            relative = destination.relative_to(resolved_project)
+            base = resolved_project
+        except ValueError as exc:
+            raise AgentDirError(
+                f"Refusing to access path outside project root {resolved_project}: {destination}"
+            ) from exc
+
+    current = base
+    if current.is_symlink():
+        raise AgentDirError(f"Refusing to follow symlink at project root: {current}")
+    for part in relative.parts:
+        if part == "..":
+            raise AgentDirError(
+                f"Refusing to traverse parent directory outside project root {resolved_project}: {destination}"
+            )
+        current = current / part
+        if current.is_symlink():
+            raise AgentDirError(f"Refusing to follow symlink inside project: {current}")
+
+    resolved_destination = destination.resolve(strict=False)
+    if not resolved_destination.is_relative_to(resolved_project):
+        raise AgentDirError(
+            f"Refusing to access path outside project root {resolved_project}: {destination}"
+        )
+
+
+def _require_project_root(cwd: str | Path | None, message: str) -> Path:
+    project = git_root(cwd)
+    if project is None:
+        raise AgentDirDependencyError(message)
+    return project
+
+
 def install_codex_skill(
     root: str | Path,
     *,
@@ -216,6 +255,13 @@ def install_codex_skill(
     cwd: str | Path | None = None,
 ) -> InstalledSkill:
     destination = codex_skill_path(root, target=target, cwd=cwd)
+    project = (
+        _require_project_root(cwd, "Project skill target requires a git repository")
+        if target == "project"
+        else None
+    )
+    if project is not None:
+        _ensure_within_project(project, destination)
     updated = False
     backup_path: Path | None = None
     if destination.exists() and not force:
@@ -227,6 +273,8 @@ def install_codex_skill(
             if not is_agentdir_managed_skill(existing):
                 raise AgentDirError(f"Refusing to overwrite existing Codex skill: {destination}")
             backup_path = destination.with_suffix(destination.suffix + ".bak")
+            if project is not None:
+                _ensure_within_project(project, backup_path)
             backup_path.write_text(existing, encoding="utf-8")
             updated = True
         else:
@@ -250,6 +298,8 @@ def install_generic_guidance(
     updated = False
     backup_path: Path | None = None
     if target == "project":
+        project = _require_project_root(cwd, "Project generic guidance target requires a git repository")
+        _ensure_within_project(project, destination)
         existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
         if existing and not force:
             marker = generated_file_marker(existing)
@@ -259,6 +309,7 @@ def install_generic_guidance(
         updated = existing != updated_text
         if destination.exists() and updated and force:
             backup_path = destination.with_suffix(destination.suffix + ".bak")
+            _ensure_within_project(project, backup_path)
             backup_path.write_text(existing, encoding="utf-8")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(updated_text, encoding="utf-8")
@@ -287,7 +338,7 @@ def is_agentdir_managed_skill(text: str) -> bool:
 
 
 def is_agentdir_managed_generic(text: str) -> bool:
-    return GENERIC_GUIDANCE_START in text and GENERIC_GUIDANCE_END in text
+    return extract_managed_block(text, GENERIC_GUIDANCE_START, GENERIC_GUIDANCE_END) is not None
 
 
 def merge_generic_guidance(existing: str) -> str:
@@ -301,10 +352,10 @@ def codex_skill_path(root: str | Path, *, target: str, cwd: str | Path | None = 
         init_root(root)
         return paths_for(root).integrations / "codex" / "skills" / "agentdir" / "SKILL.md"
     if target == "project":
-        project = git_root(cwd)
-        if project is None:
-            raise AgentDirDependencyError("Project skill target requires a git repository")
-        return project / ".agents" / "skills" / "agentdir" / "SKILL.md"
+        project = _require_project_root(cwd, "Project skill target requires a git repository")
+        destination = project / ".agents" / "skills" / "agentdir" / "SKILL.md"
+        _ensure_within_project(project, destination)
+        return destination
     raise AgentDirError("Unknown Codex skill target; expected user, project, or store")
 
 
@@ -313,10 +364,10 @@ def generic_guidance_path(root: str | Path, *, target: str, cwd: str | Path | No
         init_root(root)
         return paths_for(root).integrations / "generic" / "AGENTS.md"
     if target == "project":
-        project = git_root(cwd)
-        if project is None:
-            raise AgentDirDependencyError("Project generic guidance target requires a git repository")
-        return project / "AGENTS.md"
+        project = _require_project_root(cwd, "Project generic guidance target requires a git repository")
+        destination = project / "AGENTS.md"
+        _ensure_within_project(project, destination)
+        return destination
     raise AgentDirError("Unknown generic guidance target; expected project or store")
 
 
@@ -418,14 +469,26 @@ def uninstall_integrations(
     cwd: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    project = (
+        _require_project_root(cwd, "Project integration target requires a git repository")
+        if target == "project"
+        else None
+    )
     for name in expand_integration_names(names or ["all"]):
         destination = integration_path(root, name, target=target, cwd=cwd, create=False)
+        if project is not None:
+            _ensure_within_project(project, destination)
         exists = destination.exists()
         existing = destination.read_text(encoding="utf-8", errors="ignore") if exists else ""
         managed = _integration_managed(name, existing)
+        marker = generated_file_marker(existing) if exists else None
         removed = False
         action = "none"
-        if exists and managed:
+        skipped: str | None = None
+        if exists and marker:
+            action = "skip-generated"
+            skipped = f"generated file ({marker})"
+        elif exists and managed:
             action = "remove"
             if apply:
                 if _can_merge_guidance(name, target):
@@ -440,17 +503,18 @@ def uninstall_integrations(
                     removed = True
         elif exists:
             action = "preserve-unmanaged"
-        results.append(
-            {
-                "name": name,
-                "target": target,
-                "path": str(destination),
-                "action": action,
-                "managed": managed,
-                "removed": removed,
-                "applied": apply,
-            }
-        )
+        entry: dict[str, Any] = {
+            "name": name,
+            "target": target,
+            "path": str(destination),
+            "action": action,
+            "managed": managed,
+            "removed": removed,
+            "applied": apply,
+        }
+        if skipped is not None:
+            entry["skipped"] = skipped
+        results.append(entry)
     return results
 
 
@@ -555,10 +619,10 @@ def integration_path(
             init_root(root)
         filename = _project_integration_relative_path(name).name
         return paths_for(root).integrations / name / filename
-    project = git_root(cwd)
-    if project is None:
-        raise AgentDirDependencyError("Project integration target requires a git repository")
-    return project / _project_integration_relative_path(name)
+    project = _require_project_root(cwd, "Project integration target requires a git repository")
+    destination = project / _project_integration_relative_path(name)
+    _ensure_within_project(project, destination)
+    return destination
 
 
 def integration_expected_text(name: str) -> str:
@@ -595,8 +659,8 @@ def merge_managed_block(existing: str, block: str, start: str, end: str) -> str:
     if not existing.strip():
         return block
     start_index = existing.find(start)
-    end_index = existing.find(end)
-    if start_index != -1 and end_index != -1 and end_index >= start_index:
+    end_index = existing.find(end, start_index + len(start)) if start_index != -1 else -1
+    if start_index != -1 and end_index != -1:
         end_index += len(end)
         return _join_guidance_sections(existing[:start_index], block, existing[end_index:])
     return _join_guidance_sections(existing, block, "")
@@ -609,8 +673,10 @@ def _join_guidance_sections(*sections: str) -> str:
 
 def remove_managed_block(existing: str, start: str, end: str) -> str:
     start_index = existing.find(start)
-    end_index = existing.find(end)
-    if start_index == -1 or end_index == -1 or end_index < start_index:
+    if start_index == -1:
+        return existing
+    end_index = existing.find(end, start_index + len(start))
+    if end_index == -1:
         return existing
     end_index += len(end)
     return existing[:start_index].rstrip() + "\n\n" + existing[end_index:].lstrip()
@@ -618,8 +684,10 @@ def remove_managed_block(existing: str, start: str, end: str) -> str:
 
 def extract_managed_block(existing: str, start: str, end: str) -> str | None:
     start_index = existing.find(start)
-    end_index = existing.find(end)
-    if start_index == -1 or end_index == -1 or end_index < start_index:
+    if start_index == -1:
+        return None
+    end_index = existing.find(end, start_index + len(start))
+    if end_index == -1:
         return None
     end_index += len(end)
     return existing[start_index:end_index].rstrip() + "\n"
@@ -630,7 +698,7 @@ def codex_skill_path_no_create(
     *,
     target: str,
     cwd: str | Path | None = None,
-    create: bool = True,
+    create: bool = False,
 ) -> Path:
     if create:
         return codex_skill_path(root, target=target, cwd=cwd)
@@ -639,10 +707,10 @@ def codex_skill_path_no_create(
     if target == "store":
         return paths_for(root).integrations / "codex" / "skills" / "agentdir" / "SKILL.md"
     if target == "project":
-        project = git_root(cwd)
-        if project is None:
-            raise AgentDirDependencyError("Project skill target requires a git repository")
-        return project / ".agents" / "skills" / "agentdir" / "SKILL.md"
+        project = _require_project_root(cwd, "Project skill target requires a git repository")
+        destination = project / ".agents" / "skills" / "agentdir" / "SKILL.md"
+        _ensure_within_project(project, destination)
+        return destination
     raise AgentDirError("Unknown Codex skill target; expected user, project, or store")
 
 
@@ -651,17 +719,17 @@ def generic_guidance_path_no_create(
     *,
     target: str,
     cwd: str | Path | None = None,
-    create: bool = True,
+    create: bool = False,
 ) -> Path:
     if create:
         return generic_guidance_path(root, target=target, cwd=cwd)
     if target == "store":
         return paths_for(root).integrations / "generic" / "AGENTS.md"
     if target == "project":
-        project = git_root(cwd)
-        if project is None:
-            raise AgentDirDependencyError("Project generic guidance target requires a git repository")
-        return project / "AGENTS.md"
+        project = _require_project_root(cwd, "Project generic guidance target requires a git repository")
+        destination = project / "AGENTS.md"
+        _ensure_within_project(project, destination)
+        return destination
     raise AgentDirError("Unknown generic guidance target; expected project or store")
 
 
@@ -674,6 +742,13 @@ def _install_guidance_integration(
     cwd: str | Path | None,
 ) -> dict[str, Any]:
     destination = integration_path(root, name, target=target, cwd=cwd)
+    project = (
+        _require_project_root(cwd, "Project integration target requires a git repository")
+        if target == "project"
+        else None
+    )
+    if project is not None:
+        _ensure_within_project(project, destination)
     expected = integration_expected_text(name)
     existing = destination.read_text(encoding="utf-8", errors="ignore") if destination.exists() else ""
     updated = existing != expected
@@ -694,6 +769,8 @@ def _install_guidance_integration(
         updated = existing != merged
         if destination.exists() and force and updated:
             backup_path = destination.with_suffix(destination.suffix + ".bak")
+            if project is not None:
+                _ensure_within_project(project, backup_path)
             backup_path.write_text(existing, encoding="utf-8")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(merged, encoding="utf-8")
@@ -708,6 +785,8 @@ def _install_guidance_integration(
         if not _integration_managed(name, existing) and not force:
             raise AgentDirError(f"Refusing to overwrite existing {name} integration: {destination}")
         backup_path = destination.with_suffix(destination.suffix + ".bak")
+        if project is not None:
+            _ensure_within_project(project, backup_path)
         backup_path.write_text(existing, encoding="utf-8")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(expected, encoding="utf-8")
@@ -758,8 +837,7 @@ def _integration_managed(name: str, text: str) -> bool:
         return is_agentdir_managed_generic(text)
     if name == "codex":
         return is_agentdir_managed_skill(text)
-    start, end = _integration_markers(name)
-    return start in text and end in text
+    return extract_managed_block(text, *_integration_markers(name)) is not None
 
 
 def _integration_markers(name: str) -> tuple[str, str]:

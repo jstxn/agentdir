@@ -7,9 +7,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .index import rebuild_index
+from .locking import lifecycle_lock
 from .mailbox import fsync_directory
-from .sessions import read_current_session
-from .store import AgentDirError, init_root, validate_id
+from .sessions import session_pointer_lock
+from .store import AgentDirError, AgentDirStateError, init_root, paths_for, validate_id
 
 SECONDS_PER_DAY = 24 * 60 * 60
 
@@ -59,8 +60,9 @@ def archive_sessions(
         keep_recent=keep_recent,
         command="archive",
     )
-    active_id = _active_session_id(paths.root)
-    candidates = _list_sessions(paths.sessions, store="sessions", active_session_id=active_id)
+    with session_pointer_lock(paths.root):
+        active_ids = _active_session_ids(paths.root)
+    candidates = _list_sessions(paths.sessions, store="sessions", active_session_ids=active_ids)
     selected, protected = _select_candidates(
         candidates,
         sessions=sessions,
@@ -70,6 +72,7 @@ def archive_sessions(
     _raise_on_exact_active("archive", sessions, protected)
 
     changed: list[str] = []
+    rebuilt = False
     if apply:
         target_root = paths.archives / "sessions"
         target_root.mkdir(parents=True, exist_ok=True)
@@ -79,17 +82,41 @@ def archive_sessions(
             if target.exists():
                 raise AgentDirError(f"archive target already exists: {target}")
             targets.append((candidate, target))
-        for candidate, target in targets:
-            source = Path(candidate.path)
-            source.rename(target)
-            fsync_directory(paths.sessions)
-            fsync_directory(target_root)
-            changed.append(f"{candidate.session_id}:sessions->archives")
-        rebuilt = bool(changed)
-        if rebuilt:
-            rebuild_index(paths.root)
-    else:
-        rebuilt = False
+        try:
+            for candidate, target in targets:
+                with session_pointer_lock(paths.root):
+                    with lifecycle_lock(paths.root, f"session:{candidate.session_id}"):
+                        current_active = _active_session_ids(paths.root)
+                        if candidate.session_id in current_active:
+                            if sessions:
+                                raise AgentDirError(
+                                    f"refusing to archive active session(s): {candidate.session_id}"
+                                )
+                            selected.remove(candidate)
+                            protected.append(
+                                RetentionCandidate(
+                                    session_id=candidate.session_id,
+                                    store=candidate.store,
+                                    path=candidate.path,
+                                    event_count=candidate.event_count,
+                                    latest_event_at=candidate.latest_event_at,
+                                    active=True,
+                                )
+                            )
+                            continue
+                        if target.exists():
+                            raise AgentDirError(f"archive target already exists: {target}")
+                        source = Path(candidate.path)
+                        if not source.exists():
+                            continue
+                        source.rename(target)
+                        fsync_directory(paths.sessions)
+                        fsync_directory(target_root)
+                        changed.append(f"{candidate.session_id}:sessions->archives")
+        finally:
+            if changed:
+                rebuild_index(paths.root)
+                rebuilt = True
 
     return RetentionResult(
         action="archive",
@@ -117,15 +144,16 @@ def prune_sessions(
         keep_recent=keep_recent,
         command="prune",
     )
-    active_id = _active_session_id(paths.root)
+    with session_pointer_lock(paths.root):
+        active_ids = _active_session_ids(paths.root)
     candidates = _list_sessions(
         paths.archives / "sessions",
         store="archives",
-        active_session_id=active_id,
+        active_session_ids=active_ids,
     )
     if include_live_sessions:
         candidates.extend(
-            _list_sessions(paths.sessions, store="sessions", active_session_id=active_id)
+            _list_sessions(paths.sessions, store="sessions", active_session_ids=active_ids)
         )
     selected, protected = _select_candidates(
         candidates,
@@ -137,15 +165,42 @@ def prune_sessions(
 
     changed: list[str] = []
     live_changed = False
+    rebuilt = False
     if apply:
-        for candidate in selected:
-            source = Path(candidate.path)
-            shutil.rmtree(source)
-            fsync_directory(source.parent)
-            changed.append(f"{candidate.session_id}:{candidate.store}->deleted")
-            live_changed = live_changed or candidate.store == "sessions"
-        if live_changed:
-            rebuild_index(paths.root)
+        try:
+            for candidate in list(selected):
+                with session_pointer_lock(paths.root):
+                    with lifecycle_lock(paths.root, f"session:{candidate.session_id}"):
+                        if candidate.store == "sessions":
+                            current_active = _active_session_ids(paths.root)
+                            if candidate.session_id in current_active:
+                                if sessions:
+                                    raise AgentDirError(
+                                        f"refusing to prune active session(s): {candidate.session_id}"
+                                    )
+                                selected.remove(candidate)
+                                protected.append(
+                                    RetentionCandidate(
+                                        session_id=candidate.session_id,
+                                        store=candidate.store,
+                                        path=candidate.path,
+                                        event_count=candidate.event_count,
+                                        latest_event_at=candidate.latest_event_at,
+                                        active=True,
+                                    )
+                                )
+                                continue
+                        source = Path(candidate.path)
+                        if not source.exists():
+                            continue
+                        shutil.rmtree(source)
+                        fsync_directory(source.parent)
+                        changed.append(f"{candidate.session_id}:{candidate.store}->deleted")
+                        live_changed = live_changed or candidate.store == "sessions"
+        finally:
+            if live_changed:
+                rebuild_index(paths.root)
+                rebuilt = True
 
     return RetentionResult(
         action="prune",
@@ -153,7 +208,7 @@ def prune_sessions(
         selected=selected,
         protected=protected,
         changed=changed,
-        rebuilt_index=apply and live_changed,
+        rebuilt_index=rebuilt,
     )
 
 
@@ -202,27 +257,57 @@ def _validate_selectors(
         raise AgentDirError("--keep-recent must be non-negative")
 
 
-def _active_session_id(root: Path) -> str | None:
-    # This guards retention from deleting the live session, so fail closed:
-    # an unreadable state file aborts the retention run instead of silently
-    # dropping the protection.
-    try:
-        state = read_current_session(root)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise AgentDirError(
-            f"Cannot determine the active session (corrupt state/current-session.json?): {exc}. "
-            "Fix or remove the state file before archiving or pruning."
-        ) from exc
-    if state and state.status == "active":
-        return state.session_id
-    return None
+def _active_session_ids(root: Path) -> set[str]:
+    # Guard retention from archiving or deleting any active session across all
+    # worktrees, failing closed if any pointer file cannot be parsed.
+    paths = paths_for(root)
+    pointers: list[Path] = []
+    legacy = paths.state / "current-session.json"
+    if legacy.exists() or legacy.is_symlink():
+        pointers.append(legacy)
+    workspaces_dir = paths.state / "workspaces"
+    if workspaces_dir.exists() or workspaces_dir.is_symlink():
+        try:
+            if not workspaces_dir.is_dir():
+                raise OSError(f"{workspaces_dir} is not a directory")
+            pointers.extend(sorted(workspaces_dir.glob("*/current-session.json")))
+        except OSError as exc:
+            raise AgentDirStateError(
+                f"Cannot determine active sessions (unreadable state/workspaces): {exc}. "
+                "Fix the state directory before archiving or pruning."
+            ) from exc
+
+    active_ids: set[str] = set()
+    for pointer in pointers:
+        label = pointer.relative_to(paths.root)
+        try:
+            payload = json.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise AgentDirStateError(
+                f"Cannot determine active sessions (corrupt {label}?): {exc}. "
+                "Fix or remove the state file before archiving or pruning."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise AgentDirStateError(
+                f"Cannot determine active sessions (corrupt {label}?): expected a JSON object. "
+                "Fix or remove the state file before archiving or pruning."
+            )
+        if payload.get("status", "active") == "active":
+            session_id = payload.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise AgentDirStateError(
+                    f"Cannot determine active sessions (corrupt {label}?): missing session_id. "
+                    "Fix or remove the state file before archiving or pruning."
+                )
+            active_ids.add(session_id)
+    return active_ids
 
 
 def _list_sessions(
     directory: Path,
     *,
     store: str,
-    active_session_id: str | None,
+    active_session_ids: set[str],
 ) -> list[RetentionCandidate]:
     if not directory.is_dir():
         return []
@@ -246,7 +331,7 @@ def _list_sessions(
                 path=str(session_dir),
                 event_count=len(event_paths),
                 latest_event_at=latest_event_at,
-                active=session_dir.name == active_session_id and store == "sessions",
+                active=session_dir.name in active_session_ids and store == "sessions",
             )
         )
     return candidates

@@ -12,12 +12,13 @@ from .doctor import run_doctor
 from .git import git_status_short
 from .review import (
     EVIDENCE_FAMILIES,
+    classify_evidence,
     evidence_failure_state,
     evidence_rows,
     evidence_truncated,
     summarize_session,
 )
-from .sessions import read_current_session
+from .sessions import read_session_state, session_git_cwd
 from .store import AgentDirError
 
 CHECK_PASS = "pass"
@@ -38,14 +39,6 @@ CLAIM_UNREVIEWED = "unreviewed"
 # is not a problem: the success patterns only know one polarity, so without this
 # an honest failure report would be flagged exactly like a text that hid one.
 CLAIM_ACKNOWLEDGED = "acknowledged"
-CLAIM_STATUSES = (
-    CLAIM_SUPPORTED,
-    CLAIM_PARTIAL,
-    CLAIM_UNSUPPORTED,
-    CLAIM_CONTRADICTED,
-    CLAIM_UNREVIEWED,
-    CLAIM_ACKNOWLEDGED,
-)
 CLAIM_PROBLEM_STATUSES = (CLAIM_UNSUPPORTED, CLAIM_CONTRADICTED, CLAIM_UNREVIEWED)
 
 CLAIM_FAMILIES = tuple(family for family in EVIDENCE_FAMILIES if family != "diagnostic")
@@ -74,19 +67,56 @@ CLAIM_PATTERNS = {
     ),
 }
 
-NEGATED_CLAIM_RE = re.compile(r"\b(not run|did not run|didn't run|was not run|wasn't run|without running)\b", re.I)
-
-FAILURE_WORDS_RE = re.compile(
-    r"\b(fail|fails|failed|failing|failure|failures|broken|breaking|error|errors|"
-    r"red|regressed|regression|regressions|does not pass|did not pass|not passing)\b",
+CLAUSE_SPLIT_RE = re.compile(
+    r"[.\n;,]+|\b(?:but|while|however|although|though|whereas|yet)\b",
     re.I,
 )
 
+NEGATED_CLAIM_RE = re.compile(
+    r"\b(not run|did not run|didn't run|was not run|wasn't run|were not run|weren't run|"
+    r"haven't run|hasn't run|without running)\b",
+    re.I,
+)
+
+NEGATED_PASS_RE = re.compile(
+    r"\b("
+    r"(?:did|do|does|has|have|had|will|would|could|should|can)\s+not\s+(?:pass\w*|succeed\w*|complete\w*)|"
+    r"(?:didn't|don't|doesn't|hasn't|haven't|hadn't|won't|wouldn't|couldn't|shouldn't|can't|cannot)\s+(?:pass\w*|succeed\w*|complete\w*)|"
+    r"not\s+(?:pass\w*|green|clean|ok|healthy|succeed\w*|successful|completed)|"
+    r"(?:isn't|aren't|wasn't|weren't)\s+(?:pass\w*|green|clean|ok|healthy|succeed\w*|successful|completed)|"
+    r"never\s+(?:pass\w*|succeed\w*|completed)|"
+    r"failed\s+to\s+(?:pass\w*|succeed\w*|complete\w*|build|lint|typecheck|release|deploy|publish)"
+    r")\b",
+    re.I,
+)
+
+FAILURE_WORDS_RE = re.compile(
+    r"\b(fail|fails|failed|failing|failure|failures|broken|breaking|error|errors|"
+    r"red|regressed|regression|regressions|does not pass|did not pass|not passing|"
+    r"never passed|failed to pass)\b",
+    re.I,
+)
+
+_NEGATED_FAILURE_MODIFIERS = (
+    r"(?:(?:any|more|further|remaining|new|known|other|observed|recorded|reported|"
+    r"detected|actual|active|open|unresolved|outstanding|unit|integration|e2e|"
+    r"suite|check|checks|code|syntax|runtime|compile|compilation|type|"
+    r"test|tests|pytest|vitest|jest|mocha|unittest|"
+    r"lint|eslint|ruff|flake8|"
+    r"typecheck|type-check|tsc|mypy|pyright|"
+    r"build|doctor|release|deploy|deployment|publish)\s+){0,4}"
+)
+_FAILURE_STEM = r"(?:fail\w*|error\w*|broken|regress\w*|red)"
+
 # "no test failures", "tests are not failing": failure vocabulary asserting
-# success. These are success claims, not acknowledgements of a failure.
+# success. Keep the gap bounded to noun modifiers or direct adverbial negation
+# so phrases like "I did not fix the test failure." remain failure reports.
 NEGATED_FAILURE_RE = re.compile(
-    r"\b(no|not|never|zero|without|free of)\b[^.\n]{0,30}?"
-    r"\b(fail\w*|error\w*|broken|regress\w*|red)\b",
+    rf"\b(?:no|zero|without|free\s+of)\s+{_NEGATED_FAILURE_MODIFIERS}{_FAILURE_STEM}\b"
+    rf"|\b(?:not|never|no\s+longer|aren't|isn't|wasn't|weren't|don't|doesn't|didn't|"
+    rf"haven't|hasn't|hadn't|won't|cannot|can't)\s+"
+    rf"(?:(?:at\s+all|currently|actively|still|actually|really|ever|being|been|be)\s+){{0,2}}"
+    rf"{_FAILURE_STEM}\b",
     re.I,
 )
 
@@ -139,8 +169,8 @@ def audit_session(
                 "receipts_valid": False,
                 "validation_errors": [str(exc)],
             }
-    current = read_current_session(root)
-    is_current = bool(current and current.session_id == resolved and current.status == "active")
+    state = read_session_state(root, resolved)
+    is_current = bool(state and state.status == "active")
     failure_state = evidence_failure_state(evidence)
     failed_evidence = failure_state["unresolved"]
     resolved_failed_evidence = failure_state["resolved"]
@@ -149,7 +179,8 @@ def audit_session(
         for row in evidence
         if (row.get("truncated") if "truncated" in row else evidence_truncated(row))
     ]
-    dirty_status = git_status_short(root)
+    git_cwd = session_git_cwd(root, state) if state is not None else None
+    dirty_status = git_status_short(git_cwd or root)
     checks = [
         _check(
             "session_started",
@@ -279,9 +310,10 @@ def audit_recorded_claims(
 
     claimed_families = [claim["family"] for claim in recorded]
     claims.extend(_unclaimed_failures(tool_results, claimed_families, set(), source="recorded"))
+    failing_statuses = {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES} if strict else CLAIM_PROBLEM_STATUSES
     return {
         "session_id": resolved,
-        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
+        "ok": not any(claim["status"] in failing_statuses for claim in claims),
         "strict": strict,
         "source": "recorded",
         "claims_detected": len(recorded),
@@ -335,9 +367,10 @@ def audit_claims(
             }
         )
     claims.extend(_unclaimed_failures(tool_results, detected, _detect_acknowledged_families(text)))
+    failing_statuses = {CLAIM_PARTIAL, *CLAIM_PROBLEM_STATUSES} if strict else CLAIM_PROBLEM_STATUSES
     return {
         "session_id": resolved,
-        "ok": not any(claim["status"] in CLAIM_PROBLEM_STATUSES for claim in claims),
+        "ok": not any(claim["status"] in failing_statuses for claim in claims),
         "strict": strict,
         "source": "text",
         "claims_detected": len(detected),
@@ -353,15 +386,21 @@ def _detect_acknowledged_families(text: str) -> set[str]:
     exactly like text that hid the failure.
     """
     families: set[str] = set()
-    for sentence in re.split(r"[.\n]", text):
-        if not (FAILURE_WORDS_RE.search(sentence) or NEGATED_CLAIM_RE.search(sentence)):
+    for clause in _split_clauses(text):
+        if NEGATED_CLAIM_RE.search(clause):
+            for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+                if pattern.search(clause):
+                    families.add(family)
+            continue
+        has_negated_pass = bool(NEGATED_PASS_RE.search(clause))
+        if not (FAILURE_WORDS_RE.search(clause) or has_negated_pass):
             continue
         # "no test failures" uses failure words to assert success; that is a
         # claim to check, not an acknowledgement.
-        if NEGATED_FAILURE_RE.search(sentence):
+        if NEGATED_FAILURE_RE.search(clause) and not has_negated_pass:
             continue
         for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
-            if pattern.search(sentence):
+            if pattern.search(clause):
                 families.add(family)
     return families
 
@@ -668,38 +707,31 @@ def _safe_context_audit(root: str | Path, latest_pack: dict[str, Any] | None | o
         return {"error": str(exc), "pack_id": pack_id}
 
 
+def _split_clauses(text: str) -> list[str]:
+    return [clause.strip() for clause in CLAUSE_SPLIT_RE.split(text) if clause.strip()]
+
+
 def _detect_claim_families(text: str) -> list[str]:
-    families: list[str] = []
-    negated_failure = _families_in_sentences(text, NEGATED_FAILURE_RE)
-    for family in CLAIM_FAMILIES:
-        pattern = CLAIM_PATTERNS[family]
-        matched = False
-        for match in pattern.finditer(text):
-            window = text[max(0, match.start() - 40): match.end() + 40]
-            if NEGATED_CLAIM_RE.search(window):
-                continue
-            families.append(family)
-            matched = True
-            break
-        if not matched and family in negated_failure:
-            families.append(family)
-    return families
-
-
-def _families_in_sentences(text: str, trigger: re.Pattern[str]) -> set[str]:
-    families: set[str] = set()
-    for sentence in re.split(r"[.\n]", text):
-        if not trigger.search(sentence):
+    detected: set[str] = set()
+    for clause in _split_clauses(text):
+        if NEGATED_CLAIM_RE.search(clause) or NEGATED_PASS_RE.search(clause):
             continue
-        for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
-            if pattern.search(sentence):
-                families.add(family)
-    return families
+        negated_failure = bool(NEGATED_FAILURE_RE.search(clause))
+        if negated_failure:
+            for family, pattern in FAMILY_KEYWORD_PATTERNS.items():
+                if pattern.search(clause):
+                    detected.add(family)
+        if FAILURE_WORDS_RE.search(clause) and not negated_failure:
+            continue
+        for family in CLAIM_FAMILIES:
+            if CLAIM_PATTERNS[family].search(clause):
+                detected.add(family)
+    return [family for family in CLAIM_FAMILIES if family in detected]
 
 
 def _latest_classified_tool_result(rows: list[dict[str, Any]], family: str) -> dict[str, Any] | None:
     for row in reversed(rows):
-        if row.get("family") == family:
+        if (row.get("family") or classify_evidence(row)) == family:
             return row
     return None
 
@@ -708,10 +740,15 @@ def _latest_relevant_tool_result(rows: list[dict[str, Any]], family: str) -> dic
     classified = _latest_classified_tool_result(rows, family)
     if classified is not None:
         return classified
-    keywords = CLAIM_KEYWORDS[family]
+    pattern = FAMILY_KEYWORD_PATTERNS[family]
     for row in reversed(rows):
+        row_family = row.get("family") or classify_evidence(row)
+        if row_family != "diagnostic":
+            continue
+        if row.get("tool_exit_code") in (None, 0):
+            continue
         haystack = _tool_result_search_text(row)
-        if any(keyword in haystack for keyword in keywords):
+        if pattern.search(haystack):
             return row
     return None
 

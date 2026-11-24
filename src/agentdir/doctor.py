@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -14,7 +15,7 @@ from .hooks import hooks_manifest_issues
 from .mailbox import iter_records
 from .redaction import looks_secret_bearing
 from .secrets import scan_secret_records
-from .store import CONFIG_DIR, discover_mailboxes, require_root
+from .store import CONFIG_DIR, AgentDirError, discover_mailboxes, require_root
 
 
 _CONTEXT_EXPANSION_EVENT = "context.sources.expanded"
@@ -56,10 +57,14 @@ def run_doctor(root: str | Path) -> DoctorReport:
 
     seen: dict[str, list[tuple[str, str]]] = defaultdict(list)
     verified_artifacts: set[str] = set()
-    for _kind, mailbox in discover_mailboxes(root):
+    parsed_by_path: dict[Path, ParsedEnvelope] = {}
+    blobs_root = (paths.artifacts / "blobs" / "sha256").resolve()
+    mailboxes = discover_mailboxes(paths.root)
+    for _kind, mailbox in mailboxes:
         for record in iter_records(mailbox):
             try:
                 parsed = parse_envelope(record.path)
+                parsed_by_path[record.path] = parsed
                 missing = validate_required(parsed)
                 if missing:
                     message = f"{record.path}: missing headers {', '.join(missing)}"
@@ -75,12 +80,33 @@ def run_doctor(root: str | Path) -> DoctorReport:
                 if parsed.message_id:
                     seen[parsed.message_id].append((relative_path, parsed.body_sha256))
                 for sha in parsed.headers("X-AgentDir-Blob-SHA256"):
-                    blob = artifact_path(root, sha)
+                    try:
+                        blob = artifact_path(paths.root, sha)
+                    except AgentDirError as exc:
+                        report.add_error(f"{record.path}: invalid artifact blob {sha}: {exc}")
+                        continue
+                    if blob.is_symlink():
+                        report.add_error(f"{record.path}: artifact blob is a symlink {sha}")
+                        continue
                     if not blob.exists():
                         report.add_error(f"{record.path}: missing artifact blob {sha}")
-                    elif sha not in verified_artifacts:
+                        continue
+                    if not blob.is_file():
+                        report.add_error(
+                            f"{record.path}: artifact blob is not a regular file {sha}"
+                        )
+                        continue
+                    try:
+                        resolved_blob = blob.resolve()
+                        resolved_blob.relative_to(blobs_root)
+                    except (OSError, ValueError):
+                        report.add_error(
+                            f"{record.path}: artifact blob escapes artifact store {sha}"
+                        )
+                        continue
+                    if sha not in verified_artifacts:
                         try:
-                            actual_sha = hashlib.sha256(blob.read_bytes()).hexdigest()
+                            actual_sha = _sha256_file(resolved_blob)
                         except OSError as exc:
                             report.add_error(f"{record.path}: unreadable artifact blob {sha}: {exc}")
                         else:
@@ -101,7 +127,14 @@ def run_doctor(root: str | Path) -> DoctorReport:
             else:
                 report.add_error(f"conflicting duplicate Message-ID {message_id}: {json.dumps(files)}")
 
-    for tmp in paths.root.glob("**/Maildir/tmp/*"):
+    tmp_candidates: list[Path] = []
+    for _kind, mailbox in mailboxes:
+        tmp_dir = mailbox / "tmp"
+        if tmp_dir.is_dir():
+            tmp_candidates.extend(sorted(tmp_dir.iterdir()))
+    if paths.archives.is_dir():
+        tmp_candidates.extend(sorted(paths.archives.glob("sessions/*/Maildir/tmp/*")))
+    for tmp in tmp_candidates:
         if tmp.is_file():
             report.add_warning(f"incomplete tmp record ignored: {tmp.relative_to(paths.root)}")
     try:
@@ -113,7 +146,10 @@ def run_doctor(root: str | Path) -> DoctorReport:
     split = _split_worktree_store(paths.root)
     if split is not None:
         report.add_warning(split)
-    secret_findings = scan_secret_records(paths.root)
+    try:
+        secret_findings = scan_secret_records(paths.root, parsed_by_path)
+    except TypeError:
+        secret_findings = scan_secret_records(paths.root)
     for finding in secret_findings:
         labels = ",".join(finding.labels)
         report.add_error(
@@ -159,11 +195,19 @@ def _split_worktree_store(root: Path) -> str | None:
             return None
         return (
             f"worktree store {root} is separate from the main working tree store {main_store}; "
-            f"memory and evidence stay split. Run 'agentdir roots add {main_store}' to search both, "
+            f"memory and evidence stay split. Run 'agentdir roots register {main_store}' to search both, "
             f"or remove this store to share the main one."
         )
     except OSError:
         return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _index_unfolded_headers(index_path: Path) -> int:
@@ -176,7 +220,7 @@ def _index_unfolded_headers(index_path: Path) -> int:
     if not index_path.is_file():
         return 0
     try:
-        with sqlite3.connect(index_path) as conn:
+        with contextlib.closing(sqlite3.connect(index_path)) as conn:
             if not _table_exists(conn, "headers"):
                 return 0
             return sum(
@@ -193,16 +237,23 @@ def _index_secret_findings(index_path: Path) -> list[str]:
         return []
     findings: list[str] = []
     tables = (
-        ("messages", "id", "body_text"),
-        ("memory_documents", "id", "body_text"),
+        ("messages", "id", ("body_text", "subject")),
+        ("headers", "message_rowid", ("value",)),
+        ("memory_documents", "id", ("body_text",)),
     )
     try:
-        with sqlite3.connect(index_path) as conn:
-            for table, id_column, body_column in tables:
+        with contextlib.closing(sqlite3.connect(index_path)) as conn:
+            for table, id_column, columns in tables:
                 if not _table_exists(conn, table):
                     continue
-                for row_id, body_text in conn.execute(f"select {id_column}, {body_column} from {table}"):
-                    if looks_secret_bearing(body_text or ""):
+                existing_columns = _table_columns(conn, table)
+                scan_columns = [col for col in columns if col in existing_columns]
+                if id_column not in existing_columns or not scan_columns:
+                    continue
+                column_sql = ", ".join(scan_columns)
+                for row in conn.execute(f"select {id_column}, {column_sql} from {table}"):
+                    row_id = row[0]
+                    if any(looks_secret_bearing(value or "") for value in row[1:]):
                         findings.append(f"{table}.{id_column}={row_id}")
                         break
     except sqlite3.DatabaseError as exc:
@@ -213,3 +264,7 @@ def _index_secret_findings(index_path: Path) -> list[str]:
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute("select 1 from sqlite_master where type = 'table' and name = ?", (table,)).fetchone()
     return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"pragma table_info({table})")}
